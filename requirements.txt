@@ -1,3 +1,6 @@
-discord.py
+﻿discord.py[voice]
+discord-ext-voice-recv
 google-genai
-python-dotenv
+numpy
+pydantic
+aiohttp

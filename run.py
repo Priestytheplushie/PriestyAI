@@ -2,6 +2,7 @@
 import logging
 from dotenv import load_dotenv
 from core.bot import FriendBot
+from google import genai
 
 logging.basicConfig(
     level=logging.INFO,

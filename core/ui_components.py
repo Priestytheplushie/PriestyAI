@@ -118,3 +118,61 @@ class DynamicView(discord.ui.View):
             await self._handle_interaction(interaction, f"{interaction.user.display_name} selected '{select.values[0]}' from dropdown")
         select.callback = select_callback
         self.add_item(select)
+
+    def add_rerun_pagination(self, bot_instance, message_id: int):
+        versions = bot_instance.rerun_cache.get(message_id, [])
+        current_idx = bot_instance.rerun_indexes.get(message_id, 0)
+        total_versions = len(versions)
+
+        prev_btn = discord.ui.Button(
+            style=discord.ButtonStyle.secondary,
+            label="◀",
+            disabled=(current_idx <= 0),
+            row=4
+        )
+        async def prev_callback(interaction: discord.Interaction):
+            bot_instance.rerun_indexes[message_id] -= 1
+            await self._show_version(interaction, bot_instance, message_id)
+        prev_btn.callback = prev_callback
+        self.add_item(prev_btn)
+
+        indicator_btn = discord.ui.Button(
+            style=discord.ButtonStyle.secondary,
+            label=f"{current_idx + 1} / {total_versions}",
+            disabled=True,
+            row=4
+        )
+        self.add_item(indicator_btn)
+
+        next_btn = discord.ui.Button(
+            style=discord.ButtonStyle.secondary,
+            label="▶",
+            disabled=(current_idx >= total_versions - 1),
+            row=4
+        )
+        async def next_callback(interaction: discord.Interaction):
+            bot_instance.rerun_indexes[message_id] += 1
+            await self._show_version(interaction, bot_instance, message_id)
+        next_btn.callback = next_callback
+        self.add_item(next_btn)
+
+    async def _show_version(self, interaction: discord.Interaction, bot_instance, message_id: int):
+        versions = bot_instance.rerun_cache.get(message_id, [])
+        current_idx = bot_instance.rerun_indexes.get(message_id, 0)
+        total_versions = len(versions)
+
+        if 0 <= current_idx < total_versions:
+            version_data = versions[current_idx]
+            new_content = version_data["content"]
+            attachments = version_data["attachments"]
+
+            for child in self.children:
+                if isinstance(child, discord.ui.Button):
+                    if child.label == "◀":
+                        child.disabled = (current_idx <= 0)
+                    elif " / " in child.label:
+                        child.label = f"{current_idx + 1} / {total_versions}"
+                    elif child.label == "▶":
+                        child.disabled = (current_idx >= total_versions - 1)
+
+            await interaction.response.edit_message(content=new_content, view=self, attachments=attachments)

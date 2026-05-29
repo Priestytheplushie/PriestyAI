@@ -1,7 +1,10 @@
 ﻿import discord
 import io
+import logging
 from collections import deque
 from datetime import datetime, timezone
+
+logger = logging.getLogger("Memory")
 
 class ChatHistoryTracker:
     def __init__(self, limit: int = 30):
@@ -71,12 +74,104 @@ async def get_or_create_channel(guild: discord.Guild, category_name: str, channe
         channel = await guild.create_text_channel(channel_name, category=category)
     return channel
 
+
+def should_preserve_message(message: discord.Message) -> bool:
+    """Heuristic helper to ensure images/attachments are never consolidated or deleted."""
+    if message.attachments:
+        return True
+    
+    content = message.content
+    if content.startswith("**Image Upload:") or content.startswith("**AI Generated Image Saved:"):
+        return True
+    if "http" in content and (".png" in content or ".jpg" in content or "discordapp" in content):
+        return True
+    return False
+
+
+async def consolidate_memories_if_needed(client: discord.Client, brain_server_id: int, category_name: str, channel_name: str, threshold: int = 25):
+    """Checks memory channel length and uses Gemini to consolidate raw facts when exceeding threshold."""
+    guild = client.get_guild(brain_server_id)
+    if not guild:
+        return
+        
+    category = discord.utils.get(guild.categories, name=category_name)
+    if not category:
+        return
+        
+    channel = discord.utils.get(category.text_channels, name=channel_name)
+    if not channel:
+        return
+
+    messages = []
+    async for msg in channel.history(limit=100):
+        messages.append(msg)
+
+    text_memories = [m for m in messages if not should_preserve_message(m)]
+    
+    if len(text_memories) < threshold:
+        return
+
+    logger.info(f"Triggering memory consolidation for #{channel_name} (found {len(text_memories)} text facts)")
+
+    text_memories.reverse()
+    raw_facts = [msg.content for msg in text_memories if msg.content.strip()]
+    
+    if not raw_facts:
+        return
+
+    facts_input = "\n".join(raw_facts)
+
+    prompt = (
+        "You are an active memory consolidation assistant for a Discord companion bot.\n"
+        "Your task is to review the following chronological list of saved memories, facts, and observations "
+        "about a user or server, and consolidate them into a clean, summarized list.\n\n"
+        "Rules:\n"
+        "1. Eliminate exact or semantic duplicates.\n"
+        "2. Resolve any direct contradictions by prioritizing information that appears later (as it is more recent).\n"
+        "3. Remove highly temporary, trivial, or fleeting notes that no longer have long-term value.\n"
+        "4. Output the consolidated facts as concise, individual lines of text.\n"
+        "5. Do NOT write any conversational intro, outro, headers, or markdown bullet points (like * or -). "
+        "Just output each consolidated fact as a plain line of text.\n\n"
+        f"Raw Memories to Consolidate:\n{facts_input}"
+    )
+
+    try:
+        response = await client.chat_handler.client.aio.models.generate_content(
+            model=client.text_model,
+            contents=prompt
+        )
+
+        consolidated_text = ""
+        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+            consolidated_text = "".join(
+                part.text for part in response.candidates[0].content.parts if getattr(part, 'text', None)
+            )
+
+        if not consolidated_text.strip():
+            logger.warning("Consolidation prompt returned empty results. Aborting rewrite to prevent loss.")
+            return
+
+        await channel.purge(limit=100, check=lambda m: not should_preserve_message(m))
+
+        lines = [line.strip().lstrip("*-• ").strip() for line in consolidated_text.split("\n") if line.strip()]
+        for line in lines:
+            if line:
+                await channel.send(line)
+        
+        logger.info(f"Memory consolidation completed successfully for #{channel_name}")
+
+    except Exception as e:
+        logger.error(f"Failed to consolidate memories for #{channel_name}: {e}")
+
+
 async def save_fact(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, fact: str) -> bool:
     guild = client.get_guild(brain_server_id)
     if not guild: return False
     channel_name = f"{user.name}-memory".lower().replace(" ", "-")
     channel = await get_or_create_channel(guild, "🧠 User Memories", channel_name)
     await channel.send(fact)
+    
+    await consolidate_memories_if_needed(client, brain_server_id, "🧠 User Memories", channel_name)
     return True
 
 async def save_image_fact(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, description: str, attachment: discord.Attachment) -> bool:
@@ -114,6 +209,8 @@ async def save_server_fact(client: discord.Client, brain_server_id: int, server:
     channel_name = f"{server.name}-lore".lower().replace(" ", "-")
     channel = await get_or_create_channel(guild, "🌍 Server Lore", channel_name)
     await channel.send(fact)
+    
+    await consolidate_memories_if_needed(client, brain_server_id, "🌍 Server Lore", channel_name)
     return True
 
 async def save_global_fact(client: discord.Client, brain_server_id: int, fact: str) -> bool:
@@ -121,6 +218,8 @@ async def save_global_fact(client: discord.Client, brain_server_id: int, fact: s
     if not guild: return False
     channel = await get_or_create_channel(guild, "🌐 Global Database", "global-memory")
     await channel.send(fact)
+    
+    await consolidate_memories_if_needed(client, brain_server_id, "🌐 Global Database", "global-memory")
     return True
 
 async def forget_fact(client: discord.Client, brain_server_id: int, category_name: str, channel_name: str, fact: str) -> bool:

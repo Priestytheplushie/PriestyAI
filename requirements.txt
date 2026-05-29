@@ -5,3 +5,4 @@ numpy
 pydantic
 aiohttp
 dotenv
+beautifulsoup4

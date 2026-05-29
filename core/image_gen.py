@@ -10,7 +10,6 @@ class ImageGenerator:
 
     async def generate(self, prompt: str) -> bytes:
         logger.info(f"Generating free image for prompt: {prompt}")
-        
         encoded_prompt = urllib.parse.quote(prompt)
         request_url = f"{self.base_url}{encoded_prompt}?width=1024&height=1024&nologo=true"
         
@@ -18,8 +17,7 @@ class ImageGenerator:
             async with aiohttp.ClientSession() as session:
                 async with session.get(request_url) as response:
                     if response.status == 200:
-                        image_bytes = await response.read()
-                        return image_bytes
+                        return await response.read()
                     else:
                         error_text = await response.text()
                         raise ValueError(f"Free Image API failed with status {response.status}: {error_text}")

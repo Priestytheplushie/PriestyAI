@@ -1,4 +1,5 @@
-﻿import discord
+
+import discord
 import io
 import logging
 from collections import deque
@@ -60,14 +61,12 @@ class ChatHistoryTracker:
 
 
 async def get_or_create_category(guild: discord.Guild, name: str) -> discord.CategoryChannel:
-    """Finds or creates a channel category."""
     category = discord.utils.get(guild.categories, name=name)
     if not category:
         category = await guild.create_category(name)
     return category
 
 async def get_or_create_channel(guild: discord.Guild, category_name: str, channel_name: str) -> discord.TextChannel:
-    """Finds or creates a channel inside a specific category."""
     category = await get_or_create_category(guild, category_name)
     channel = discord.utils.get(category.text_channels, name=channel_name)
     if not channel:
@@ -76,7 +75,6 @@ async def get_or_create_channel(guild: discord.Guild, category_name: str, channe
 
 
 def should_preserve_message(message: discord.Message) -> bool:
-    """Heuristic helper to ensure images/attachments are never consolidated or deleted."""
     if message.attachments:
         return True
     
@@ -89,7 +87,6 @@ def should_preserve_message(message: discord.Message) -> bool:
 
 
 async def consolidate_memories_if_needed(client: discord.Client, brain_server_id: int, category_name: str, channel_name: str, threshold: int = 25):
-    """Checks memory channel length and uses Gemini to consolidate raw facts when exceeding threshold."""
     guild = client.get_guild(brain_server_id)
     if not guild:
         return
@@ -137,7 +134,7 @@ async def consolidate_memories_if_needed(client: discord.Client, brain_server_id
 
     try:
         response = await client.chat_handler.client.aio.models.generate_content(
-            model=client.text_model,
+            model=client.chat_handler.premium_model,
             contents=prompt
         )
 
@@ -186,11 +183,10 @@ async def save_image_fact(client: discord.Client, brain_server_id: int, user: di
     msg = await channel.send(content=f"**Image Upload: {description}**", file=file)
     if msg.attachments:
         url = msg.attachments[0].url
-        await channel.send(f"{description}: {url}")
+        await msg.edit(content=f"**Image Upload: {description}**\n{url}")
     return True
 
 async def save_image_bytes_fact(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, description: str, img_bytes: bytes, filename: str) -> bool:
-    """Saves AI generated image bytes directly to a user's memory channel."""
     guild = client.get_guild(brain_server_id)
     if not guild: return False
     channel_name = f"{user.name}-memory".lower().replace(" ", "-")
@@ -200,7 +196,7 @@ async def save_image_bytes_fact(client: discord.Client, brain_server_id: int, us
     msg = await channel.send(content=f"**AI Generated Image Saved: {description}**", file=file)
     if msg.attachments:
         url = msg.attachments[0].url
-        await channel.send(f"{description}: {url}")
+        await msg.edit(content=f"**AI Generated Image Saved: {description}**\n{url}")
     return True
 
 async def save_server_fact(client: discord.Client, brain_server_id: int, server: discord.Guild, fact: str) -> bool:

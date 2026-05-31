@@ -6,3 +6,5 @@ pydantic
 aiohttp
 dotenv
 beautifulsoup4
+pillow
+tzdata

@@ -1,7 +1,9 @@
 
 import discord
 import io
+import json
 import logging
+import re
 from collections import deque
 from datetime import datetime, timezone
 
@@ -248,3 +250,40 @@ async def fetch_memory_block(client: discord.Client, brain_server_id: int, categ
     facts.reverse()
     if not facts: return ""
     return "\n".join([f"{f}" for f in facts])
+
+async def save_config(client: discord.Client, brain_server_id: int, target_id: int, is_dm: bool, config_dict: dict) -> bool:
+    guild = client.get_guild(brain_server_id)
+    if not guild: return False
+    
+    prefix = "user" if is_dm else "channel"
+    channel_name = f"{prefix}-{target_id}-config"
+    
+    channel = await get_or_create_channel(guild, "⚙️ Configurations", channel_name)
+    
+    await channel.purge(limit=10)
+    
+    config_str = json.dumps(config_dict, indent=2)
+    await channel.send(f"```json\n{config_str}\n```")
+    return True
+
+async def load_config(client: discord.Client, brain_server_id: int, target_id: int, is_dm: bool) -> dict:
+    guild = client.get_guild(brain_server_id)
+    if not guild: return None
+    
+    category = discord.utils.get(guild.categories, name="⚙️ Configurations")
+    if not category: return None
+    
+    prefix = "user" if is_dm else "channel"
+    channel_name = f"{prefix}-{target_id}-config"
+    channel = discord.utils.get(category.text_channels, name=channel_name)
+    if not channel: return None
+    
+    async for msg in channel.history(limit=5):
+        if "```json" in msg.content:
+            match = re.search(r'```json\s*(.*?)\s*```', msg.content, flags=re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(1))
+                except Exception:
+                    pass
+    return None

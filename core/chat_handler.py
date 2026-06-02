@@ -165,33 +165,131 @@ class ChatHandler:
             return None, None
             
         mime_type = mime_type.lower().split(';')[0].strip()
-        supported_images = ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic"]
         
-        if mime_type.startswith("image/"):
-            if mime_type in supported_images:
-                return mime_type, file_bytes
-            return "image/png", file_bytes
+        supported_images = ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif"]
+        if mime_type in supported_images or (mime_type.startswith("image/") and mime_type != "image/gif"):
+            return mime_type if mime_type in supported_images else "image/png", file_bytes
+        
+        supported_audio = ["audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg", "audio/x-m4a"]
+        if mime_type in supported_audio or mime_type.startswith("audio/"):
+            return mime_type if mime_type in supported_audio else "audio/wav", file_bytes
             
-        if mime_type.startswith("text/") or filename.endswith(('.py', '.json', '.md', '.txt')):
+        supported_video = ["video/mp4", "video/mpeg", "video/mov", "video/avi", "video/flv", "video/mpg", "video/webm", "video/wmv", "video/3gpp", "video/quicktime"]
+        if mime_type in supported_video or mime_type.startswith("video/"):
+            return mime_type if mime_type in supported_video else "video/mp4", file_bytes
+            
+        if mime_type == "application/pdf" or filename.lower().endswith(".pdf"):
+            return "application/pdf", file_bytes
+
+        text_extensions = (
+            '.py', '.json', '.md', '.txt', '.js', '.ts', '.sh', '.css', '.html', 
+            '.xml', '.yaml', '.yml', '.c', '.cpp', '.h', '.java', '.go', '.rs', 
+            '.sql', '.bat', '.ps1', '.ini', '.conf', '.env', '.log'
+        )
+        if mime_type.startswith("text/") or filename.lower().endswith(text_extensions):
             return "text/plain", file_bytes
+
+        if filename.lower().endswith(".docx"):
+            try:
+                import docx
+                doc = docx.Document(io.BytesIO(file_bytes))
+                text = "\n".join([p.text for p in doc.paragraphs])
+                return "text/plain", text.encode('utf-8')
+            except Exception as e:
+                logger.warning(f"Docx extraction failed for {filename}: {e}")
+
+        if filename.lower().endswith(".xlsx"):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+                lines = []
+                for sheet in wb.worksheets:
+                    lines.append(f"--- Sheet: {sheet.title} ---")
+                    for row in sheet.iter_rows(values_only=True):
+                        lines.append("\t".join([str(c) if c is not None else "" for c in row]))
+                return "text/plain", "\n".join(lines).encode('utf-8')
+            except Exception as e:
+                logger.warning(f"Xlsx extraction failed for {filename}: {e}")
             
         return None, None
 
-    async def generate_reply_stream(self, message_content: str, channel_history: str, attachments: list, user_display_name: str, user_memory: dict, server_context: str, scraped_pages: list[str] = None, user_status: str = None, thinking_level: str = "NONE", is_dm: bool = False):
+    def build_tool_definition(self, config: dict) -> str:
+        sys_tools = config.get("system_tools", [])
+        disc_tools = config.get("discord_tools", [])
+        
+        lines = ["\n\n=== GRANTED TOOLS & CAPABILITIES ==="]
+        lines.append("You have access to the following tools. Use them by outputting the exact tag anywhere in your message.")
+        
+        if "Generate Images" in sys_tools:
+            lines.append("- [IMAGE_PENDING: prompt] : Spawns a new image. Use for drawing, painting, or rendering.")
+            lines.append("- [IMAGE_EDIT: instructions] : Edits/modifies an existing base image (img2img).")
+        if "Memory Journals" in sys_tools:
+            lines.append("- [LEARN: fact] : Saves a fact about the user.")
+            lines.append("- [LEARN_SERVER: fact] : Saves a fact about the server.")
+            lines.append("- [LEARN_GLOBAL: fact] : Saves a universal fact.")
+            lines.append("- [FORGET: fact] : Deletes a saved fact from memory.")
+        
+        if "Buttons" in disc_tools:
+            lines.append("- [BUTTON: Label | color | emoji] : Spawns interactive buttons (colors: primary, secondary, success, danger).")
+        if "Modals" in disc_tools:
+            lines.append("- [MODAL_BUTTON: Label | Field1:short, Field2:long, Field3:user_select, Field4:select_string(A, B)] : Spawns an interactive form.")
+        if "Threads" in disc_tools:
+            lines.append("- [THREAD: Thread Name] : Creates a side-thread for deep-dives.")
+            lines.append("- [CLOSE_THREAD] : Archives the current thread.")
+        if "Entity Dropdowns" in disc_tools:
+            lines.append("- [USER_SELECT: Prompt text] : Renders a user dropdown inside the channel.")
+            lines.append("- [CHANNEL_SELECT: Prompt text] : Renders a channel dropdown.")
+            lines.append("- [ROLE_SELECT: Prompt text] : Renders a role dropdown.")
+        if "Custom Dropdowns" in disc_tools:
+            lines.append("- [SELECT_STRING: Placeholder | Opt1:desc:emoji, Opt2:desc:emoji] : Renders a custom choices menu.")
+        if "Double-Texting" in disc_tools:
+            lines.append("- [FOLLOW_UP] : Instantly splits your response into a second consecutive message. Use sparingly.")
+        if "Reactions" in disc_tools:
+            lines.append("- [REACT: emoji] : Adds an emoji directly to your own message.")
+            lines.append("- [REACT_USER: emoji] : Adds an immediate reaction to the user's incoming message.")
+        if "Native Polls" in disc_tools:
+            lines.append("- [POLL: Question | Opt1, Opt2, Opt3 | Hours] : Launches a Discord vote poll.")
+            
+        return "\n".join(lines)
+
+    async def generate_reply_stream(self, message_content: str, channel_history: str, attachments: list, user_display_name: str, user_memory: dict, server_context: str, scraped_pages: list[str] = None, user_status: str = None, thinking_level: str = "NONE", is_dm: bool = False, active_config: dict = None):
         now_pt = self._check_and_reset_quota()
         
         if self.premium_cooldown_until:
             active_model = self.fallback_model
         else:
             active_model = self.premium_model
-            
-        use_thinking = (thinking_level in ("HIGH", "MINIMAL"))
 
-        active_sys_prompt = self.system_instruction
+        if active_config is None: active_config = {}
+
+        custom_prompt = active_config.get("system_prompt", "").strip()
+        base_sys_prompt = custom_prompt if custom_prompt else self.system_instruction
+
         if is_dm:
-            active_sys_prompt = re.sub(r'<!-- THREAD_INSTRUCTIONS_START -->.*?<!-- THREAD_INSTRUCTIONS_END -->', '', active_sys_prompt, flags=re.DOTALL)
-            active_sys_prompt = active_sys_prompt.replace("deploy a side-thread using the `[THREAD]` tag, and then deliver your code modules **sequentially and modularly**.", "deliver your code modules sequentially in this DM.")
-            active_sys_prompt += "\n\nCRITICAL DM RULE: You are currently chatting in Direct Messages (DMs). There are NO threads in DMs. You are STRICTLY FORBIDDEN from using `[THREAD]` tags, attempting to spawn threads, or referencing thread creation. Treat all exploratory requests inline in this DM."
+            base_sys_prompt = re.sub(r'<!-- THREAD_INSTRUCTIONS_START -->.*?<!-- THREAD_INSTRUCTIONS_END -->', '', base_sys_prompt, flags=re.DOTALL)
+            base_sys_prompt = base_sys_prompt.replace("deploy a side-thread using the `[THREAD]` tag, and then deliver your code modules **sequentially and modularly**.", "deliver your code modules sequentially in this DM.")
+            base_sys_prompt += "\n\nCRITICAL DM RULE: You are currently chatting in Direct Messages (DMs). There are NO threads in DMs. You are STRICTLY FORBIDDEN from using `[THREAD]` tags, attempting to spawn threads, or referencing thread creation. Treat all exploratory requests inline in this DM."
+
+        tool_mode = active_config.get("tool_mode", "Auto")
+        disc_tools = active_config.get("discord_tools", [])
+        
+        if tool_mode != "Off":
+            tool_definition_block = self.build_tool_definition(active_config)
+            if "{TOOL_DEFINITION}" in base_sys_prompt:
+                base_sys_prompt = base_sys_prompt.replace("{TOOL_DEFINITION}", tool_definition_block)
+            else:
+                base_sys_prompt += tool_definition_block
+                
+            if tool_mode == "Forced":
+                base_sys_prompt += "\n\nCRITICAL SYSTEM OVERRIDE: You MUST use an available tool tag or API tool to answer this prompt."
+        else:
+            if "{TOOL_DEFINITION}" in base_sys_prompt:
+                base_sys_prompt = base_sys_prompt.replace("{TOOL_DEFINITION}", "")
+
+        if "Server Emojis" not in disc_tools:
+            base_sys_prompt += "\n\nCRITICAL EMOJI RESTRICTION: You are STRICTLY FORBIDDEN from generating or writing any custom server emojis (do not use the <:name:id> or <a:name:id> format). Write using standard text or unicode emojis only."
+        if "Unicode Emojis" not in disc_tools:
+            base_sys_prompt += "\n\nCRITICAL EMOJI RESTRICTION: You are STRICTLY FORBIDDEN from outputting standard unicode emojis (e.g. 🙂, 🔥, 😂, 👀, 💀) in your messages. Express yourself purely through text."
 
         parts = []
         status_section = f"--- CURRENT STATUS & ACTIVITY FOR {user_display_name} ---\n{user_status}\n\n" if user_status else ""
@@ -228,26 +326,25 @@ class ChatHandler:
             if mime_type and sanitized_bytes:
                 parts.append(types.Part.from_bytes(data=sanitized_bytes, mime_type=mime_type))
 
-        active_tools = [{"code_execution": {}}]
-        if self._should_use_search(message_content, channel_history):
-            active_tools.append({"google_search": {}})
+        active_tools = []
+        if tool_mode != "Off":
+            if "Code Execution" in active_config.get("system_tools", []):
+                active_tools.append({"code_execution": {}})
+            if "Google Search" in active_config.get("system_tools", []):
+                if tool_mode == "Forced" or self._should_use_search(message_content, channel_history):
+                    active_tools.append({"google_search": {}})
 
-        if use_thinking:
-            config = types.GenerateContentConfig(
-                system_instruction=active_sys_prompt,
-                tools=active_tools,
-                temperature=0.7,
-                thinking_config=types.ThinkingConfig(
-                    thinking_level=thinking_level,
-                    include_thoughts=True
-                )
+        thinking_level_for_stream = thinking_level if thinking_level in ("HIGH", "MINIMAL") else "MINIMAL"
+        
+        config = types.GenerateContentConfig(
+            system_instruction=base_sys_prompt,
+            tools=active_tools if active_tools else None,
+            temperature=0.7,
+            thinking_config=types.ThinkingConfig(
+                thinking_level=thinking_level_for_stream,
+                include_thoughts=True
             )
-        else:
-            config = types.GenerateContentConfig(
-                system_instruction=active_sys_prompt,
-                tools=active_tools,
-                temperature=0.7
-            )
+        )
 
         try:
             return await self.client.aio.models.generate_content_stream(
@@ -264,7 +361,7 @@ class ChatHandler:
                     self.premium_cooldown_until = datetime.combine(tomorrow_pt.date(), dt_time(0, 0, 0), tzinfo=self.pt_zone)
                     
                     fallback_config = types.GenerateContentConfig(
-                        system_instruction=active_sys_prompt, tools=active_tools, temperature=0.7
+                        system_instruction=base_sys_prompt, tools=active_tools if active_tools else None, temperature=0.7
                     )
                     return await self.client.aio.models.generate_content_stream(
                         model=self.fallback_model, contents=parts, config=fallback_config

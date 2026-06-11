@@ -11,11 +11,11 @@ class ASTValidationError(Exception):
 class LayoutASTVisitor(ast.NodeVisitor):
     def __init__(self):
         self.whitelisted_calls = {
-            "Container", "Section", "TextDisplay", "Separator", "Button", 
-            "UserSelect", "RoleSelect", "ChannelSelect", "MentionableSelect", 
-            "StringSelect", "SelectOption", "ActionRow", "Label", "Checkbox", 
-            "CheckboxGroup", "RadioGroup", "FileUpload", "Modal", "Action",
-            "TextInput",
+            "container", "section", "textdisplay", "separator", "button", 
+            "userselect", "roleselect", "channelselect", "mentionableselect", 
+            "stringselect", "selectoption", "actionrow", "label", "checkbox", 
+            "checkboxgroup", "radiogroup", "fileupload", "modal", "action",
+            "textinput",
             "trigger_ai", "trigger_image_generation", "reply_private", "reply_public", "delete_message", 
             "disable_components", "pass_input", "open_modal"
         }
@@ -47,11 +47,11 @@ class LayoutASTVisitor(ast.NodeVisitor):
             else:
                 func_name = f"{node.func.value.id}.{node.func.attr}"
 
-        base_func = func_name.split(".")[-1]
+        base_func = func_name.split(".")[-1].lower().strip()
         if base_func not in self.whitelisted_calls:
             raise ASTValidationError(f"Call to unapproved component or function: '{func_name}'")
 
-        if func_name == "Action.open_modal":
+        if base_func == "open_modal":
             self.has_modal_action = True
             if self.in_modal_declaration:
                 raise ASTValidationError(
@@ -59,7 +59,7 @@ class LayoutASTVisitor(ast.NodeVisitor):
                     "a Modal from within a Modal submission callback."
                 )
 
-        if base_func == "Modal":
+        if base_func == "modal":
             previous_modal_state = self.in_modal_declaration
             self.in_modal_declaration = True
             self.generic_visit(node)
@@ -160,11 +160,36 @@ def compile_dsl_payload(dsl_code: str) -> Dict[str, Any]:
         raise ASTValidationError("Layout compilation failed. No root class assignment or layout instantiation found.")
 
     verify_structural_constraints(compiled_layout)
+    
+    def count_action_rows(node: Dict[str, Any]) -> int:
+        if not isinstance(node, dict):
+            return 0
+        comp_name = node.get("type", "").split(".")[-1]
+        total = 1 if comp_name == "ActionRow" else 0
+        
+        children_lists = []
+        if isinstance(node.get("args"), list):
+            children_lists.append(node["args"])
+        if "children" in node.get("kwargs", {}):
+            if isinstance(node["kwargs"]["children"], list):
+                children_lists.append(node["kwargs"]["children"])
+                
+        for children in children_lists:
+            for child in children:
+                if isinstance(child, dict):
+                    total += count_action_rows(child)
+        return total
+
+    total_rows = count_action_rows(compiled_layout)
+    if total_rows > 5:
+        raise ASTValidationError(
+            f"Discord API Limit: A message cannot contain more than 5 ActionRow components (found {total_rows})."
+        )
     return compiled_layout
 
 
 def verify_structural_constraints(node: Dict[str, Any]):
-    comp_type = node.get("type", "")
+    comp_type = node.get("type", "").split(".")[-1]
     kwargs = node.get("kwargs", {})
     
     if comp_type == "Section":
@@ -185,7 +210,7 @@ def verify_structural_constraints(node: Dict[str, Any]):
         for child in children:
             if not isinstance(child, dict):
                 continue
-            child_type = child.get("type", "")
+            child_type = child.get("type", "").split(".")[-1]
             if child_type in ("UserSelect", "RoleSelect", "ChannelSelect", "MentionableSelect", "StringSelect"):
                 dropdowns_count += 1
             elif child_type == "Button":
@@ -197,12 +222,17 @@ def verify_structural_constraints(node: Dict[str, Any]):
             raise ASTValidationError("Discord API Limit: You cannot mix Buttons and Select Dropdowns in the same ActionRow.")
         if buttons_count > 5:
             raise ASTValidationError("Discord API Limit: An ActionRow cannot hold more than 5 Button components.")
+        if buttons_count == 0 and dropdowns_count == 0:
+            raise ASTValidationError("Discord API Limit: An ActionRow must contain between 1 and 5 components.")
 
     for callback_prop in ("on_click", "on_select", "on_submit"):
         if callback_prop in kwargs:
             cb_val = kwargs[callback_prop]
             if isinstance(cb_val, list):
-                has_modal = any(isinstance(a, dict) and a.get("type") == "Action.open_modal" for a in cb_val)
+                has_modal = any(
+                    isinstance(a, dict) and a.get("type", "").split(".")[-1].lower().strip() in ("open_modal", "openmodal", "modal") 
+                    for a in cb_val
+                )
                 if has_modal:
                     if len(cb_val) > 1:
                         raise ASTValidationError(
@@ -210,9 +240,14 @@ def verify_structural_constraints(node: Dict[str, Any]):
                             "combined with other response operations in a multi-action callback list."
                         )
 
-    children_lists = [node.get("args", [])]
+    children_lists = []
+    if isinstance(node.get("args"), list):
+        children_lists.append(node["args"])
     if "children" in kwargs:
-        children_lists.append(kwargs["children"])
+        if isinstance(kwargs["children"], list):
+            children_lists.append(kwargs["children"])
+        elif isinstance(kwargs["children"], dict):
+            children_lists.append([kwargs["children"]])
         
     for children in children_lists:
         for child in children:

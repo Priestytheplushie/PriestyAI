@@ -78,13 +78,18 @@ def inject_message_builder_hook(bot_class_instance):
                 memories = await self._compile_memories_for_ai(author, channel)
             else:
                 memories = {"user_memories": "", "server_lore": "", "global_database": ""}
-                
+            
+            custom_prompt = config_state.get("system_prompt", "").strip()
+            base_sys_prompt = custom_prompt if custom_prompt else self.chat_handler.system_instruction
+            
             prompt = (
-                f"[System Prompt: The user interacted with your active V2 component. "
+                f"{base_sys_prompt}\n\n"
+                f"--- CALLBACK CONTEXT ---\n"
+                f"The user interacted with your active V2 component. "
                 f"They triggered the callback payload: '{instruction_payload}'.\n"
                 f"Analyze this selection context and generate your response. If they want to perform "
                 f"another layout change, you may output another `[BUILD_MESSAGE]` payload. "
-                f"Otherwise, reply with natural chat banter.]"
+                f"Otherwise, reply with natural chat banter."
             )
             
             await self._execute_ai_with_retries(

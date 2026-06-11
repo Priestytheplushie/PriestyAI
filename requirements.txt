@@ -4,12 +4,9 @@ google-genai
 numpy
 pydantic
 aiohttp
-dotenv
+python-dotenv
 beautifulsoup4
 pillow
 tzdata
 python-docx
 openpyxl
-fastapi 
-uvicorn 
-pyngrok

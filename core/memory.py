@@ -287,3 +287,70 @@ async def load_config(client: discord.Client, brain_server_id: int, target_id: i
                 except Exception:
                     pass
     return None
+
+
+
+async def get_or_create_forum_channel(guild: discord.Guild, name: str) -> discord.ForumChannel:
+    channel = discord.utils.get(guild.channels, name=name, type=discord.ChannelType.forum)
+    if not channel:
+        try:
+            channel = await guild.create_forum(name=name)
+            logger.info(f"Database Forum Channel '#{name}' created in server '{guild.name}' (ID: {guild.id})")
+        except Exception as e:
+            logger.error(f"Failed to instantiate Forum Channel '{name}': {e}")
+            raise e
+    return channel
+
+async def get_or_create_user_forum_thread(guild: discord.Guild, forum_channel: discord.ForumChannel, user_id: int) -> discord.Thread:
+    thread = discord.utils.get(forum_channel.threads, name=str(user_id))
+    if not thread:
+        async for arch_thread in forum_channel.archived_threads(limit=100):
+            if arch_thread.name == str(user_id):
+                thread = arch_thread
+                await thread.edit(archived=False)
+                break
+    if not thread:
+        thread_with_msg = await forum_channel.create_thread(
+            name=str(user_id), 
+            content=f"Context snippet ledger for user <@{user_id}>"
+        )
+        thread = thread_with_msg.thread
+    return thread
+
+async def save_context_snippet(client, brain_server_id: int, user_id: int, alias: str, type_name: str, data_payload: dict, notes: str) -> bool:
+    guild = client.get_guild(brain_server_id)
+    forum = await get_or_create_forum_channel(guild, "context-snippets")
+    thread = await get_or_create_user_forum_thread(guild, forum, user_id)
+    
+    payload = {"alias": alias, "type": type_name, "data": data_payload, "notes": notes}
+    msg_content = f"```json\n{json.dumps(payload, indent=2)}\n```"
+    
+    async for msg in thread.history(limit=50):
+        if f'"alias": "{alias}"' in msg.content:
+            await msg.edit(content=msg_content)
+            return True
+    await thread.send(content=msg_content)
+    return True
+
+async def fetch_all_contexts_for_user(client, brain_server_id: int, user_id: int) -> list:
+    guild = client.get_guild(brain_server_id)
+    if not guild: 
+        return []
+        
+    forum = discord.utils.get(guild.channels, name="context-snippets", type=discord.ChannelType.forum)
+    if not forum: 
+        return []
+        
+    thread = discord.utils.get(forum.threads, name=str(user_id))
+    if not thread: 
+        return []
+    
+    snippets = []
+    async for msg in thread.history(limit=50):
+        match = re.search(r'```json\s*(.*?)\s*```', msg.content, flags=re.DOTALL)
+        if match: 
+            try:
+                snippets.append(json.loads(match.group(1)))
+            except Exception:
+                pass
+    return snippets

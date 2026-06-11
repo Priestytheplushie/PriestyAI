@@ -123,8 +123,37 @@ class ChatHandler:
     def _select_thinking_level(self, message_content: str, channel_history: str) -> str:
         content = message_content.lower().strip()
         
+        ui_triggers = [
+            "interacted with a ui component",
+            "active v2 component",
+            "just reacted to your message",
+            "removed their reaction",
+            "submitted form",
+            "clicked button",
+            "selected option",
+            "selected user",
+            "selected role",
+            "selected channel"
+        ]
+        
+        if any(trigger in content for trigger in ui_triggers):
+            high_triggers = [
+                "proof", "paradox", "riddle", "algorithm", "mathematical", "complex", "debug", 
+                "architecture", "scale", "optimize", "system design", "write code", "implement",
+                "explain how", "solve", "math", "analysis", "deduce"
+            ]
+            if not any(t in content for t in high_triggers):
+                return "NONE"
+
         if message_content.startswith("[System") or "system prompt" in content:
-            return "HIGH"
+            high_triggers = [
+                "proof", "paradox", "riddle", "algorithm", "mathematical", "complex", "debug", 
+                "architecture", "scale", "optimize", "system design", "write code", "implement",
+                "explain how", "solve", "math", "analysis", "deduce"
+            ]
+            if any(t in content for t in high_triggers):
+                return "HIGH"
+            return "MINIMAL"
 
         clean_content = re.sub(r'<@\d+>', '', content).strip()
         clean_content = re.sub(r'[^\w\s]', '', clean_content).strip()
@@ -252,17 +281,18 @@ class ChatHandler:
             lines.append("- [REACT_USER: emoji] : Adds an immediate reaction to the user's incoming message.")
         if "Native Polls" in disc_tools:
             lines.append("- [POLL: Question | Opt1, Opt2, Opt3 | Hours] : Launches a Discord vote poll.")
+            lines.append("  CRITICAL POLL RULE: Polls are NOT compatible with other component tools, and must be used alone in a message. Do NOT combine [POLL] with any component tags (like [BUTTON] or [SELECT_STRING]) in the same message, or it will fail to parse and render.")
 
         if "Message Builder" in sys_tools:
             lines.append("\n- [BUILD_MESSAGE: python_dsl_code] : Spawns an interactive custom Discord message containing Components V2 (modern borderless containers, column-structured sections, text displays, visual dividers, and interactive dropdowns/buttons).")
             lines.append("  You MUST write valid Python DSL layout constructors inside the tag. Let the layout compiled output represent the UI.")
             lines.append("  ")
-            lines.append("  CRITICAL ROUTING RULE (MANDATORY): Do NOT use [BUILD_MESSAGE] for simple tasks (like presenting a few standalone buttons, quick dropdowns, or single text modal triggers). Instead, utilize the lightweight legacy tools (such as [BUTTON], [SELECT_STRING], or [MODAL_BUTTON]) to save space and eliminate the decoupled compilation latency. Only choose [BUILD_MESSAGE] when you are constructing a cohesive multi-element visual card layout containing nested containers, multi-column directory sections, visual separators, and complex data collection forms.")
+            lines.append("  ROUTING RULE: Use [BUILD_MESSAGE] when you want to present highly structured, professional, card-based designs, multi-column directories, interactive forms, or custom system dashboards. For simple one-off tasks (like a single quick question with standard buttons), feel free to use the lightweight legacy tool tags (like [BUTTON] or [SELECT_STRING]) to respond instantly with minimal latency. However, for complete dashboards, directories, advanced surveys, multi-column layouts, or polished interactive cards, [BUILD_MESSAGE] is the ideal solution.")
             lines.append("  ")
-            lines.append("  Example call: [BUILD_MESSAGE: Container(Section(TextDisplay(\"Alert Heading\"), accessory=Button(\"Acknowledge\", style=\"success\", on_click=Action.delete_message())), accent_colour=\"0xff0000\")]")
+            lines.append("  Example call: [BUILD_MESSAGE: Container(Section(children=[TextDisplay(\"Alert Heading\")], accessory=Button(\"Acknowledge\", style=\"success\", on_click=Action.delete_message())), accent_colour=\"0xff0000\")]")
             lines.append("  Available classes to instantiate:")
             lines.append("    * Container(*children, accent_colour=None) : Groups layout items inside a clean bounded card. If accent_colour is omitted, the container integrates seamlessly with zero border lines.")
-            lines.append("    * Section(*children, accessory) : Dual column row layout. Houses 1-3 TextDisplays on the left, paired with a single accessory (a Button) on the right column. The 'accessory' parameter is strictly mandatory.")
+            lines.append("    * Section(children, accessory, id=None) : Dual column row layout. Houses a list of TextDisplays (up to 3) in 'children' on the left side, paired with a single accessory (a Button) on the right column. The 'accessory' parameter is strictly mandatory. Pass children as an explicit keyword list.")
             lines.append("    * TextDisplay(content) : Rich formatted inline text slot.")
             lines.append("    * Separator(spacing=\"small\", visible=True) : Visual divider line. spacing: \"small\" or \"large\".")
             lines.append("    * ActionRow(*children) : Grid layout row aligning up to 5 Buttons OR exactly 1 dropdown. Do NOT exceed bounds or mix buttons and dropdowns inside a single row.")

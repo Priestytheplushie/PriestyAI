@@ -9,7 +9,7 @@ class Container(Component):
         pass
 
 class Section(Component):
-    def __init__(self, *children: Component, accessory: Component, id: Optional[str] = None) -> None:
+    def __init__(self, children: List[Component], accessory: Component, id: Optional[str] = None) -> None:
         pass
 
 class TextDisplay(Component):

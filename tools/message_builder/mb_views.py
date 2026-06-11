@@ -85,7 +85,7 @@ class DSLStringSelect(discord.ui.Select):
 
 class DSLV2Modal(discord.ui.Modal):
     def __init__(self, title: str, on_submit_actions: Any, bot_instance, channel):
-        super().__init__(title=title[:45])
+        super().__init__(title=(title[:45] if title else "Form Popup"))
         self.bot = bot_instance
         self.channel = channel
         self.actions = on_submit_actions if isinstance(on_submit_actions, list) else [on_submit_actions]
@@ -160,7 +160,18 @@ def build_layout_item(cfg: Dict[str, Any], bot_instance, channel) -> Optional[An
             accessory_item = build_layout_item(accessory_cfg, bot_instance, channel)
             
         section = discord.ui.Section(accessory=accessory_item)
-        sub_children = args or kwargs.get("children", [])
+        
+        sub_children = []
+        if args:
+            if isinstance(args[0], list):
+                sub_children = args[0]
+            else:
+                sub_children = args
+        elif "children" in kwargs:
+            sub_children = kwargs["children"]
+            if not isinstance(sub_children, list):
+                sub_children = [sub_children]
+                
         for sc in sub_children:
             child_item = build_layout_item(sc, bot_instance, channel)
             if child_item:
@@ -174,10 +185,17 @@ def build_layout_item(cfg: Dict[str, Any], bot_instance, channel) -> Optional[An
             child_item = build_layout_item(sc, bot_instance, channel)
             if child_item:
                 action_row.add_item(child_item)
+        try:
+            if not getattr(action_row, "children", None) or len(action_row.children) == 0:
+                return None
+        except Exception:
+            pass
         return action_row
 
     elif comp_type == "TextDisplay":
         content = args[0] if args else kwargs.get("content", "")
+        if content:
+            content = content[:1500] + ("..." if len(content) > 1500 else "")
         return discord.ui.TextDisplay(content=content)
         
     elif comp_type == "Separator":
@@ -204,8 +222,10 @@ def build_layout_item(cfg: Dict[str, Any], bot_instance, channel) -> Optional[An
         if style_str == "link" or url:
             custom_id = None
         
+        label_clean = label[:80] if label else "Button"
+        
         return DSLButton(
-            label=label, style=style, url=url, on_click_actions=on_click, 
+            label=label_clean, style=style, url=url, on_click_actions=on_click, 
             custom_id=custom_id, bot_instance=bot_instance, channel=channel
         )
         
@@ -215,7 +235,7 @@ def build_layout_item(cfg: Dict[str, Any], bot_instance, channel) -> Optional[An
         max_v = kwargs.get("max_values", 1)
         on_select = kwargs.get("on_select")
         return DSLUserSelect(
-            placeholder=placeholder, min_values=min_v, max_values=max_v, 
+            placeholder=placeholder[:150], min_values=min_v, max_values=max_v, 
             on_select_actions=on_select, custom_id=custom_id, bot_instance=bot_instance, channel=channel
         )
         
@@ -234,15 +254,21 @@ def build_layout_item(cfg: Dict[str, Any], bot_instance, channel) -> Optional[An
             o_kwargs = opt_cfg.get("kwargs", {})
             o_label = o_args[0] if len(o_args) > 0 else o_kwargs.get("label", "Option")
             o_value = o_args[1] if len(o_args) > 1 else o_kwargs.get("value", o_label)
+            
+            o_label_clean = o_label[:100] if o_label else "Option"
+            o_value_clean = o_value[:100] if o_value else o_label_clean
+            o_desc = o_kwargs.get("description")
+            o_desc_clean = o_desc[:100] if o_desc else None
+            
             discord_options.append(
                 discord.SelectOption(
-                    label=o_label, value=o_value, 
-                    description=o_kwargs.get("description"), emoji=o_kwargs.get("emoji")
+                    label=o_label_clean, value=o_value_clean, 
+                    description=o_desc_clean, emoji=o_kwargs.get("emoji")
                 )
             )
             
         return DSLStringSelect(
-            placeholder=placeholder, options=discord_options, min_values=min_v, max_values=max_v, 
+            placeholder=placeholder[:150], options=discord_options, min_values=min_v, max_values=max_v, 
             on_select_actions=on_select, custom_id=custom_id, bot_instance=bot_instance, channel=channel
         )
         
@@ -265,14 +291,31 @@ async def process_action_chain(bot_instance, interaction: discord.Interaction, c
         action_kwargs = {}
         
         if isinstance(action, dict):
-            action_type = action.get("type", "").split(".")[-1]
+            action_type = action.get("type", "").split(".")[-1].lower().strip()
             action_args = action.get("args", [])
             action_kwargs = action.get("kwargs", {})
         elif isinstance(action, str):
             parts = action.split(":", 1)
-            action_type = parts[0]
+            action_type = parts[0].lower().strip()
             if len(parts) > 1:
                 action_args = [parts[1]]
+
+        if action_type in ("ai", "trigger_ai", "ai_turn"):
+            action_type = "ai"
+        elif action_type in ("pass", "pass_input", "passinput"):
+            action_type = "pass"
+        elif action_type in ("disable_components", "disablecomponents", "disable"):
+            action_type = "disable_components"
+        elif action_type in ("reply_private", "replyprivate", "private_reply"):
+            action_type = "reply_private"
+        elif action_type in ("reply_public", "replypublic", "public_reply"):
+            action_type = "reply_public"
+        elif action_type in ("delete_message", "deletemessage", "delete"):
+            action_type = "delete_message"
+        elif action_type in ("trigger_image_generation", "image_generation", "image"):
+            action_type = "trigger_image_generation"
+        elif action_type in ("open_modal", "openmodal", "modal"):
+            action_type = "open_modal"
 
         if action_type == "disable_components":
             message = interaction.message
@@ -381,6 +424,8 @@ async def process_action_chain(bot_instance, interaction: discord.Interaction, c
                     lbl_text = f_args[0] if len(f_args) > 0 else f_kwargs.get("text", "Input Slot")
                     sub_comp_cfg = f_args[1] if len(f_args) > 1 else f_kwargs.get("component")
                     
+                    lbl_text_clean = lbl_text[:45] if lbl_text else "Field"
+                    
                     sub_comp = None
                     if sub_comp_cfg and isinstance(sub_comp_cfg, dict):
                         sc_type = sub_comp_cfg.get("type", "").split(".")[-1]
@@ -391,12 +436,40 @@ async def process_action_chain(bot_instance, interaction: discord.Interaction, c
                         
                         if sc_type == "CheckboxGroup":
                             options_cfg = sc_kwargs.get("options", [])
-                            opts = [discord.SelectOption(label=o.get("args", [o.get("kwargs", {}).get("label")])[0]) for o in options_cfg if isinstance(o, dict)]
+                            opts = []
+                            for o in options_cfg:
+                                if isinstance(o, dict):
+                                    o_args = o.get("args", [])
+                                    o_kwargs = o.get("kwargs", {})
+                                    lbl = o_args[0] if len(o_args) > 0 else o_kwargs.get("label", "Option")
+                                    val = o_args[1] if len(o_args) > 1 else o_kwargs.get("value", lbl)
+                                    opts.append(
+                                        discord.CheckboxGroupOption(
+                                            label=lbl[:100], value=val[:100], 
+                                            description=o_kwargs.get("description")[:100] if o_kwargs.get("description") else None, 
+                                            default=o_kwargs.get("default", False)
+                                        )
+                                    )
                             sub_comp = discord.ui.CheckboxGroup(options=opts, custom_id=custom_field_id)
+                            
                         elif sc_type == "RadioGroup":
                             options_cfg = sc_kwargs.get("options", [])
-                            opts = [discord.SelectOption(label=o.get("args", [o.get("kwargs", {}).get("label")])[0]) for o in options_cfg if isinstance(o, dict)]
+                            opts = []
+                            for o in options_cfg:
+                                if isinstance(o, dict):
+                                    o_args = o.get("args", [])
+                                    o_kwargs = o.get("kwargs", {})
+                                    lbl = o_args[0] if len(o_args) > 0 else o_kwargs.get("label", "Option")
+                                    val = o_args[1] if len(o_args) > 1 else o_kwargs.get("value", lbl)
+                                    opts.append(
+                                        discord.RadioGroupOption(
+                                            label=lbl[:100], value=val[:100], 
+                                            description=o_kwargs.get("description")[:100] if o_kwargs.get("description") else None, 
+                                            default=o_kwargs.get("default", False)
+                                        )
+                                    )
                             sub_comp = discord.ui.RadioGroup(options=opts, custom_id=custom_field_id)
+                            
                         elif sc_type == "FileUpload":
                             sub_comp = discord.ui.FileUpload(
                                 min_values=sc_kwargs.get("min_values", 1), 
@@ -412,7 +485,7 @@ async def process_action_chain(bot_instance, interaction: discord.Interaction, c
                                     o_kwargs = opt.get("kwargs", {})
                                     lbl = o_args[0] if len(o_args) > 0 else o_kwargs.get("label", "Option")
                                     val = o_args[1] if len(o_args) > 1 else o_kwargs.get("value", lbl)
-                                    opts.append(discord.SelectOption(label=lbl, value=val, description=o_kwargs.get("description"), emoji=o_kwargs.get("emoji")))
+                                    opts.append(discord.SelectOption(label=lbl[:100], value=val[:100], description=o_kwargs.get("description")[:100] if o_kwargs.get("description") else None, emoji=o_kwargs.get("emoji")))
                             sub_comp = discord.ui.Select(options=opts, custom_id=custom_field_id)
                         elif sc_type == "UserSelect":
                             sub_comp = discord.ui.UserSelect(custom_id=custom_field_id)
@@ -425,20 +498,23 @@ async def process_action_chain(bot_instance, interaction: discord.Interaction, c
                         elif sc_type == "TextInput":
                             inp_style_str = sc_kwargs.get("style", "short").lower()
                             inp_style = discord.TextStyle.long if inp_style_str == "long" else discord.TextStyle.short
+                            
+                            ti_label = sc_kwargs.get("label") or lbl_text_clean
                             sub_comp = discord.ui.TextInput(
-                                label=sc_kwargs.get("label") or lbl_text[:45],
+                                label=ti_label[:45],
                                 style=inp_style,
                                 custom_id=custom_field_id
                             )
                         else:
                             sub_comp = discord.ui.TextInput(
-                                label=lbl_text[:45], 
+                                label=lbl_text_clean, 
                                 style=discord.TextStyle.short, 
                                 custom_id=custom_field_id
                             )
                             
-                    label_comp = discord.ui.Label(text=lbl_text[:45], component=sub_comp, description=f_kwargs.get("description"))
-                    modal_obj.add_item(label_comp)
+                    if sub_comp is not None:
+                        label_comp = discord.ui.Label(text=lbl_text_clean, component=sub_comp, description=f_kwargs.get("description")[:100] if f_kwargs.get("description") else None)
+                        modal_obj.add_item(label_comp)
                     
             await interaction.response.send_modal(modal_obj)
 

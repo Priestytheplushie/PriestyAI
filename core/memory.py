@@ -6,8 +6,10 @@ import logging
 import re
 from collections import deque
 from datetime import datetime, timezone
+from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger("Memory")
+
 
 class ChatHistoryTracker:
     def __init__(self, limit: int = 30):
@@ -62,18 +64,50 @@ class ChatHistoryTracker:
         return "\n".join(lines)
 
 
-async def get_or_create_category(guild: discord.Guild, name: str) -> discord.CategoryChannel:
-    category = discord.utils.get(guild.categories, name=name)
-    if not category:
-        category = await guild.create_category(name)
-    return category
 
-async def get_or_create_channel(guild: discord.Guild, category_name: str, channel_name: str) -> discord.TextChannel:
-    category = await get_or_create_category(guild, category_name)
-    channel = discord.utils.get(category.text_channels, name=channel_name)
-    if not channel:
-        channel = await guild.create_text_channel(channel_name, category=category)
-    return channel
+async def get_or_create_forum_channel(guild: discord.Guild, name: str) -> Optional[discord.ForumChannel]:
+    forum = discord.utils.get(guild.channels, name=name, type=discord.ChannelType.forum)
+    if not forum:
+        try:
+            forum = await guild.create_forum(name=name)
+            logger.info(f"Database Forum Channel '#{name}' created in Brain Server '{guild.name}' (ID: {guild.id})")
+        except Exception as e:
+            logger.error(f"Failed to instantiate Forum Channel '{name}': {e}")
+            return None
+    return forum
+
+
+async def get_or_create_db_thread(guild: discord.Guild, forum_name: str, thread_name: str, initial_content: str = "Database Thread") -> Optional[discord.Thread]:
+    forum = await get_or_create_forum_channel(guild, forum_name)
+    if not forum:
+        return None
+        
+    thread = discord.utils.get(forum.threads, name=str(thread_name))
+    
+    if not thread:
+        try:
+            async for arch_thread in forum.archived_threads(limit=100):
+                if arch_thread.name == str(thread_name):
+                    thread = arch_thread
+                    await thread.edit(archived=False)
+                    logger.info(f"Unarchived Database Thread '{thread_name}' in forum '#{forum_name}'")
+                    break
+        except Exception as e:
+            logger.warning(f"Error fetching archived threads in forum '#{forum_name}': {e}")
+            
+    if not thread:
+        try:
+            thread_with_msg = await forum.create_thread(
+                name=str(thread_name),
+                content=initial_content
+            )
+            thread = thread_with_msg.thread
+            logger.info(f"Created fresh Database Thread '{thread_name}' in forum '#{forum_name}'")
+        except Exception as e:
+            logger.error(f"Failed to create Database Thread '{thread_name}' in forum '#{forum_name}': {e}")
+            return None
+            
+    return thread
 
 
 def should_preserve_message(message: discord.Message) -> bool:
@@ -88,21 +122,17 @@ def should_preserve_message(message: discord.Message) -> bool:
     return False
 
 
-async def consolidate_memories_if_needed(client: discord.Client, brain_server_id: int, category_name: str, channel_name: str, threshold: int = 25):
+async def consolidate_memories_if_needed(client: discord.Client, brain_server_id: int, forum_name: str, thread_name: str, threshold: int = 25):
     guild = client.get_guild(brain_server_id)
     if not guild:
         return
         
-    category = discord.utils.get(guild.categories, name=category_name)
-    if not category:
-        return
-        
-    channel = discord.utils.get(category.text_channels, name=channel_name)
-    if not channel:
+    thread = await get_or_create_db_thread(guild, forum_name, thread_name)
+    if not thread:
         return
 
     messages = []
-    async for msg in channel.history(limit=100):
+    async for msg in thread.history(limit=100):
         messages.append(msg)
 
     text_memories = [m for m in messages if not should_preserve_message(m)]
@@ -110,7 +140,7 @@ async def consolidate_memories_if_needed(client: discord.Client, brain_server_id
     if len(text_memories) < threshold:
         return
 
-    logger.info(f"Triggering memory consolidation for #{channel_name} (found {len(text_memories)} text facts)")
+    logger.info(f"Triggering memory consolidation for thread '{thread_name}' in '#{forum_name}'")
 
     text_memories.reverse()
     raw_facts = [msg.content for msg in text_memories if msg.content.strip()]
@@ -150,135 +180,234 @@ async def consolidate_memories_if_needed(client: discord.Client, brain_server_id
             logger.warning("Consolidation prompt returned empty results. Aborting rewrite to prevent loss.")
             return
 
-        await channel.purge(limit=100, check=lambda m: not should_preserve_message(m))
+        for msg in text_memories:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
 
         lines = [line.strip().lstrip("*-• ").strip() for line in consolidated_text.split("\n") if line.strip()]
         for line in lines:
             if line:
-                await channel.send(line)
+                await thread.send(line)
         
-        logger.info(f"Memory consolidation completed successfully for #{channel_name}")
+        logger.info(f"Memory consolidation completed successfully for thread '{thread_name}'")
 
     except Exception as e:
-        logger.error(f"Failed to consolidate memories for #{channel_name}: {e}")
+        logger.error(f"Failed to consolidate memories for thread '{thread_name}': {e}")
+
 
 
 async def save_fact(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, fact: str) -> bool:
     guild = client.get_guild(brain_server_id)
-    if not guild: return False
-    channel_name = f"{user.name}-memory".lower().replace(" ", "-")
-    channel = await get_or_create_channel(guild, "🧠 User Memories", channel_name)
-    await channel.send(fact)
-    
-    await consolidate_memories_if_needed(client, brain_server_id, "🧠 User Memories", channel_name)
+    if not guild: 
+        return False
+        
+    thread = await get_or_create_db_thread(
+        guild=guild, 
+        forum_name="user-memories", 
+        thread_name=str(user.id),
+        initial_content=f"Memory ledger for user {user.display_name} (<@{user.id}>)"
+    )
+    if not thread:
+        return False
+        
+    await thread.send(fact)
+    await consolidate_memories_if_needed(client, brain_server_id, "user-memories", str(user.id))
     return True
+
 
 async def save_image_fact(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, description: str, attachment: discord.Attachment) -> bool:
     guild = client.get_guild(brain_server_id)
-    if not guild: return False
-    channel_name = f"{user.name}-memory".lower().replace(" ", "-")
-    channel = await get_or_create_channel(guild, "🧠 User Memories", channel_name)
+    if not guild: 
+        return False
+        
+    thread = await get_or_create_db_thread(
+        guild=guild, 
+        forum_name="user-memories", 
+        thread_name=str(user.id),
+        initial_content=f"Memory ledger for user {user.display_name} (<@{user.id}>)"
+    )
+    if not thread:
+        return False
     
     img_bytes = await attachment.read()
     file = discord.File(fp=io.BytesIO(img_bytes), filename=attachment.filename)
     
-    msg = await channel.send(content=f"**Image Upload: {description}**", file=file)
+    msg = await thread.send(content=f"**Image Upload: {description}**", file=file)
     if msg.attachments:
         url = msg.attachments[0].url
         await msg.edit(content=f"**Image Upload: {description}**\n{url}")
     return True
 
+
 async def save_image_bytes_fact(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, description: str, img_bytes: bytes, filename: str) -> bool:
     guild = client.get_guild(brain_server_id)
-    if not guild: return False
-    channel_name = f"{user.name}-memory".lower().replace(" ", "-")
-    channel = await get_or_create_channel(guild, "🧠 User Memories", channel_name)
+    if not guild: 
+        return False
+        
+    thread = await get_or_create_db_thread(
+        guild=guild, 
+        forum_name="user-memories", 
+        thread_name=str(user.id),
+        initial_content=f"Memory ledger for user {user.display_name} (<@{user.id}>)"
+    )
+    if not thread:
+        return False
     
     file = discord.File(fp=io.BytesIO(img_bytes), filename=filename)
-    msg = await channel.send(content=f"**AI Generated Image Saved: {description}**", file=file)
+    msg = await thread.send(content=f"**AI Generated Image Saved: {description}**", file=file)
     if msg.attachments:
         url = msg.attachments[0].url
         await msg.edit(content=f"**AI Generated Image Saved: {description}**\n{url}")
     return True
 
+
 async def save_server_fact(client: discord.Client, brain_server_id: int, server: discord.Guild, fact: str) -> bool:
     guild = client.get_guild(brain_server_id)
-    if not guild or not server: return False
-    channel_name = f"{server.name}-lore".lower().replace(" ", "-")
-    channel = await get_or_create_channel(guild, "🌍 Server Lore", channel_name)
-    await channel.send(fact)
-    
-    await consolidate_memories_if_needed(client, brain_server_id, "🌍 Server Lore", channel_name)
+    if not guild or not server: 
+        return False
+        
+    thread = await get_or_create_db_thread(
+        guild=guild, 
+        forum_name="server-lore", 
+        thread_name=str(server.id),
+        initial_content=f"Lore index database for server '{server.name}'"
+    )
+    if not thread:
+        return False
+        
+    await thread.send(fact)
+    await consolidate_memories_if_needed(client, brain_server_id, "server-lore", str(server.id))
     return True
+
 
 async def save_global_fact(client: discord.Client, brain_server_id: int, fact: str) -> bool:
     guild = client.get_guild(brain_server_id)
-    if not guild: return False
-    channel = await get_or_create_channel(guild, "🌐 Global Database", "global-memory")
-    await channel.send(fact)
-    
-    await consolidate_memories_if_needed(client, brain_server_id, "🌐 Global Database", "global-memory")
+    if not guild: 
+        return False
+        
+    thread = await get_or_create_db_thread(
+        guild=guild, 
+        forum_name="global-memory", 
+        thread_name="global-database",
+        initial_content="Global shared database knowledge base."
+    )
+    if not thread:
+        return False
+        
+    await thread.send(fact)
+    await consolidate_memories_if_needed(client, brain_server_id, "global-memory", "global-database")
     return True
+
 
 async def forget_fact(client: discord.Client, brain_server_id: int, category_name: str, channel_name: str, fact: str) -> bool:
     guild = client.get_guild(brain_server_id)
-    if not guild: return False
-    category = discord.utils.get(guild.categories, name=category_name)
-    if not category: return False
-    channel = discord.utils.get(category.text_channels, name=channel_name)
-    if not channel: return False
+    if not guild: 
+        return False
+        
+    forum_map = {
+        "🧠 User Memories": "user-memories",
+        "🌍 Server Lore": "server-lore",
+        "🌐 Global Database": "global-memory"
+    }
+    forum_name = forum_map.get(category_name, "user-memories")
     
-    async for msg in channel.history(limit=100):
+    thread_name = re.sub(r'[^a-zA-Z0-9\-]', '', channel_name).replace("-memory", "").replace("-lore", "")
+    
+    thread = await get_or_create_db_thread(guild, forum_name, thread_name)
+    if not thread:
+        return False
+    
+    async for msg in thread.history(limit=100):
         if fact.lower().strip() in msg.content.lower().strip():
             await msg.delete()
             return True
     return False
 
+
 async def fetch_memory_block(client: discord.Client, brain_server_id: int, category_name: str, channel_name: str) -> str:
     guild = client.get_guild(brain_server_id)
-    if not guild: return ""
+    if not guild: 
+        return ""
+        
+    forum_map = {
+        "🧠 User Memories": "user-memories",
+        "🌍 Server Lore": "server-lore",
+        "🌐 Global Database": "global-memory"
+    }
+    forum_name = forum_map.get(category_name, "user-memories")
     
-    category = discord.utils.get(guild.categories, name=category_name)
-    if not category: return ""
-    channel = discord.utils.get(category.text_channels, name=channel_name)
-    if not channel: return ""
+    thread_name = re.sub(r'[^a-zA-Z0-9\-]', '', channel_name).replace("-memory", "").replace("-lore", "")
+    
+    thread = await get_or_create_db_thread(guild, forum_name, thread_name)
+    if not thread:
+        return ""
     
     facts = []
-    async for msg in channel.history(limit=30):
+    async for msg in thread.history(limit=30):
+        if msg.id == thread.id:
+            continue
         facts.append(msg.content)
         
     facts.reverse()
-    if not facts: return ""
+    if not facts: 
+        return ""
     return "\n".join([f"{f}" for f in facts])
+
 
 async def save_config(client: discord.Client, brain_server_id: int, target_id: int, is_dm: bool, config_dict: dict) -> bool:
     guild = client.get_guild(brain_server_id)
-    if not guild: return False
+    if not guild: 
+        return False
     
-    prefix = "user" if is_dm else "channel"
-    channel_name = f"{prefix}-{target_id}-config"
+    thread_name = f"config-{target_id}"
+    thread = await get_or_create_db_thread(
+        guild=guild,
+        forum_name="configurations",
+        thread_name=thread_name,
+        initial_content=f"Configuration parameters for Target ID {target_id}"
+    )
+    if not thread:
+        return False
     
-    channel = await get_or_create_channel(guild, "⚙️ Configurations", channel_name)
-    
-    await channel.purge(limit=10)
+    async for msg in thread.history(limit=10):
+        if msg.id != thread.id:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
     
     config_str = json.dumps(config_dict, indent=2)
-    await channel.send(f"```json\n{config_str}\n```")
+    await thread.send(f"```json\n{config_str}\n```")
     return True
 
-async def load_config(client: discord.Client, brain_server_id: int, target_id: int, is_dm: bool) -> dict:
+
+async def load_config(client: discord.Client, brain_server_id: int, target_id: int, is_dm: bool) -> Optional[dict]:
     guild = client.get_guild(brain_server_id)
-    if not guild: return None
+    if not guild: 
+        return None
     
-    category = discord.utils.get(guild.categories, name="⚙️ Configurations")
-    if not category: return None
+    forum = discord.utils.get(guild.channels, name="configurations", type=discord.ChannelType.forum)
+    if not forum:
+        return None
+        
+    thread_name = f"config-{target_id}"
+    thread = discord.utils.get(forum.threads, name=thread_name)
     
-    prefix = "user" if is_dm else "channel"
-    channel_name = f"{prefix}-{target_id}-config"
-    channel = discord.utils.get(category.text_channels, name=channel_name)
-    if not channel: return None
+    if not thread:
+        try:
+            async for arch_thread in forum.archived_threads(limit=100):
+                if arch_thread.name == thread_name:
+                    thread = arch_thread
+                    break
+        except Exception:
+            pass
+            
+    if not thread:
+        return None
     
-    async for msg in channel.history(limit=5):
+    async for msg in thread.history(limit=5):
         if "```json" in msg.content:
             match = re.search(r'```json\s*(.*?)\s*```', msg.content, flags=re.DOTALL)
             if match:
@@ -290,37 +419,19 @@ async def load_config(client: discord.Client, brain_server_id: int, target_id: i
 
 
 
-async def get_or_create_forum_channel(guild: discord.Guild, name: str) -> discord.ForumChannel:
-    channel = discord.utils.get(guild.channels, name=name, type=discord.ChannelType.forum)
-    if not channel:
-        try:
-            channel = await guild.create_forum(name=name)
-            logger.info(f"Database Forum Channel '#{name}' created in server '{guild.name}' (ID: {guild.id})")
-        except Exception as e:
-            logger.error(f"Failed to instantiate Forum Channel '{name}': {e}")
-            raise e
-    return channel
-
-async def get_or_create_user_forum_thread(guild: discord.Guild, forum_channel: discord.ForumChannel, user_id: int) -> discord.Thread:
-    thread = discord.utils.get(forum_channel.threads, name=str(user_id))
-    if not thread:
-        async for arch_thread in forum_channel.archived_threads(limit=100):
-            if arch_thread.name == str(user_id):
-                thread = arch_thread
-                await thread.edit(archived=False)
-                break
-    if not thread:
-        thread_with_msg = await forum_channel.create_thread(
-            name=str(user_id), 
-            content=f"Context snippet ledger for user <@{user_id}>"
-        )
-        thread = thread_with_msg.thread
-    return thread
-
 async def save_context_snippet(client, brain_server_id: int, user_id: int, alias: str, type_name: str, data_payload: dict, notes: str) -> bool:
     guild = client.get_guild(brain_server_id)
-    forum = await get_or_create_forum_channel(guild, "context-snippets")
-    thread = await get_or_create_user_forum_thread(guild, forum, user_id)
+    if not guild:
+        return False
+        
+    thread = await get_or_create_db_thread(
+        guild=guild,
+        forum_name="context-snippets",
+        thread_name=str(user_id),
+        initial_content=f"Context snapshot ledger for user <@{user_id}>"
+    )
+    if not thread:
+        return False
     
     payload = {"alias": alias, "type": type_name, "data": data_payload, "notes": notes}
     msg_content = f"```json\n{json.dumps(payload, indent=2)}\n```"
@@ -329,8 +440,10 @@ async def save_context_snippet(client, brain_server_id: int, user_id: int, alias
         if f'"alias": "{alias}"' in msg.content:
             await msg.edit(content=msg_content)
             return True
+            
     await thread.send(content=msg_content)
     return True
+
 
 async def fetch_all_contexts_for_user(client, brain_server_id: int, user_id: int) -> list:
     guild = client.get_guild(brain_server_id)
@@ -342,6 +455,15 @@ async def fetch_all_contexts_for_user(client, brain_server_id: int, user_id: int
         return []
         
     thread = discord.utils.get(forum.threads, name=str(user_id))
+    if not thread:
+        try:
+            async for arch_thread in forum.archived_threads(limit=100):
+                if arch_thread.name == str(user_id):
+                    thread = arch_thread
+                    break
+        except Exception:
+            pass
+            
     if not thread: 
         return []
     

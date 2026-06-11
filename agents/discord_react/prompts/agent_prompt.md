@@ -100,6 +100,13 @@ You must only execute the custom tools defined below. You do not have access to 
     *   `message_id` (integer): The unique ID of the message holding the target file attachment.
     *   `attachment_url` (string): The complete URL of the target file to download and parse.
 
+### 3.12 `update_context_snapshot`
+*   **Description:** Overwrites and updates a stale context snapshot profile (like a User Profile Snapshot or Message Transcript Snippet) saved in the database with fresh, updated parameters. Use this when you detect that roles, nicknames, or attributes inside active user contexts are outdated.
+*   **Arguments:**
+    *   `alias` (string): The unique lowercase name/identifier of the target context snapshot to overwrite.
+    *   `updated_data` (object): The complete, fresh, corrected JSON payload data to write back to the snapshot.
+    *   `notes` (string, optional): Explanatory notes detailing why the snapshot details were modified or corrected.
+
 ---
 
 # 4. FINAL HANDOVER

@@ -226,6 +226,8 @@ class DiscordGeminiVoiceBridge:
                 
                 await self.connection.send_audio(mixed_frame)
                 self.turn_sent_audio = True
+            else:
+                await self.connection.send_audio(b'\x00' * GEMINI_MONO_FRAME_BYTES)
 
             elapsed = time.perf_counter() - start_time
             sleep_time = max(0.001, (DISCORD_FRAME_MS / 1000.0) - elapsed)

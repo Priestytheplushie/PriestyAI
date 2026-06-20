@@ -5,6 +5,7 @@ import re
 import uuid
 import json
 import asyncio
+from typing import Optional
 
 logger = logging.getLogger("UIComponents")
 
@@ -1014,8 +1015,6 @@ class DynamicView(discord.ui.View):
             await interaction.response.edit_message(content=new_content, view=new_view, attachments=attachments, embeds=embeds)
 
 
-
-
 class SaveContextModal(discord.ui.Modal):
     def __init__(self, target_alias: str, payload_type: str, prefilled_data: str, bot_instance):
         super().__init__(title="Save Context Profile")
@@ -1198,234 +1197,150 @@ class AgentPreStartView(discord.ui.View):
             del interaction.client.active_agent_sessions[self.session_id]
         await session.channel.send("💡 *Agent Workspace session cancelled by user prior to execution.*")
 
-    class AgentLaunchModal(discord.ui.Modal):
-        def __init__(self, bot_instance, prompt: str, user: discord.User, guild_list: list, user_contexts: list, message_contexts: list):
-            super().__init__(title="Configure Agent Profiles")
-            self.bot = bot_instance
-            self.prompt = prompt
-            self.user = user
 
-            info_lines = [
-                "📂 **Saved Profiles Index**",
-                "Choose mutual servers or saved template snapshots below to attach to this workspace."
-            ]
-            
-            all_aliases = [f"`{c.get('alias')}`" for c in user_contexts + message_contexts if c.get("alias")]
-            if all_aliases:
-                info_lines.append(f"Saved: {', '.join(all_aliases[:10])}" + ("..." if len(all_aliases) > 10 else ""))
-            else:
-                info_lines.append("No saved profiles exist yet. Use the message options menu to save snapshot templates!")
-                
-            self.info_box = discord.ui.TextDisplay(content="\n".join(info_lines)[:1500])
-            self.add_item(self.info_box)
+class ProfileEditModal(discord.ui.Modal):
+    def __init__(self, current_name: str, current_bio: str, target_id: int, bot_instance, saved_profile: Optional[dict] = None) -> None:
+        super().__init__(title="Customize Bot Server Profile", timeout=None)
+        self.target_id = target_id
+        self.bot = bot_instance
+        self.saved_profile = saved_profile or {}
 
-            server_options = []
-            for guild in guild_list[:25]:
-                server_options.append(discord.SelectOption(
-                    label=guild.name[:100],
-                    value=f"server_{guild.id}",
-                    description=f"Server ID: {guild.id}"
-                ))
-            if not server_options:
-                server_options.append(discord.SelectOption(label="No mutual servers", value="none"))
-                
-            self.server_select = discord.ui.Select(
-                custom_id="agent_modal_server",
-                placeholder="Select target server context...",
-                options=server_options,
-                min_values=0,
-                max_values=1,
-                required=False
-            )
-            self.add_item(discord.ui.Label(
-                text="📁 Target Server",
-                description="Select which server's channels and messages the AI should access.",
-                component=self.server_select
-            ))
+        self.name_input = discord.ui.TextInput(
+            style=discord.TextStyle.short,
+            placeholder="Choose a custom name (e.g., ModBot)...",
+            default=current_name,
+            max_length=32,
+            required=False
+        )
+        self.add_item(discord.ui.Label(
+            text="Bot Server Nickname",
+            description="The name this bot displays in this server. Leave blank to keep current.",
+            component=self.name_input
+        ))
 
-            user_options = []
-            for u_ctx in user_contexts[:25]:
-                alias = u_ctx.get("alias", "unknown")
-                desc = u_ctx.get("notes") or "User profile template snapshot"
-                user_options.append(discord.SelectOption(
-                    label=alias[:100],
-                    value=alias,
-                    description=desc[:100]
-                ))
-            if not user_options:
-                user_options.append(discord.SelectOption(label="No saved user snapshots", value="none"))
-                
-            self.user_select = discord.ui.Select(
-                custom_id="agent_modal_user_ctx",
-                placeholder="Select user snapshot context...",
-                options=user_options,
-                min_values=0,
-                max_values=min(25, len(user_options)),
-                required=False
-            )
-            self.add_item(discord.ui.Label(
-                text="👤 User Profiles",
-                description="Attach saved user profile snapshots to guide the analysis.",
-                component=self.user_select
-            ))
+        self.bio_input = discord.ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            placeholder="What does your bot do here?",
+            default=current_bio,
+            max_length=190,
+            required=False
+        )
+        self.add_item(discord.ui.Label(
+            text="Bot Server Biography",
+            description="The profile bio displayed on server member cards. Leave blank to keep current.",
+            component=self.bio_input
+        ))
 
-            msg_options = []
-            for m_ctx in message_contexts[:25]:
-                alias = m_ctx.get("alias", "unknown")
-                desc = m_ctx.get("notes") or "Message transcript snapshot template"
-                msg_options.append(discord.SelectOption(
-                    label=alias[:100],
-                    value=alias,
-                    description=desc[:100]
-                ))
-            if not msg_options:
-                msg_options.append(discord.SelectOption(label="No saved transcripts", value="none"))
-                
-            self.message_select = discord.ui.Select(
-                custom_id="agent_modal_msg_ctx",
-                placeholder="Select message transcript context...",
-                options=msg_options,
-                min_values=0,
-                max_values=min(25, len(msg_options)),
-                required=False
-            )
-            self.add_item(discord.ui.Label(
-                text="💬 Message Transcripts",
-                description="Attach saved transcript snapshots to guide the analysis.",
-                component=self.message_select
-            ))
+        self.avatar_upload = discord.ui.FileUpload(required=False)
+        has_avatar = bool(self.saved_profile.get("avatar_url"))
+        avatar_desc = "Attach a PNG/JPG to replace your current avatar. Leave blank to reset to default." if has_avatar else "Attach a PNG/JPG to upload an avatar."
+        self.add_item(discord.ui.Label(
+            text="Upload Server Avatar",
+            description=avatar_desc,
+            component=self.avatar_upload
+        ))
 
-            self.additional_input = discord.ui.TextInput(
-                custom_id="agent_modal_additional",
-                style=discord.TextStyle.short,
-                placeholder="e.g. custom_audit, debug_leak",
-                required=False,
-                max_length=500
-            )
-            self.add_item(discord.ui.Label(
-                text="✍️ Additional Profiles",
-                description="Type extra profile names separated by commas for overflow.",
-                component=self.additional_input
-            ))
+        self.banner_upload = discord.ui.FileUpload(required=False)
+        has_banner = bool(self.saved_profile.get("banner_url"))
+        banner_desc = "Attach a PNG/JPG to replace your current banner. Leave blank to reset to default." if has_banner else "Attach a PNG/JPG to upload a banner."
+        self.add_item(discord.ui.Label(
+            text="Upload Server Banner",
+            description=banner_desc,
+            component=self.banner_upload
+        ))
 
-        async def on_submit(self, interaction: discord.Interaction):
-            await interaction.response.defer(ephemeral=True)
-            
-            initial_msg = None
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
 
-            raw_data = interaction.data if interaction.data else {}
-            submitted_vals = {}
-            
-            def walk_components(comps):
-                for c in comps:
-                    c_id = c.get("custom_id")
-                    if c_id:
-                        if "value" in c:
-                            submitted_vals[c_id] = [c["value"]]
-                        elif "values" in c:
-                            submitted_vals[c_id] = c["values"]
-                    
-                    sub = c.get("components")
-                    if sub:
-                        walk_components(sub)
-                        
-                    single = c.get("component")
-                    if single:
-                        walk_components([single])
-                        
-            walk_components(raw_data.get("components", []))
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("❌ This command can only be used inside a server.", ephemeral=True)
+            return
 
-            initial_msg = await interaction.followup.send(
-                "⏳ **Initializing your private Agent Workspace thread...**",
-                ephemeral=True,
-                wait=True
-            )
+        bot_member = guild.me
 
-            selected_server_id = None
-            server_vals = submitted_vals.get("agent_modal_server", [])
-            if server_vals and server_vals[0] != "none":
-                srv_val = server_vals[0]
-                if srv_val.startswith("server_"):
-                    selected_server_id = int(srv_val.split("_", 1)[1])
+        edit_kwargs = {}
+        
+        new_nick = self.name_input.value.strip() if self.name_input.value else ""
+        new_bio = self.bio_input.value.strip() if self.bio_input.value else ""
+        
+        edit_kwargs["nick"] = new_nick if new_nick else None
+        edit_kwargs["bio"] = new_bio if new_bio else None
 
-            selected_user_aliases = [v for v in submitted_vals.get("agent_modal_user_ctx", []) if v != "none"]
-            selected_msg_aliases = [v for v in submitted_vals.get("agent_modal_msg_ctx", []) if v != "none"]
+        avatar_url = self.saved_profile.get("avatar_url")
+        banner_url = self.saved_profile.get("banner_url")
+        clear_avatar = self.saved_profile.get("clear_avatar", True)
+        clear_banner = self.saved_profile.get("clear_banner", True)
 
-            additional_val = ""
-            additional_list = submitted_vals.get("agent_modal_additional", [])
-            if additional_list:
-                additional_val = additional_list[0]
-                
-            extra_aliases = []
-            if additional_val:
-                extra_aliases = [a.strip().lower() for a in additional_val.split(",") if a.strip()]
+        if self.avatar_upload.values:
+            attachment = self.avatar_upload.values[0]
+            try:
+                edit_kwargs["avatar"] = await attachment.read()
+                avatar_url = attachment.url
+                clear_avatar = False
+            except Exception as read_err:
+                logger.error(f"Failed to read avatar file upload: {read_err}")
+                await interaction.followup.send(f"❌ Failed to process avatar upload: {read_err}", ephemeral=True)
+                return
+        else:
+            edit_kwargs["avatar"] = None
+            avatar_url = None
+            clear_avatar = True
 
-            all_aliases = list(dict.fromkeys(selected_user_aliases + selected_msg_aliases + extra_aliases))
+        if self.banner_upload.values:
+            attachment = self.banner_upload.values[0]
+            try:
+                edit_kwargs["banner"] = await attachment.read()
+                banner_url = attachment.url
+                clear_banner = False
+            except Exception as read_err:
+                logger.error(f"Failed to read banner file upload: {read_err}")
+                await interaction.followup.send(f"❌ Failed to process banner upload: {read_err}", ephemeral=True)
+                return
+        else:
+            edit_kwargs["banner"] = None
+            banner_url = None
+            clear_banner = True
 
-            appended_context_data = ""
-            context_summary_log = "None"
-            if all_aliases:
-                context_summary_log = ", ".join([f"`{a}`" for a in all_aliases])
-                appended_context_data = await self.bot._compile_selected_context_payloads(self.user.id, ",".join(all_aliases))
-
-            target_server_log = "Local Guild Only"
-            if selected_server_id:
-                guild_obj = self.bot.get_guild(selected_server_id)
-                if guild_obj:
-                    target_server_log = f"{guild_obj.name} (ID: {selected_server_id})"
+        try:
+            try:
+                await bot_member.edit(**edit_kwargs)
+            except TypeError as type_err:
+                if "unexpected keyword argument" in str(type_err).lower():
+                    logger.warning("Installed discord.py version does not support bio or banner in edit(). Falling back to nick and avatar.")
+                    fallback_kwargs = {}
+                    if "nick" in edit_kwargs:
+                        fallback_kwargs["nick"] = edit_kwargs["nick"]
+                    if "avatar" in edit_kwargs:
+                        fallback_kwargs["avatar"] = edit_kwargs["avatar"]
+                    await bot_member.edit(**fallback_kwargs)
                 else:
-                    target_server_log = f"Unknown Server (ID: {selected_server_id})"
+                    raise type_err
 
-            channel = interaction.channel
-            thread = None
-            if isinstance(channel, discord.Thread):
-                thread = channel
-                await thread.add_user(interaction.user)
+            config = await self.bot.get_config(self.target_id, is_dm=False)
+            config["server_profile"] = {
+                "nickname": new_nick,
+                "bio": new_bio,
+                "avatar_url": avatar_url,
+                "banner_url": banner_url,
+                "clear_avatar": clear_avatar,
+                "clear_banner": clear_banner
+            }
+            
+            import core.memory as memory
+            success = await memory.save_config(self.bot, self.bot.brain_server_id, self.target_id, False, config)
+
+            if success:
+                await interaction.followup.send("✅ Server profile customization successfully saved and applied!", ephemeral=True)
             else:
-                try:
-                    from core.bot import generate_slug_from_prompt, sanitize_channel_name
-                    user_part = sanitize_channel_name(interaction.user.display_name[:12])
-                    slug = generate_slug_from_prompt(self.prompt)
-                    thread_name = f"agent-{user_part}-{slug}"
-                    thread = await channel.create_thread(
-                        name=thread_name,
-                        type=discord.ChannelType.private_thread,
-                        auto_archive_duration=1440
-                    )
-                    await thread.add_user(interaction.user)
-                except Exception as e:
-                    if initial_msg:
-                        await interaction.followup.edit_message(
-                            message_id=initial_msg.id,
-                            content=f"❌ **Error:** Failed to spawn private workspace thread: {e}. Ensure thread permissions are active."
-                        )
-                    return
+                await interaction.followup.send("⚠️ Profile applied, but failed to save permanently to the configurations database on the Brain Server.", ephemeral=True)
 
-            from agents.discord_react.agent import AgentSession
-            session = AgentSession(
-                thread_id=thread.id,
-                user_id=interaction.user.id,
-                prompt=self.prompt,
-                loaded_contexts=appended_context_data,
-                channel=thread
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ I do not have permission to edit my nickname or server profile. "
+                "Ensure my integration role has 'Change Nickname' / 'Manage Nicknames' permissions and is positioned above other roles.",
+                ephemeral=True
             )
-            session.target_guild_id = selected_server_id
-            self.bot.active_agent_sessions[thread.id] = session
-
-            view = AgentPreStartView(thread.id)
-            checklist_content = (
-                f"📋 **Agent Pre-Start Checklist**\n"
-                f"----------------------------------------\n"
-                f"📁 Target Server: {target_server_log}\n"
-                f"📂 Loaded Contexts: {context_summary_log}\n"
-                f"🎯 Primary Task: \"{self.prompt}\"\n\n"
-                f"Review the configuration above. You can add extra directions or start execution below."
-            )
-            checklist_msg = await thread.send(content=checklist_content, view=view)
-            view.checklist_msg = checklist_msg
-
-            if initial_msg:
-                await interaction.followup.edit_message(
-                    message_id=initial_msg.id,
-                    content=f"✅ **Agent Workspace Initialized!** Proceed directly to your private thread: {thread.mention}"
-                )
+        except Exception as e:
+            logger.error(f"Failed to apply server profile customization: {e}")
+            await interaction.followup.send(f"❌ An error occurred while saving your server profile: {e}", ephemeral=True)

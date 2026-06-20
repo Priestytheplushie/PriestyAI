@@ -115,11 +115,11 @@ def should_preserve_message(message: discord.Message) -> bool:
         return True
     
     content = message.content
-    if content.startswith("**Image Upload:") or content.startswith("**AI Generated Image Saved:"):
+    if content.startswith("**Image Upload:") or content.startswith("**AI Generated Image Saved:") or "[VISUAL MEMORY]" in content:
         return True
     if "http" in content and (".png" in content or ".jpg" in content or "discordapp" in content):
         return True
-    return False
+    return bool(re.search(r'```json', content))
 
 
 async def consolidate_memories_if_needed(client: discord.Client, brain_server_id: int, forum_name: str, thread_name: str, threshold: int = 25):
@@ -140,7 +140,7 @@ async def consolidate_memories_if_needed(client: discord.Client, brain_server_id
     if len(text_memories) < threshold:
         return
 
-    logger.info(f"Triggering memory consolidation for thread '{thread_name}' in '#{forum_name}'")
+    logger.info(f"Triggering structured memory consolidation for thread '{thread_name}' in '#{forum_name}'")
 
     text_memories.reverse()
     raw_facts = [msg.content for msg in text_memories if msg.content.strip()]
@@ -153,15 +153,14 @@ async def consolidate_memories_if_needed(client: discord.Client, brain_server_id
     prompt = (
         "You are an active memory consolidation assistant for a Discord companion bot.\n"
         "Your task is to review the following chronological list of saved memories, facts, and observations "
-        "about a user or server, and consolidate them into a clean, summarized list.\n\n"
-        "Rules:\n"
-        "1. Eliminate exact or semantic duplicates.\n"
-        "2. Resolve any direct contradictions by prioritizing information that appears later (as it is more recent).\n"
-        "3. Remove highly temporary, trivial, or fleeting notes that no longer have long-term value.\n"
-        "4. Output the consolidated facts as concise, individual lines of text.\n"
-        "5. Do NOT write any conversational intro, outro, headers, or markdown bullet points (like * or -). "
-        "Just output each consolidated fact as a plain line of text.\n\n"
-        f"Raw Memories to Consolidate:\n{facts_input}"
+        "about a user or server, and consolidate them into a structured, categorized markdown schema.\n\n"
+        "Eliminate duplicate facts, resolve direct contradictions by prioritizing the information that appeared later, "
+        "and clean up stale or minor temporary chatter. Group the consolidated facts strictly under these headings:\n"
+        "### 🧠 PROFILE & IDENTITY\n"
+        "### 💻 TECHNICAL ENVIRONMENT\n"
+        "### ✨ RELATIONSHIP & VIBE\n\n"
+        "Do not write any conversational intro or outro. Output only the structured headings with plain consolidated bullet points.\n\n"
+        f"Raw Memories:\n{facts_input}"
     )
 
     try:
@@ -186,12 +185,8 @@ async def consolidate_memories_if_needed(client: discord.Client, brain_server_id
             except Exception:
                 pass
 
-        lines = [line.strip().lstrip("*-• ").strip() for line in consolidated_text.split("\n") if line.strip()]
-        for line in lines:
-            if line:
-                await thread.send(line)
-        
-        logger.info(f"Memory consolidation completed successfully for thread '{thread_name}'")
+        await thread.send(consolidated_text.strip())
+        logger.info(f"Structured memory consolidation completed successfully for thread '{thread_name}'")
 
     except Exception as e:
         logger.error(f"Failed to consolidate memories for thread '{thread_name}': {e}")
@@ -215,6 +210,71 @@ async def save_fact(client: discord.Client, brain_server_id: int, user: discord.
     await thread.send(fact)
     await consolidate_memories_if_needed(client, brain_server_id, "user-memories", str(user.id))
     return True
+
+
+async def save_visual_memory(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, prompt: str, style: str, ratio: str, seed: int, cdn_url: str) -> bool:
+    guild = client.get_guild(brain_server_id)
+    if not guild:
+        return False
+        
+    thread = await get_or_create_db_thread(
+        guild=guild,
+        forum_name="user-memories",
+        thread_name=str(user.id),
+        initial_content=f"Memory ledger for user {user.display_name} (<@{user.id}>)"
+    )
+    if not thread:
+        return False
+        
+    payload = {
+        "prompt": prompt,
+        "style": style,
+        "ratio": ratio,
+        "seed": seed,
+        "cdn_url": cdn_url,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
+    msg_content = f"[VISUAL MEMORY] ```json\n{json.dumps(payload, indent=2)}\n```"
+    await thread.send(msg_content)
+    return True
+
+
+async def fetch_recent_visual_memories(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, limit: int = 5) -> List[dict]:
+    guild = client.get_guild(brain_server_id)
+    if not guild:
+        return []
+        
+    forum = discord.utils.get(guild.channels, name="user-memories", type=discord.ChannelType.forum)
+    if not forum:
+        return []
+        
+    thread = discord.utils.get(forum.threads, name=str(user.id))
+    if not thread:
+        try:
+            async for arch_thread in forum.archived_threads(limit=100):
+                if arch_thread.name == str(user.id):
+                    thread = arch_thread
+                    break
+        except Exception:
+            pass
+            
+    if not thread:
+        return []
+        
+    memories = []
+    async for msg in thread.history(limit=50):
+        if "[VISUAL MEMORY]" in msg.content:
+            match = re.search(r'```json\s*(.*?)\s*```', msg.content, flags=re.DOTALL)
+            if match:
+                try:
+                    mem_data = json.loads(match.group(1))
+                    memories.append(mem_data)
+                    if len(memories) >= limit:
+                        break
+                except Exception:
+                    pass
+    return memories
 
 
 async def save_image_fact(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, description: str, attachment: discord.Attachment) -> bool:

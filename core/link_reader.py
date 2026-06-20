@@ -1,3 +1,4 @@
+
 import re
 import logging
 import aiohttp
@@ -27,6 +28,10 @@ class LinkReader:
         try:
             async with aiohttp.ClientSession(headers=self.headers) as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as response:
+                    if response.status in (401, 403, 429):
+                        logger.warning(f"Standard request blocked with status {response.status}. Triggering Jina fallback...")
+                        return await self._fetch_via_jina(url)
+                        
                     if response.status != 200:
                         return f"[Error fetching URL: HTTP Status {response.status}]"
                         
@@ -59,8 +64,29 @@ class LinkReader:
             
             summary = f"Title: {title}\nURL: {url}\n\n{cleaned_text}"
             
+            if len(cleaned_text.strip()) < 150:
+                logger.warning("Scraped raw text content too sparse. Triggering Jina fallback...")
+                return await self._fetch_via_jina(url)
+                
             return summary[:6000] if len(summary) > 6000 else summary
             
         except Exception as e:
-            logger.error(f"Error reading URL {url}: {e}")
-            return f"[Failed to read URL: {str(e)}]"
+            logger.warning(f"Standard scraping failed due to error: {e}. Attempting Jina fallback...")
+            return await self._fetch_via_jina(url)
+
+    async def _fetch_via_jina(self, url: str) -> str:
+        jina_url = f"https://r.jina.ai/{url}"
+        headers = {
+            "X-With-Links-Summary": "true",
+            "X-With-Images-Summary": "false"
+        }
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(jina_url, timeout=aiohttp.ClientTimeout(total=12)) as response:
+                    if response.status != 200:
+                        return f"[Error: Jina fallback failed with HTTP status {response.status}]"
+                    text = await response.text()
+                    return text[:6000]
+        except Exception as err:
+            logger.error(f"Jina Reader fallback failed for {url}: {err}")
+            return f"[Failed to read URL: {str(err)}]"

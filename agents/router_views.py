@@ -15,7 +15,7 @@ DESCRIPTIONS = {
         "**Planned Tasks:**\n"
         "• Execute multiple parallel web searches on your query topic\n"
         "• Extract and clean markdown from top-ranked websites\n"
-        "• Compile findings into an attached Markdown report document complete with citations"
+        "• Compile findings into an attached Markdown or Word document report complete with citations"
     ),
     "react": (
         "**Server Inspection & Context Protocol**\n"
@@ -30,18 +30,18 @@ DESCRIPTIONS = {
 
 
 class ResearchPanelTabView(discord.ui.LayoutView):
-    def __init__(self, plan: str, thoughts: str, sources_browsed: List[Dict[str, str]], active_tab: str = "thinking"):
+    def __init__(self, session_instance, active_tab: str = "thinking"):
         super().__init__(timeout=600.0)
-        self.plan = plan
-        self.thoughts = thoughts
-        self.sources = sources_browsed
+        self.session = session_instance
         self.active_tab = active_tab
+        
+        self.source_page = 0
+        self.sources_per_page = 5
         
         self.rebuild_layout()
 
     def rebuild_layout(self) -> None:
         self.clear_items()
-        
         container = discord.ui.Container()
         
         if self.active_tab == "thinking":
@@ -50,19 +50,33 @@ class ResearchPanelTabView(discord.ui.LayoutView):
             
             thinking_content = (
                 f"**📋 Active Research Spec Plan:**\n"
-                f"{self.plan}\n\n"
+                f"{self.session.plan_text}\n\n"
                 f"**⚡ Current Reasoning Step:**\n"
-                f"> {self.thoughts}"
+                f"> {self.session.current_thought}"
             )
-            container.add_item(discord.ui.TextDisplay(content=thinking_content))
+            container.add_item(discord.ui.TextDisplay(content=thinking_content[:1900]))
             
-        else:
-            total_sites = len(self.sources)
-            container.add_item(discord.ui.TextDisplay(content=f"### 📋 Deep Research - Sources Browsed ({total_sites} websites)"))
+        elif self.active_tab == "sources":
+            total_sources = len(self.session.sources)
+            total_pages = (total_sources + self.sources_per_page - 1) // self.sources_per_page
+            total_pages = max(1, total_pages)
+            
+            if self.source_page >= total_pages:
+                self.source_page = total_pages - 1
+            self.source_page = max(0, self.source_page)
+            
+            container.add_item(discord.ui.TextDisplay(
+                content=f"### 📋 Deep Research - Sources Browsed ({total_sources} websites | Page {self.source_page + 1}/{total_pages})"
+            ))
             container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small, visible=True))
             
+            start_idx = self.source_page * self.sources_per_page
+            end_idx = start_idx + self.sources_per_page
+            page_sources = self.session.sources[start_idx:end_idx]
+            
             source_lines = []
-            for i, src in enumerate(self.sources):
+            for idx, src in enumerate(page_sources):
+                absolute_idx = start_idx + idx + 1
                 url = src.get("url", "")
                 title = src.get("title", "Untitled Page")
                 
@@ -79,13 +93,60 @@ class ResearchPanelTabView(discord.ui.LayoutView):
                     emoji = "🖥️"
                     
                 domain = url.split("//")[-1].split("/")[0].replace("www.", "")
-                
-                source_lines.append(f"{i+1}. {emoji} [**{domain}** — *{title[:65]}*]({url})")
+                source_lines.append(f"{absolute_idx}. {emoji} [**{domain}** — *{title[:65]}*]({url})")
                 
             sources_content = "\n".join(source_lines) if source_lines else "*No websites have been browsed yet.*"
             container.add_item(discord.ui.TextDisplay(content=sources_content[:1800]))
             
+        else:
+            container.add_item(discord.ui.TextDisplay(content="### 📝 Deep Research - Live Draft Preview"))
+            container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small, visible=True))
+            
+            draft_content = ""
+            partial_drafts = getattr(self.session, "partial_drafts", {})
+            
+            if partial_drafts:
+                for chapter_title, text in partial_drafts.items():
+                    snippet = text[:500] + ("..." if len(text) > 500 else "")
+                    draft_content += f"**{chapter_title}**\n{snippet}\n\n"
+            else:
+                draft_content = "*No chapters have finished compiling yet. Chapters will progressively appear here as the research steps complete.*"
+                
+            container.add_item(discord.ui.TextDisplay(content=draft_content[:1800]))
+            
         container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large, visible=False))
+        
+        if self.active_tab == "sources" and len(self.session.sources) > self.sources_per_page:
+            pagination_row = discord.ui.ActionRow()
+            
+            prev_page_btn = discord.ui.Button(
+                label="Previous Page",
+                style=discord.ButtonStyle.secondary,
+                emoji="◀",
+                disabled=(self.source_page <= 0)
+            )
+            async def on_prev_page(interaction: discord.Interaction):
+                self.source_page -= 1
+                self.rebuild_layout()
+                await interaction.response.edit_message(view=self)
+            prev_page_btn.callback = on_prev_page
+            pagination_row.add_item(prev_page_btn)
+            
+            next_page_btn = discord.ui.Button(
+                label="Next Page",
+                style=discord.ButtonStyle.secondary,
+                emoji="▶",
+                disabled=((self.source_page + 1) * self.sources_per_page >= len(self.session.sources))
+            )
+            async def on_next_page(interaction: discord.Interaction):
+                self.source_page += 1
+                self.rebuild_layout()
+                await interaction.response.edit_message(view=self)
+            next_page_btn.callback = on_next_page
+            pagination_row.add_item(next_page_btn)
+            
+            container.add_item(pagination_row)
+            container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small, visible=False))
         
         nav_row = discord.ui.ActionRow()
         
@@ -102,7 +163,7 @@ class ResearchPanelTabView(discord.ui.LayoutView):
         nav_row.add_item(thinking_btn)
         
         sources_btn = discord.ui.Button(
-            label=f"Sources ({len(self.sources)})", 
+            label=f"Sources ({len(self.session.sources)})", 
             style=discord.ButtonStyle.primary if self.active_tab == "sources" else discord.ButtonStyle.secondary,
             emoji="📋"
         )
@@ -112,6 +173,18 @@ class ResearchPanelTabView(discord.ui.LayoutView):
             await interaction.response.edit_message(view=self)
         sources_btn.callback = on_sources_click
         nav_row.add_item(sources_btn)
+        
+        draft_btn = discord.ui.Button(
+            label="Live Draft",
+            style=discord.ButtonStyle.primary if self.active_tab == "draft" else discord.ButtonStyle.secondary,
+            emoji="📝"
+        )
+        async def on_draft_click(interaction: discord.Interaction):
+            self.active_tab = "draft"
+            self.rebuild_layout()
+            await interaction.response.edit_message(view=self)
+        draft_btn.callback = on_draft_click
+        nav_row.add_item(draft_btn)
         
         container.add_item(nav_row)
         self.add_item(container)
@@ -123,11 +196,7 @@ class ViewResearchButton(discord.ui.Button):
         self.session = session_instance
 
     async def callback(self, interaction: discord.Interaction):
-        tab_view = ResearchPanelTabView(
-            plan=self.session.plan_text,
-            thoughts=self.session.current_thought,
-            sources_browsed=self.session.sources
-        )
+        tab_view = ResearchPanelTabView(session_instance=self.session)
         await interaction.response.send_message(view=tab_view, ephemeral=True)
 
 
@@ -381,10 +450,10 @@ class DeepResearchLaunchModal(discord.ui.Modal):
         self.user = user
 
         self.depth_select = discord.ui.RadioGroup(options=[
-            discord.RadioGroupOption(label="Quick Scan (5 sources)", value="brief", description="Fast, high-level summary. Takes ~30s."),
-            discord.RadioGroupOption(label="Deep Dive (15 sources)", value="standard", description="Balanced analysis, gap checks. Takes ~2 mins.", default=True),
-            discord.RadioGroupOption(label="Exhaustive Audit (30 sources)", value="exhaustive", description="Thorough check, recursive crawls. Takes ~5 mins."),
-            discord.RadioGroupOption(label="Extreme Core (60+ sources)", value="extreme", description="Deep recursive crawls, compiles data charts. Takes 10-20 mins.")
+            discord.RadioGroupOption(label="Quick Scan (5 sources)", value="brief", description="Fast, high-level summary. Takes ~10 mins."),
+            discord.RadioGroupOption(label="Deep Dive (15 sources)", value="standard", description="Balanced analysis, gap checks. Takes ~16 mins.", default=True),
+            discord.RadioGroupOption(label="Exhaustive Audit (30 sources)", value="exhaustive", description="Thorough check, recursive crawls. Takes ~25 mins."),
+            discord.RadioGroupOption(label="Extreme Core (60+ sources)", value="extreme", description="Deep recursive crawls, compiles data charts. Takes ~30-45 mins.")
         ])
         self.add_item(discord.ui.Label(
             text="📊 Research Scope / Depth",
@@ -393,11 +462,12 @@ class DeepResearchLaunchModal(discord.ui.Modal):
         ))
 
         self.format_select = discord.ui.RadioGroup(options=[
-            discord.RadioGroupOption(label="Markdown (.md)", value="markdown", description="Clean, lightweight layout. Copy/paste friendly.", default=True),
-            discord.RadioGroupOption(label="Word Document (.docx)", value="docx", description="Polished document. Includes custom cover & charts.")
+            discord.RadioGroupOption(label="Markdown (.md)", value="markdown", description="Clean, lightweight layout. Copy/paste friendly."),
+            discord.RadioGroupOption(label="Word Document (.docx) - Corporate", value="docx", description="Polished document. Includes custom cover & charts.", default=True),
+            discord.RadioGroupOption(label="MLA Essay (.docx) - Academic", value="mla", description="Double-spaced MLA format with Works Cited & parenthetical citations.")
         ])
         self.add_item(discord.ui.Label(
-            text=" TARGET Target File Format",
+            text="🎯 Target File Format",
             description="Select final compiled report file format.",
             component=self.format_select
         ))

@@ -10,3 +10,8 @@ pillow
 tzdata
 python-docx
 openpyxl
+sympy
+matplotlib
+moviepy 
+edge-tts
+pillow

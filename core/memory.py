@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import re
+import numpy as np
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
@@ -115,14 +116,16 @@ def should_preserve_message(message: discord.Message) -> bool:
         return True
     
     content = message.content
-    if content.startswith("**Image Upload:") or content.startswith("**AI Generated Image Saved:") or "[VISUAL MEMORY]" in content:
+    if content.startswith("[FACT_VEC]") or content.startswith("[VISUAL MEMORY]"):
+        return True
+    if content.startswith("**Image Upload:") or content.startswith("**AI Generated Image Saved:"):
         return True
     if "http" in content and (".png" in content or ".jpg" in content or "discordapp" in content):
         return True
     return bool(re.search(r'```json', content))
 
 
-async def consolidate_memories_if_needed(client: discord.Client, brain_server_id: int, forum_name: str, thread_name: str, threshold: int = 25):
+async def consolidate_memories_if_needed(client: discord.Client, brain_server_id: int, forum_name: str, thread_name: str, threshold: int = 35):
     guild = client.get_guild(brain_server_id)
     if not guild:
         return
@@ -193,7 +196,21 @@ async def consolidate_memories_if_needed(client: discord.Client, brain_server_id
 
 
 
-async def save_fact(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, fact: str) -> bool:
+async def generate_embedding(client: discord.Client, text: str) -> List[float]:
+    try:
+        result = await client.chat_handler.client.aio.models.embed_content(
+            model="text-embedding-004",
+            contents=text
+        )
+        if result and result.embeddings:
+            return result.embeddings[0].values
+    except Exception as e:
+        logger.error(f"Embedding generation failed: {e}")
+    return [0.0] * 768
+
+
+
+async def save_fact(client: discord.Client, brain_server_id: int, user: discord.User | discord.Member, fact: str, category: str = "PROFILE & IDENTITY", score: int = 10) -> bool:
     guild = client.get_guild(brain_server_id)
     if not guild: 
         return False
@@ -207,7 +224,17 @@ async def save_fact(client: discord.Client, brain_server_id: int, user: discord.
     if not thread:
         return False
         
-    await thread.send(fact)
+    vector = await generate_embedding(client, fact)
+    payload = {
+        "fact": fact,
+        "category": category,
+        "score": score,
+        "vector": vector,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
+    msg_content = f"[FACT_VEC] {json.dumps(payload, ensure_ascii=False)}"
+    await thread.send(msg_content)
     await consolidate_memories_if_needed(client, brain_server_id, "user-memories", str(user.id))
     return True
 
@@ -323,7 +350,7 @@ async def save_image_bytes_fact(client: discord.Client, brain_server_id: int, us
     return True
 
 
-async def save_server_fact(client: discord.Client, brain_server_id: int, server: discord.Guild, fact: str) -> bool:
+async def save_server_fact(client: discord.Client, brain_server_id: int, server: discord.Guild, fact: str, category: str = "PROFILE & IDENTITY", score: int = 10) -> bool:
     guild = client.get_guild(brain_server_id)
     if not guild or not server: 
         return False
@@ -337,12 +364,22 @@ async def save_server_fact(client: discord.Client, brain_server_id: int, server:
     if not thread:
         return False
         
-    await thread.send(fact)
+    vector = await generate_embedding(client, fact)
+    payload = {
+        "fact": fact,
+        "category": category,
+        "score": score,
+        "vector": vector,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
+    msg_content = f"[FACT_VEC] {json.dumps(payload, ensure_ascii=False)}"
+    await thread.send(msg_content)
     await consolidate_memories_if_needed(client, brain_server_id, "server-lore", str(server.id))
     return True
 
 
-async def save_global_fact(client: discord.Client, brain_server_id: int, fact: str) -> bool:
+async def save_global_fact(client: discord.Client, brain_server_id: int, fact: str, category: str = "PROFILE & IDENTITY", score: int = 10) -> bool:
     guild = client.get_guild(brain_server_id)
     if not guild: 
         return False
@@ -356,7 +393,17 @@ async def save_global_fact(client: discord.Client, brain_server_id: int, fact: s
     if not thread:
         return False
         
-    await thread.send(fact)
+    vector = await generate_embedding(client, fact)
+    payload = {
+        "fact": fact,
+        "category": category,
+        "score": score,
+        "vector": vector,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
+    msg_content = f"[FACT_VEC] {json.dumps(payload, ensure_ascii=False)}"
+    await thread.send(msg_content)
     await consolidate_memories_if_needed(client, brain_server_id, "global-memory", "global-database")
     return True
 
@@ -380,13 +427,21 @@ async def forget_fact(client: discord.Client, brain_server_id: int, category_nam
         return False
     
     async for msg in thread.history(limit=100):
-        if fact.lower().strip() in msg.content.lower().strip():
+        if msg.content.startswith("[FACT_VEC]"):
+            try:
+                payload = json.loads(msg.content[11:])
+                if fact.lower().strip() in payload.get("fact", "").lower().strip():
+                    await msg.delete()
+                    return True
+            except Exception:
+                pass
+        elif fact.lower().strip() in msg.content.lower().strip():
             await msg.delete()
             return True
     return False
 
 
-async def fetch_memory_block(client: discord.Client, brain_server_id: int, category_name: str, channel_name: str) -> str:
+async def fetch_memory_block(client: discord.Client, brain_server_id: int, category_name: str, channel_name: str, query_text: str = "") -> str:
     guild = client.get_guild(brain_server_id)
     if not guild: 
         return ""
@@ -404,16 +459,88 @@ async def fetch_memory_block(client: discord.Client, brain_server_id: int, categ
     if not thread:
         return ""
     
-    facts = []
-    async for msg in thread.history(limit=30):
+    raw_messages = []
+    async for msg in thread.history(limit=100):
         if msg.id == thread.id:
             continue
-        facts.append(msg.content)
+        raw_messages.append(msg)
         
-    facts.reverse()
-    if not facts: 
+    if not raw_messages:
         return ""
-    return "\n".join([f"{f}" for f in facts])
+
+    structured_memories = []
+    legacy_text_blocks = []
+
+    for msg in raw_messages:
+        content = msg.content.strip()
+        if content.startswith("[FACT_VEC]"):
+            try:
+                payload = json.loads(content[11:])
+                if "fact" in payload and "vector" in payload:
+                    structured_memories.append(payload)
+            except Exception:
+                pass
+        elif not should_preserve_message(msg):
+            legacy_text_blocks.append(content)
+
+    if query_text.strip() and (structured_memories or legacy_text_blocks):
+        try:
+            query_vector = np.array(await generate_embedding(client, query_text))
+            query_norm = np.linalg.norm(query_vector)
+            
+            for text_block in legacy_text_blocks:
+                block_vec = await generate_embedding(client, text_block)
+                structured_memories.append({
+                    "fact": text_block,
+                    "category": "PROFILE & IDENTITY",
+                    "score": 10,
+                    "vector": block_vec
+                })
+
+            scored_memories = []
+            for mem in structured_memories:
+                fact_vector = np.array(mem["vector"])
+                fact_norm = np.linalg.norm(fact_vector)
+                
+                if query_norm == 0.0 or fact_norm == 0.0:
+                    similarity = 0.0
+                else:
+                    similarity = float(np.dot(query_vector, fact_vector) / (query_norm * fact_norm))
+                
+                scored_memories.append((similarity, mem))
+
+            scored_memories.sort(key=lambda x: x[0], reverse=True)
+            top_memories = scored_memories[:12]
+            
+            categories = {
+                "PROFILE & IDENTITY": [],
+                "TECHNICAL ENVIRONMENT": [],
+                "RELATIONSHIP & VIBE": []
+            }
+            
+            for sim, mem in top_memories:
+                cat = mem.get("category", "PROFILE & IDENTITY")
+                if cat not in categories:
+                    categories[cat] = []
+                categories[cat].append(f"• {mem['fact']}")
+                
+            formatted_blocks = []
+            for cat_title, items in categories.items():
+                if items:
+                    formatted_blocks.append(f"### {cat_title}\n" + "\n".join(items))
+                    
+            return "\n\n".join(formatted_blocks).strip()
+            
+        except Exception as sim_err:
+            logger.error(f"Semantic similarity retrieval failed: {sim_err}. Falling back to standard list dump...")
+
+    fallback_lines = []
+    for mem in structured_memories:
+        fallback_lines.append(f"- {mem['fact']}")
+    for text_block in legacy_text_blocks:
+        fallback_lines.append(text_block)
+        
+    return "\n\n".join(fallback_lines).strip()
 
 
 async def save_config(client: discord.Client, brain_server_id: int, target_id: int, is_dm: bool, config_dict: dict) -> bool:
@@ -536,3 +663,65 @@ async def fetch_all_contexts_for_user(client, brain_server_id: int, user_id: int
             except Exception:
                 pass
     return snippets
+
+
+async def save_news_state(client: discord.Client, brain_server_id: int, guild_id: int, state_dict: dict) -> bool:
+    guild = client.get_guild(brain_server_id)
+    if not guild: 
+        return False
+    
+    thread_name = f"news-state-{guild_id}"
+    thread = await get_or_create_db_thread(
+        guild=guild,
+        forum_name="configurations",
+        thread_name=thread_name,
+        initial_content=f"Persistent state tracking for Guild {guild_id} Server News"
+    )
+    if not thread:
+        return False
+    
+    async for msg in thread.history(limit=10):
+        if msg.id != thread.id:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+    
+    state_str = json.dumps(state_dict, indent=2)
+    await thread.send(f"```json\n{state_str}\n```")
+    return True
+
+
+async def load_news_state(client: discord.Client, brain_server_id: int, guild_id: int) -> Optional[dict]:
+    guild = client.get_guild(brain_server_id)
+    if not guild: 
+        return None
+    
+    forum = discord.utils.get(guild.channels, name="configurations", type=discord.ChannelType.forum)
+    if not forum:
+        return None
+        
+    thread_name = f"news-state-{guild_id}"
+    thread = discord.utils.get(forum.threads, name=thread_name)
+    
+    if not thread:
+        try:
+            async for arch_thread in forum.archived_threads(limit=100):
+                if arch_thread.name == thread_name:
+                    thread = arch_thread
+                    break
+        except Exception:
+            pass
+            
+    if not thread:
+        return None
+    
+    async for msg in thread.history(limit=5):
+        if "```json" in msg.content:
+            match = re.search(r'```json\s*(.*?)\s*```', msg.content, flags=re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(1))
+                except Exception:
+                    pass
+    return None

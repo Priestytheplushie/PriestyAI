@@ -75,7 +75,7 @@ def inject_message_builder_hook(bot_class_instance):
             config_state = await self.get_config(target_id, is_dm)
             
             if "Memory Journals" in config_state.get("system_tools", []):
-                memories = await self._compile_memories_for_ai(author, channel)
+                memories = await self._compile_memories_for_ai(author, channel, query_text=instruction_payload)
             else:
                 memories = {"user_memories": "", "server_lore": "", "global_database": ""}
             

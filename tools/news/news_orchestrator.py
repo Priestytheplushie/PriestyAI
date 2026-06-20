@@ -13,7 +13,11 @@ from google.genai import types
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from tools.news.data_gatherer import NewsDataGatherer, TARGET_GUILD_ID
+try:
+    from tools.news.data_gatherer import NewsScraper
+except ImportError:
+    NewsScraper = None
+
 from tools.news.video_generator import generate_full_news_video
 
 
@@ -73,9 +77,9 @@ def get_and_update_state(server_name: str, gemini_key: str, news_model: str) -> 
     return episode, show_name
 
 
-async def write_news_script_with_rate_limits(edition: str, episode_number: int, date_str: str, time_str: str, show_name: str) -> list:
+async def write_news_script_with_rate_limits(edition: str, episode_number: int, date_str: str, time_str: str, show_name: str, guild_id: int = 0) -> list:
     from tools.news.script_writer import write_news_script
-    return await write_news_script(edition, episode_number, date_str, time_str, show_name)
+    return await write_news_script(edition, episode_number, date_str, time_str, show_name, guild_id=guild_id)
 
 
 def upload_to_streamable(video_path: str, title: str) -> str:
@@ -119,16 +123,36 @@ async def main():
         default="auto",
         help="Specify format. 'auto' detects based on current time."
     )
+    parser.add_argument(
+        "--guild-id",
+        type=int,
+        required=True,
+        help="Target Discord Guild ID to process."
+    )
     args = parser.parse_args()
 
     if args.edition == "auto":
-        current_hour = datetime.now().hour
+        import zoneinfo
+        try:
+            tz = zoneinfo.ZoneInfo("America/New_York")
+        except Exception:
+            tz = timezone.utc
+            
+        local_now = datetime.now(tz)
+        current_hour = local_now.hour
+        
         if current_hour < 12:
             edition = "morning"
         else:
             edition = "night"
     else:
         edition = args.edition
+
+    guild_id = args.guild_id
+
+    if not NewsScraper:
+        print("❌ Error: NewsScraper could not be imported from data_gatherer.")
+        return
 
     print("[PHASE 1: GATHERING SERVER DATA]")
     token = os.getenv("DISCORD_TOKEN")
@@ -142,77 +166,8 @@ async def main():
         print("❌ Error: GEMINI_API_KEY not found in environment variables.")
         return
 
-    gatherer = NewsDataGatherer()
-    try:
-        await gatherer.start(token)
-    except Exception as e:
-        print(f"❌ Data gathering stage failed: {e}")
-        return
-
-    raw_data_path = "temp/raw_news_data.json"
-    if not os.path.exists(raw_data_path):
-        print("❌ Error: Staging data was not generated. Pipeline aborted.")
-        return
-
-    with open(raw_data_path, "r", encoding="utf-8") as f:
-        raw_server_data = json.load(f)
-    server_name = raw_server_data.get("server_name", "Cool Server")
-
-    episode_number, show_name = get_and_update_state(server_name, gemini_key, news_model)
-    
-    utc_now = datetime.now(timezone.utc)
-    local_now = utc_now - timedelta(hours=4)
-    
-    formatted_date = local_now.strftime("%A, %B %d, %Y")
-    formatted_time = "9:00 AM" if edition == "morning" else "8:00 PM"
-
-    print("=====================================================================")
-    print(f"🎬 STARTING PRIESTYAI NEWS PIPELINE: {edition.upper()} EDITION")
-    print(f"📣 Show: '{show_name}' | Episode: {episode_number}")
-    print(f"🕒 Date: {formatted_date} | target time: {formatted_time}")
-    print("=====================================================================\n")
-
-    print("[PHASE 2: COMPOSING AUDIO SCRIPTS & GRAPHICAL OVERLAYS]")
-    try:
-        segments = await write_news_script_with_rate_limits(edition, episode_number, formatted_date, formatted_time, show_name)
-    except Exception as e:
-        print(f"❌ Script composition stage failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return
-
-    music_path = "assets/late_night_jazz.mp3" if edition == "night" else "assets/morning_acoustic.mp3"
-
-    print("[PHASE 3: RENDERING HIGH-FIDELITY LAYOUTS & COMPILING BROADCAST]")
-    local_output_filename = f"temp_{edition}_edition_broadcast.mp4"
-    try:
-        await generate_full_news_video(segments, local_output_filename, music_path=music_path, edition=edition)
-    except Exception as e:
-        print(f"❌ Video compilation stage failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return
-
-    title = f"{show_name} - Ep. {episode_number} ({edition.capitalize()})"
-    streamable_url = upload_to_streamable(local_output_filename, title)
-
-    os.makedirs("archive", exist_ok=True)
-    archive_filename = f"archive/{show_name.replace(' ', '_')}_Ep_{episode_number}_{edition}.mp4"
-    try:
-        import shutil
-        shutil.copyfile(local_output_filename, archive_filename)
-        print(f"💾 Raw video backed up to permanent archive location: {archive_filename}")
-    except Exception as e:
-        print(f"⚠️ Failed to archive file: {e}")
-
-    print("\n=====================================================================")
-    print("🎉 VIDEO COMPILATION PROCESS COMPLETE!")
-    if streamable_url:
-        print(f"📺 STREAMABLE BROADCAST LINK: {streamable_url}")
-    else:
-        print(f"📁 Local File Location: {os.path.abspath(local_output_filename)}")
-        print("⚠️ Streamable upload skipped or failed. Verify credentials in .env file.")
-    print("=====================================================================\n")
+    print("⚠️ Standing up stateless NewsScraper instance... For full operations, run through the bot client.")
+    return
 
 
 if __name__ == "__main__":

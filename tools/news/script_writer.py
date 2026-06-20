@@ -54,7 +54,6 @@ async def fetch_avatar_bytes(url: str, output_path: str) -> bool:
 
 
 def render_stacked_conversation_card(quotes: List[dict], avatar_paths: List[str], output_path: str):
-    """Renders up to 4 consecutive Discord messages stacked vertically in a dark-mode card."""
     card_width = 650
     card_height = 80 + (len(quotes) * 85)
     
@@ -199,7 +198,6 @@ def render_calendar_card(event_name: str, date_iso_str: str, output_path: str):
 
 
 def render_mystery_placeholder_card(output_path: str):
-    """Renders a sleek, neon-pulsing mystery card with a glowing question mark for the server vibe (No info leaked)."""
     card_width = 450
     card_height = 320
     bg_color = (24, 24, 35, 245)
@@ -226,7 +224,6 @@ def render_mystery_placeholder_card(output_path: str):
 
 
 def render_award_plaque_card(recipient_name: str, award_title: str, avatar_path: str, output_path: str):
-    """Renders a highly polished golden/wooden award plaque with the recipient's avatar."""
     card_width = 480
     card_height = 320
     
@@ -310,7 +307,6 @@ def render_award_plaque_card(recipient_name: str, award_title: str, avatar_path:
 
 
 def render_community_mailbag_card(sender_name: str, question_text: str, output_path: str):
-    """Renders a friendly community Q&A envelope/post-it card with a dynamic tape seal."""
     card_width = 480
     card_height = 320
     
@@ -361,7 +357,6 @@ def render_community_mailbag_card(sender_name: str, question_text: str, output_p
 
 
 def render_guest_interview_card(guest_name: str, avatar_path: str, output_path: str):
-    """Renders a sleek late-night guest card displaying the user's avatar on the couch."""
     card_width = 450
     card_height = 320
     bg_color = (20, 20, 25, 245)
@@ -414,7 +409,6 @@ def render_guest_interview_card(guest_name: str, avatar_path: str, output_path: 
     card.save(output_path, "PNG")
 
 async def download_pollinations_vibe_art(prompt: str, output_path: str) -> bool:
-    """Downloads dynamic artwork representing the server vibe from Pollinations AI safely."""
     if not prompt:
         return False
     encoded_prompt = urllib.parse.quote(prompt.strip())
@@ -503,33 +497,40 @@ Analyze the raw server JSON log data provided. Do NOT follow a rigid, hardcoded 
 6. RECAP MAIN DISCUSSIONS: Identify the 1 or 2 most active discussion channels within the JSON data. Synthesize what the community was talking about or debating. If there is an active back-and-forth between specific members, quote them accurately using the 'quotes' property array. Frame Template: 'Full-Screen Media' if quoting a multi-line conversation thread, or 'Split-Screen'/'Standard Report' for a single-channel summary.
 7. THE OUTRO: Close the show gracefully by wishing everyone a great, productive day ahead. Frame Template: 'Solo Anchor'.
 
-CRITICAL IDENTITY RULE: You are PriestyAI, the digital news host. You are NOT the human server developer/owner Priesty. Refer to him in the third person as 'our developer, Priesty' or 'the admin, Priesty'. Never use first-person pronouns when referencing his chat logs.
-CRITICAL DESIGN RULE: Each generated segment's script_text must be written in comprehensive detail (80 to 120 words). Never use filler phrases or make up members not present in the logs.
+QUIET DAY MODULAR SWAP: If the server is extremely quiet (less than 5 chat messages), replace the standard discussion recap segments with a detailed, creative 'Server Lore Explainer' segment where you deep-dive into the funny origins of a running joke, a specific server channel, or an obscure role found in the metadata.
+
+CRITICAL STAFF IDENTITY RULE: You are PriestyAI, the digital talk-show host. You are NOT the human server developer/owner Priesty, nor are you any other admin or moderator. When discussing messages, updates, or announcements made by Priesty or other administrators, refer to them in the third person as 'our administrator, [Name]', 'the staff team', or 'our moderation crew'. Never use first-person pronouns ('I', 'me', 'my', 'our developer') to represent their statements or logs.
+CRITICAL DESIGN RULE: Each generated segment's script_text must be written in detail (80 to 120 words). Never use filler phrases or make up members not present in the logs.
 """
 
 NIGHT_PROMPT = """
 You are an exceptionally funny, satirical, and fast-paced Late-Night Talk Show host named PriestyAI.
 You are witty, slightly sarcastic, and thrive on calling out server-side drama, hot takes, and memes.
 
-Analyze the raw server JSON log data provided. Do NOT assume specific hardcoded scenarios. Instead, inspect the data and build a cohesive, narrative late-night program using these dynamic blocks:
+Analyze the raw server JSON log data provided. Your late-night broadcast must strictly follow this 10-step segment layout and be highly detailed:
+1. THE COLD OPEN / MONOLOGUE: Roast today's biggest server drama, funniest argument, or weirdest quote. Introduce the show, Date, and Episode. Frame Template: 'Solo Anchor'.
+2. SERVER VIBE REVEAL: Determine a dynamic "Server Vibe Name" representing the chat activity (e.g. 'Salty Rage-Quitting'). 
+   CRITICAL SURPRISE RULE: You must NOT leak, write, or speak the vibe name or description in Segment 2's dialogue, banner, or ticker. Keep the name a complete secret to build late-night suspense! The host must only tease that they have locked in a vibe and that the render engines are currently compiling the artwork in the background. Define the vibe prompt in the 'vibe_query' property so we can download it. Frame Template: 'Standard Report' (this will display a generic Classified Mystery card).
+3. RAPID-FIRE CHAT ROASTS: Roast and critique 2-3 specific server chat events or quotes. Group them inside the 'quotes' list. Frame Template: 'Full-Screen Media'.
+4. THE DECREE ON MODERATION: Find rules updates, remarks, or statements from moderators/admin, and treat them as absurd tyrannical government laws or overreaches. Frame Template: 'Standard Report'.
+5. SPECIAL GUEST COUCH (INTERVIEW): Pick an active user, call them "the special guest of the night", ask a highly formal/dramatic interview question, and reply using their past messages as the guest answers (making fun of how they are completely out-of-context!). Put their messages in the 'quotes' list. Frame Template: 'Split-Screen'.
+6. REAL LIFE SATIRE: Provide 1-2 real-life stories from 'real_world_news' and give a sharp, opinionated, satirical opinion. Frame Template: 'Solo Anchor'.
+7. THE WEATHER FORECAST: Select a random active user and make a personalized, satirical weather forecast based on their gaming habits/chat vibe. Frame Template: 'Standard Report'.
+8. THE COMMUNITY AWARDS: Award a user with a funny comedic award. Fill out the 'award_recipient' and 'award_title' fields so Pillow renders their plaque. Read some of their chat logs aloud to explain why they earned it. Frame Template: 'Standard Report'.
+9. THE SERVER VIBE UNVEILING: Officially showcase the finalized unique Pollinations art compiled in the background! 
+   CRITICAL SURPRISE REVEAL: This is where you reveal BOTH the Vibe Name and the image. The banner_text must show the vibe name (e.g. 'Tonight's Vibe Revealed: Salty Gaming!'). The host must read out the vibe name and analyze/joke about the completed artwork. Copy the exact same 'vibe_query' from Segment 2 here. Frame Template: 'Full-Screen Media'.
+10. SLEEP OUTRO: End with a funny closing quote telling everyone to close their games, touch real-world grass, and go to sleep because it's 3:00 AM. Frame Template: 'Solo Anchor'.
 
-1. THE LATE MONOLOGUE: Kick off with a funny summary or roast targeting the absolute wildest or most active discussion thread found anywhere in 'public_discussions'. Cite the Episode, Date, and late-night hour. Frame Template: 'Solo Anchor'.
-2. METRIC VIBE CHECK: Evaluate the overall server mood from today's text channels. Formulate a custom, descriptive 3-5 word "Server Vibe Name" (e.g. 'CoD Ranked Delusion'). 
-   CRITICAL SURPRISE RULE: Do NOT say or print the vibe name in this segment's text, banner, or ticker. Keep it a strict secret! Tease the audience that the background engines are currently rendering the art. Put the prompt into 'vibe_query'. Frame Template: 'Standard Report'.
-3. ACTIVE CHAT ROASTS: Identify a chaotic or funny exchange between users in the logs. Populate the 'quotes' list with their actual statements and hilariously critique their logic. Frame Template: 'Full-Screen Media'.
-4. LEADERSHIP INSIGHTS: Look at text from moderators, admins, or active veterans. Take their warnings, rules, or pinning comments and comedically treat them as over-the-top, dramatic decrees. If no mod messages exist, pivot to roasting the lack of law and order. Frame Template: 'Standard Report'.
-5. COUCH INTERVIEW: Choose an active, talkative user from today's logs. Bring them out onto the "couch" as your special guest. Ask a high-stakes interview question, and use a couple of their actual log messages as their "out-of-context answers." Group their responses in the 'quotes' list. Frame Template: 'Split-Screen'.
-6. WORLD SATIRE: Review the 'real_world_news' stories provided and deliver a sharp, satirical late-night hot take on real-world events. Frame Template: 'Solo Anchor'.
-7. COMMUNITY LAURELS: Choose a standout chatter or gamer from the logs. Grant them a funny custom award by populating 'award_recipient' and 'award_title' fields. Read their real log entries to justify the award. Frame Template: 'Standard Report'.
-8. VIBE ART UNVEILING: The big reveal! Read out the exact Server Vibe Name you locked in during Segment 2 and analyze the completed Pollinations image. The banner_text MUST explicitly showcase the vibe name here (e.g., 'Tonight's Vibe Revealed: Salty Gaming!'). Frame Template: 'Full-Screen Media'.
-9. CLOSING SIGN-OFF: Close the broadcast with a snappy line telling everyone to turn off their screens, log out of their games, and go to bed. Frame Template: 'Solo Anchor'.
+QUIET DAY MODULAR SWAPS:
+* If the server is quiet, replace the global vibe check with a 'User Dossier' segment. Select one prominent active member from the logs, declare that you are running a 'Classification Study' on them, and assign them a personalized, funny Vibe Name. Put a 3-5 word portrait prompt representing their personality into the 'vibe_query' property (this will display a mystery '?' card in Segment 2 and unveil their portrait in Segment 8).
+* If the server is extremely quiet (less than 5 chat messages), replace the standard awards segment with a subtle, self-aware comedy block. The host will pull a random trivial keyword or message from the quiet logs, tell three increasingly terrible, groan-worthy puns or situational jokes about it, and sardonically roast their own rendering code for generating such awkward humor. Do NOT use the phrase 'dad jokes'—keep the humor delivery subtle, dry, and self-effacing.
 
 CRITICAL TRANSITION RULE: You are a sharp, seamless late-night host. Never write robotic transitions like 'And now onto the daily roasts', 'The next segment is...', or 'Moving on to awards'. Slide into topics naturally and colloquially (e.g., 'Meanwhile, sanity was officially outlawed in the lounge yesterday...', 'Speaking of questionable life choices, let us look at...', or 'I received some anonymous letters in our inbox...'). Transitions must feel smooth, witty, and conversational.
 
-CRITICAL IDENTITY RULE: You are PriestyAI, the digital news host. You are NOT the human server developer/owner Priesty. Refer to him in the third person as 'our developer, Priesty' or 'the admin, Priesty'. Never use first-person pronouns when referencing his chat logs.
+CRITICAL STAFF IDENTITY RULE: You are PriestyAI, the digital talk-show host. You are NOT the human server developer/owner Priesty, nor are you any other admin or moderator. When discussing messages, updates, or announcements made by Priesty or other administrators, refer to them in the third person as 'our administrator, [Name]', 'the staff team', or 'our moderation crew'. Never use first-person pronouns ('I', 'me', 'my', 'our developer') to represent their statements or logs.
 """
 
-async def write_news_script(edition: str = "morning", episode_number: int = 1, date_str: str = "", time_str: str = "", show_name: str = "PriestyAI News") -> list:
+async def write_news_script(edition: str = "morning", episode_number: int = 1, date_str: str = "", time_str: str = "", show_name: str = "PriestyAI News", length: str = "Standard", guild_id: int = 0) -> list:
     load_dotenv()
     gemini_key = os.getenv("GEMINI_API_KEY")
     news_model = os.getenv("GEMINI_NEWS_MODEL", "gemini-2.5-flash")
@@ -538,16 +539,33 @@ async def write_news_script(edition: str = "morning", episode_number: int = 1, d
     if not gemini_key:
         raise ValueError("GEMINI_API_KEY not found in environment variables.")
 
-    raw_data_path = "temp/raw_news_data.json"
+    raw_data_path = f"temp/raw_news_data_{guild_id}.json"
     if not os.path.exists(raw_data_path):
-        raise FileNotFoundError(f"'{raw_data_path}' not found. Run tools/news/data_gatherer.py first.")
+        raise FileNotFoundError(f"'{raw_data_path}' not found. Run Scraper first.")
         
     with open(raw_data_path, "r", encoding="utf-8") as f:
         raw_server_data_json = json.load(f)
 
+    length_instruction = f"Your show length configuration is: {length.upper()}. "
+    if length.lower() == "brief":
+        length_instruction += "You must generate exactly 4 short, high-velocity segments."
+    elif length.lower() == "extended":
+        length_instruction += "You must expand the coverage to compile exactly 12 segments including Server Lore, detailed Q&As, and deep-dives."
+    else:
+        length_instruction += "You must generate the standard amount of segments."
+
     system_instruction = MORNING_PROMPT if edition.lower() == "morning" else NIGHT_PROMPT
+    system_instruction += f"\n\n=== LENGTH ADJUSTMENT RULES ===\n{length_instruction}"
     
-    print(f"Sending context to Gemini ({news_model}). Writing {edition.upper()} Edition script...")
+    total_messages = 0
+    for channel_name, chan_data in raw_server_data_json.get("public_discussions", {}).items():
+        total_messages += len(chan_data.get("messages", []))
+    
+    is_quiet_day = total_messages < 15
+    if is_quiet_day:
+        print(f"⚠️ Slow News Day detected (Total messages: {total_messages}). Activating quiet-day modular overrides...")
+
+    print(f"Sending context to Gemini ({news_model}). Writing {edition.upper()} Edition script ({length})...")
     client = genai.Client(api_key=gemini_key)
     
     config = types.GenerateContentConfig(
@@ -563,6 +581,9 @@ async def write_news_script(edition: str = "morning", episode_number: int = 1, d
         f"Today's Date: {date_str}.\n"
         f"Broadcast Time: {time_str}.\n"
         f"The broadcast edition is {edition.upper()}.\n\n"
+        f"=== SERVER ACTIVITY STATUS ===\n"
+        f"Total public discussion messages gathered today: {total_messages}\n"
+        f"Is Quiet/Slow Day: {'TRUE (You MUST trigger the Quiet Day Modular Swaps as instructed in your system guidelines!)' if is_quiet_day else 'FALSE (Standard Broadcast)'}\n\n"
     )
     
     response = await client.aio.models.generate_content(
@@ -603,7 +624,7 @@ async def write_news_script(edition: str = "morning", episode_number: int = 1, d
 
     if active_vibe_query:
         os.makedirs("temp", exist_ok=True)
-        vibe_img_path = "temp/compiled_vibe_art.jpg"
+        vibe_img_path = f"temp/compiled_vibe_art_{guild_id}.jpg"
         print(f" -> Sourcing dynamic Server Vibe artwork via Pollinations AI for: '{active_vibe_query}'...")
         await download_pollinations_vibe_art(active_vibe_query, vibe_img_path)
 
@@ -626,25 +647,25 @@ async def write_news_script(edition: str = "morning", episode_number: int = 1, d
         if frame_template == "Split-Screen" or "couch" in pexels_bg_search.lower():
             pexels_bg_search = "midnight neon city loop"
 
-        bg_video_path = f"temp/pexels_bg_{idx}.mp4"
+        bg_video_path = f"temp/pexels_bg_{guild_id}_{idx}.mp4"
         bg_video_success = await download_pexels_background_loop(pexels_bg_search, bg_video_path, pexels_key)
         final_bg_path = bg_video_path if bg_video_success else ""
 
         if vibe_query and idx == 1:
             os.makedirs("temp", exist_ok=True)
-            output_mystery_path = f"temp/mystery_card_{idx}.png"
+            output_mystery_path = f"temp/mystery_card_{guild_id}_{idx}.png"
             render_mystery_placeholder_card(output_mystery_path)
             overlay_path = output_mystery_path
 
         elif idx == len(raw_segments) - 2 and active_vibe_query:
-            vibe_img_path = "temp/compiled_vibe_art.jpg"
+            vibe_img_path = f"temp/compiled_vibe_art_{guild_id}.jpg"
             if os.path.exists(vibe_img_path):
                 overlay_path = vibe_img_path
 
         elif quotes_list and frame_template == "Split-Screen":
             os.makedirs("temp", exist_ok=True)
-            output_guest_path = f"temp/guest_card_{idx}.png"
-            output_avatar_path = f"temp/guest_avatar_{idx}.png"
+            output_guest_path = f"temp/guest_card_{guild_id}_{idx}.png"
+            output_avatar_path = f"temp/guest_avatar_{guild_id}_{idx}.png"
             
             guest_name = quotes_list[0].get("author") or "Special Guest"
             av_url = find_user_avatar_url(guest_name)
@@ -660,15 +681,15 @@ async def write_news_script(edition: str = "morning", episode_number: int = 1, d
 
         elif award_recipient and award_title:
             os.makedirs("temp", exist_ok=True)
-            output_award_path = f"temp/award_plaque_{idx}.png"
-            output_avatar_path = f"temp/award_avatar_{idx}.png"
+            output_award_path = f"temp/award_plaque_{guild_id}_{idx}.png"
+            output_avatar_path = f"temp/award_avatar_{guild_id}_{idx}.png"
             
             av_url = find_user_avatar_url(award_recipient)
             avatar_local_path = ""
             if av_url:
-                av_success = await fetch_avatar_bytes(av_url, output_avatar_path)
+                av_success = await fetch_avatar_bytes(av_url, output_award_path)
                 if av_success:
-                    avatar_local_path = output_avatar_path
+                    avatar_local_path = output_award_path
             
             print(f" -> Compiling dynamic golden plaque card for '{award_recipient}'...")
             render_award_plaque_card(award_recipient, award_title, avatar_local_path, output_award_path)
@@ -676,26 +697,26 @@ async def write_news_script(edition: str = "morning", episode_number: int = 1, d
 
         elif mailbag_sender and mailbag_question:
             os.makedirs("temp", exist_ok=True)
-            output_mailbag_path = f"temp/mailbag_{idx}.png"
+            output_mailbag_path = f"temp/mailbag_{guild_id}_{idx}.png"
             print(f" -> Compiling community mailbag card from '{mailbag_sender}'...")
             render_community_mailbag_card(mailbag_sender, mailbag_question, output_mailbag_path)
             overlay_path = output_mailbag_path
 
         elif cal_event_name and cal_date_iso:
             os.makedirs("temp", exist_ok=True)
-            output_cal_path = f"temp/calendar_card_{idx}.png"
+            output_cal_path = f"temp/calendar_card_{guild_id}_{idx}.png"
             render_calendar_card(cal_event_name, cal_date_iso, output_cal_path)
             overlay_path = output_cal_path
 
         elif quotes_list:
             os.makedirs("temp", exist_ok=True)
-            output_card_path = f"temp/conversation_card_{idx}.png"
+            output_card_path = f"temp/conversation_card_{guild_id}_{idx}.png"
             
             avatar_local_paths = []
             for q_idx, quote_obj in enumerate(quotes_list):
                 author_name = quote_obj.get("author") or "User"
                 av_url = find_user_avatar_url(author_name)
-                local_av_path = f"temp/avatar_raw_{idx}_{q_idx}.png"
+                local_av_path = f"temp/avatar_raw_{guild_id}_{idx}_{q_idx}.png"
                 av_success = False
                 if av_url:
                     av_success = await fetch_avatar_bytes(av_url, local_av_path)
@@ -703,11 +724,39 @@ async def write_news_script(edition: str = "morning", episode_number: int = 1, d
             
             print(f" -> Compiling stacked conversation layout with {len(quotes_list)} messages...")
             render_stacked_conversation_card(quotes_list, avatar_local_paths, output_card_path)
-            overlay_path = output_card_path
+            
+            attachment_found = False
+            for q_obj in quotes_list:
+                author_name = q_obj.get("author") or ""
+                quote_text = q_obj.get("text") or ""
+                
+                for channel_name, chan_data in raw_server_data_json.get("public_discussions", {}).items():
+                    for m in chan_data.get("messages", []):
+                        if (m.get("author") == author_name and quote_text in m.get("content", "")) or (m.get("username") == author_name and quote_text in m.get("content", "")):
+                            attachments = m.get("attachments") or []
+                            if attachments:
+                                os.makedirs("temp", exist_ok=True)
+                                output_att_path = f"temp/quote_attachment_{guild_id}_{idx}.png"
+                                print(f" -> Dynamic Visual Meme Match! Downloading Discord attachment from '{author_name}'...")
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.get(attachments[0], timeout=20) as resp:
+                                        if resp.status == 200:
+                                            with open(output_att_path, "wb") as f:
+                                                f.write(await resp.read())
+                                            overlay_path = output_att_path
+                                            attachment_found = True
+                                            break
+                    if attachment_found:
+                        break
+                if attachment_found:
+                    break
+            
+            if not attachment_found:
+                overlay_path = output_card_path
             
         elif overlay_search:
             os.makedirs("temp", exist_ok=True)
-            output_img_path = f"temp/pexels_photo_overlay_{idx}.jpg"
+            output_img_path = f"temp/pexels_photo_overlay_{guild_id}_{idx}.jpg"
             success = await download_pexels_photo_overlay(overlay_search, output_img_path, pexels_key)
             if success:
                 overlay_path = output_img_path
@@ -723,9 +772,7 @@ async def write_news_script(edition: str = "morning", episode_number: int = 1, d
         })
         
     os.makedirs("temp", exist_ok=True)
-    with open("temp/news_segments_draft.json", "w", encoding="utf-8") as f:
+    with open(f"temp/news_segments_draft_{guild_id}.json", "w", encoding="utf-8") as f:
         json.dump(final_segments, f, indent=4, ensure_ascii=False)
         
     return final_segments
-
---- END OF FILE script_writer.py ---

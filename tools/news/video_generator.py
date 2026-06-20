@@ -190,12 +190,12 @@ def render_live_tag_cover(output_path: str, edition: str = "morning"):
     img.save(output_path, "PNG")
 
 
-async def compile_news_segment(segment_data: dict, segment_index: int, master_ticker: str, edition: str = "morning") -> CompositeVideoClip:
+async def compile_news_segment(segment_data: dict, segment_index: int, master_ticker: str, edition: str = "morning", guild_id: int = 0) -> CompositeVideoClip:
     os.makedirs("temp", exist_ok=True)
-    audio_path = f"temp/audio_{segment_index}.mp3"
-    frame_path = f"temp/frame_{segment_index}.png"
-    ticker_path = f"temp/ticker_{segment_index}.png"
-    live_tag_path = f"temp/live_tag_cover_{edition}.png"
+    audio_path = f"temp/audio_{guild_id}_{segment_index}.mp3"
+    frame_path = f"temp/frame_{guild_id}_{segment_index}.png"
+    ticker_path = f"temp/ticker_{guild_id}_{segment_index}.png"
+    live_tag_path = f"temp/live_tag_cover_{guild_id}_{edition}.png"
 
     print(f"Generating voice narrative track for segment {segment_index}...")
     await generate_tts_audio(segment_data["script_text"], audio_path)
@@ -243,11 +243,10 @@ async def compile_news_segment(segment_data: dict, segment_index: int, master_ti
     composite_segment = CompositeVideoClip([layout_clip, ticker_clip, live_cover_clip]).with_duration(duration)
     return composite_segment
 
-
-async def generate_full_news_video(segments: list, output_filepath: str, music_path: str = "", edition: str = "morning"):
+def generate_full_news_video(segments: list, output_filepath: str, music_path: str = "", edition: str = "morning", guild_id: int = 0):
     os.makedirs("temp", exist_ok=True)
-    silent_video_path = "temp/silent_video_draft.mp4"
-    master_audio_path = "temp/master_audio_track.mp3"
+    silent_video_path = f"temp/silent_video_draft_{guild_id}.mp4"
+    master_audio_path = f"temp/master_audio_track_{guild_id}.mp3"
 
     ticker_list = []
     for s in segments:
@@ -261,10 +260,18 @@ async def generate_full_news_video(segments: list, output_filepath: str, music_p
     master_ticker = "   •   ".join(ticker_list)
     print(f"Compiled Master Ticker Feed: \"{master_ticker[:80]}...\"")
 
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     video_clips = []
-    for idx, seg in enumerate(segments):
-        v_clip = await compile_news_segment(seg, idx, master_ticker, edition=edition)
-        video_clips.append(v_clip)
+    try:
+        for idx, seg in enumerate(segments):
+            v_clip = loop.run_until_complete(
+                compile_news_segment(seg, idx, master_ticker, edition=edition, guild_id=guild_id)
+            )
+            video_clips.append(v_clip)
+    finally:
+        loop.close()
 
     print("Concatenating visual segments...")
     final_silent_video = concatenate_videoclips(video_clips, method="compose")
@@ -287,11 +294,12 @@ async def generate_full_news_video(segments: list, output_filepath: str, music_p
     print("Muxing audio track...")
     with open(master_audio_path, "wb") as outfile:
         for idx in range(len(segments)):
-            with open(f"temp/audio_{idx}.mp3", "rb") as infile:
-                outfile.write(infile.read())
+            path_chunk = f"temp/audio_{guild_id}_{idx}.mp3"
+            if os.path.exists(path_chunk):
+                with open(path_chunk, "rb") as infile:
+                    outfile.write(infile.read())
 
-    mixed_audio_output_path = "temp/master_mixed_audio_output.mp3"
-    use_mixed_audio = False
+    mixed_audio_output_path = f"temp/master_mixed_audio_output_{guild_id}.mp3"
     
     if music_path and os.path.exists(music_path):
         print(f"Sourcing background music backplate: '{music_path}'...")
@@ -339,5 +347,20 @@ async def generate_full_news_video(segments: list, output_filepath: str, music_p
     
     if process.returncode == 0:
         print(f"🎉 Success! High-quality video compiled: {output_filepath}")
+        
+        for idx in range(len(segments)):
+            temp_path = f"temp/audio_{guild_id}_{idx}.mp3"
+            if os.path.exists(temp_path):
+                try: os.remove(temp_path)
+                except Exception: pass
+        if os.path.exists(silent_video_path):
+            try: os.remove(silent_video_path)
+            except Exception: pass
+        if os.path.exists(master_audio_path):
+            try: os.remove(master_audio_path)
+            except Exception: pass
+        if os.path.exists(mixed_audio_output_path):
+            try: os.remove(mixed_audio_output_path)
+            except Exception: pass
     else:
         print(f"❌ Muxing error: {process.stderr.decode()}")

@@ -1344,3 +1344,284 @@ class ProfileEditModal(discord.ui.Modal):
         except Exception as e:
             logger.error(f"Failed to apply server profile customization: {e}")
             await interaction.followup.send(f"❌ An error occurred while saving your server profile: {e}", ephemeral=True)
+
+class NewsConfigModalStage1(discord.ui.Modal):
+    def __init__(self, current_config: dict, target_id: int, bot_instance):
+        super().__init__(title="Configure Server News (Beta)", timeout=None)
+        self.bot = bot_instance
+        self.target_id = target_id
+        self.current_config = current_config
+
+        self.explanation = discord.ui.TextDisplay(
+            content="ℹ️ **Server News Beta**\n"
+                    "This system automatically aggregates daily public text chats, announcements, and scheduled events, "
+                    "composing a fully voiced broadcast video via Gemini. This is an experimental feature.\n\n"
+                    "Background renders run at 8:30 AM and 7:30 PM local timezone to prepare resources safely before airtime."
+        )
+        self.add_item(self.explanation)
+
+        opts = [
+            discord.CheckboxGroupOption(
+                label="Yes, Enable Server News (Beta)", 
+                value="enabled", 
+                description="Turn on automated background staging and scheduled daily updates.", 
+                default=False
+            )
+        ]
+        self.news_enabled_cb = discord.ui.CheckboxGroup(options=opts, min_values=0, max_values=1, required=False)
+        lbl_enabled = discord.ui.Label(
+            text="⚙️ Activation Status",
+            description="Toggle to activate daily news compilations for this server.",
+            component=self.news_enabled_cb
+        )
+        self.add_item(lbl_enabled)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        is_enabled = "enabled" in self.news_enabled_cb.values
+        
+        if is_enabled:
+            self.current_config["news_enabled"] = True
+            import core.memory as memory
+            await memory.save_config(self.bot, self.bot.brain_server_id, self.target_id, False, self.current_config)
+            self.bot.configs[self.target_id] = self.current_config
+            
+            await interaction.followup.send(
+                "✅ **Server News (Beta) has been activated!**\n\n"
+                "Run `/config target:Server News` again to access the **Control Room** and complete your broadcast setup.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send("❌ Activation aborted. News was not enabled.", ephemeral=True)
+
+
+class NewsControlRoomView(discord.ui.View):
+    def __init__(self, current_config: dict, target_id: int, bot_instance):
+        super().__init__(timeout=None)
+        self.bot = bot_instance
+        self.target_id = target_id
+        self.current_config = current_config
+
+    @discord.ui.button(label="Configure Settings", style=discord.ButtonStyle.primary, emoji="⚙️")
+    async def configure_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = NewsConfigModalStage2(self.current_config, self.target_id, self.bot)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Station Branding & Ep", style=discord.ButtonStyle.secondary, emoji="🎭")
+    async def branding_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        import core.memory as memory
+        state = await memory.load_news_state(self.bot, self.bot.brain_server_id, self.target_id)
+        if not state:
+            state = {
+                "last_episode_number": 0,
+                "show_name": "",
+                "last_morning_pregen_date": "",
+                "last_morning_broadcast_date": "",
+                "last_night_pregen_date": "",
+                "last_night_broadcast_date": ""
+            }
+        modal = NewsStationBrandingModal(state, self.target_id, self.bot)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Deactivate News Service", style=discord.ButtonStyle.danger, emoji="🛑")
+    async def deactivate_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_config["news_enabled"] = False
+        
+        import core.memory as memory
+        success = await memory.save_config(self.bot, self.bot.brain_server_id, self.target_id, False, self.current_config)
+        self.bot.configs[self.target_id] = self.current_config
+        
+        if success:
+            for child in self.children:
+                child.disabled = True
+            
+            await interaction.response.edit_message(
+                content="🛑 **Server News has been deactivated for this server.**\nTo reactivate, run `/config target:Server News` again.",
+                view=self
+            )
+        else:
+            await interaction.response.send_message(
+                content="⚠️ Failed to write deactivation state to the Brain Server configuration database.", 
+                ephemeral=True
+            )
+
+
+class NewsConfigModalStage2(discord.ui.Modal):
+    def __init__(self, current_config: dict, target_id: int, bot_instance):
+        super().__init__(title="Server News: Station Setup", timeout=None)
+        self.bot = bot_instance
+        self.target_id = target_id
+        self.current_config = current_config
+
+        self.channel_select = discord.ui.ChannelSelect(min_values=1, max_values=1)
+        saved_chan_id = current_config.get("news_channel_id")
+        if saved_chan_id:
+            guild = bot_instance.get_guild(target_id)
+            if guild:
+                resolved_chan = guild.get_channel(saved_chan_id)
+                if resolved_chan:
+                    self.channel_select.default_values = [resolved_chan]
+
+        lbl_channel = discord.ui.Label(
+            text="📢 News Broadcast Channel",
+            description="Select the public text channel where daily news updates and video links will post.",
+            component=self.channel_select
+        )
+        self.add_item(lbl_channel)
+
+        tz_options = [
+            discord.SelectOption(label="US/Eastern (EST/EDT)", value="America/New_York", emoji="🗽", default=(current_config.get("news_timezone") == "America/New_York")),
+            discord.SelectOption(label="US/Central (CST/CDT)", value="America/Chicago", emoji="🌽", default=(current_config.get("news_timezone") == "America/Chicago")),
+            discord.SelectOption(label="US/Mountain (MST/MDT)", value="America/Denver", emoji="🏔️", default=(current_config.get("news_timezone") == "America/Denver")),
+            discord.SelectOption(label="US/Pacific (PST/PDT)", value="America/Los_Angeles", emoji="🌴", default=(current_config.get("news_timezone") == "America/Los_Angeles")),
+            discord.SelectOption(label="Europe/London (GMT/BST)", value="Europe/London", emoji="🎡", default=(current_config.get("news_timezone") == "Europe/London")),
+            discord.SelectOption(label="Coordinated Universal Time (UTC)", value="UTC", emoji="🌐", default=(current_config.get("news_timezone") == "UTC"))
+        ]
+        self.timezone_select = discord.ui.Select(options=tz_options, min_values=1, max_values=1)
+        lbl_timezone = discord.ui.Label(
+            text="🧭 Server Timezone",
+            description="Used to resolve morning (08:30 AM) and night (07:30 PM) render run schedules.",
+            component=self.timezone_select
+        )
+        self.add_item(lbl_timezone)
+
+        self.role_select = discord.ui.RoleSelect(min_values=0, max_values=10)
+        saved_roles = current_config.get("excluded_roles", [])
+        if saved_roles:
+            guild = bot_instance.get_guild(target_id)
+            if guild:
+                resolved_roles = []
+                for r_id in saved_roles:
+                    role = guild.get_role(r_id)
+                    if role:
+                        resolved_roles.append(role)
+                if resolved_roles:
+                    self.role_select.default_values = resolved_roles
+
+        lbl_roles = discord.ui.Label(
+            text="🚫 Excluded Server Roles",
+            description="Exclude up to 10 roles (e.g. @Muted, @Bots) from being scraped or referenced in broadcasts.",
+            component=self.role_select
+        )
+        self.add_item(lbl_roles)
+
+        len_options_morning = [
+            discord.SelectOption(label="Brief Format (~1.5-2 mins)", value="Brief", emoji="⏱️", default=(current_config.get("morning_length") == "Brief")),
+            discord.SelectOption(label="Standard Format (~3-4.5 mins)", value="Standard", emoji="📺", default=(current_config.get("morning_length") == "Standard")),
+            discord.SelectOption(label="Extended Format (~5-7 mins)", value="Extended", emoji="🎬", default=(current_config.get("morning_length") == "Extended"))
+        ]
+        self.morning_select = discord.ui.Select(options=len_options_morning, min_values=1, max_values=1)
+        lbl_morning = discord.ui.Label(
+            text="🌅 Morning Show Length",
+            description="Sets the target segment size and production complexity for morning airings.",
+            component=self.morning_select
+        )
+        self.add_item(lbl_morning)
+
+        len_options_night = [
+            discord.SelectOption(label="Brief Format (~1.5-2 mins)", value="Brief", emoji="⏱️", default=(current_config.get("night_length") == "Brief")),
+            discord.SelectOption(label="Standard Format (~3-4.5 mins)", value="Standard", emoji="📺", default=(current_config.get("night_length") == "Standard")),
+            discord.SelectOption(label="Extended Format (~5-7 mins)", value="Extended", emoji="🎬", default=(current_config.get("night_length") == "Extended"))
+        ]
+        self.night_select = discord.ui.Select(options=len_options_night, min_values=1, max_values=1)
+        lbl_night = discord.ui.Label(
+            text="🌃 Night Show Length",
+            description="Sets the target segment size and production complexity for late night airings.",
+            component=self.night_select
+        )
+        self.add_item(lbl_night)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        news_channel_id = self.channel_select.values[0].id if self.channel_select.values else None
+        news_timezone = self.timezone_select.values[0] if self.timezone_select.values else "America/New_York"
+        excluded_roles = [role.id for role in self.role_select.values] if self.role_select.values else []
+        morning_length = self.morning_select.values[0] if self.morning_select.values else "Standard"
+        night_length = self.night_select.values[0] if self.night_select.values else "Standard"
+
+        config = await self.bot.get_config(self.target_id, is_dm=False)
+        config["news_enabled"] = True
+        config["news_channel_id"] = news_channel_id
+        config["news_timezone"] = news_timezone
+        config["excluded_roles"] = excluded_roles
+        config["morning_length"] = morning_length
+        config["night_length"] = night_length
+
+        self.bot.configs[self.target_id] = config
+
+        import core.memory as memory
+        success = await memory.save_config(self.bot, self.bot.brain_server_id, self.target_id, False, config)
+
+        if success:
+            await interaction.followup.send("✅ Server News beta setup has been successfully saved and applied!", ephemeral=True)
+        else:
+            await interaction.followup.send("⚠️ Configuration applied in-memory, but failed to save permanently to the Brain Server database.", ephemeral=True)
+
+
+class NewsStationBrandingModal(discord.ui.Modal):
+    def __init__(self, current_state: dict, target_id: int, bot_instance):
+        super().__init__(title="News Station Branding & Ep", timeout=None)
+        self.bot = bot_instance
+        self.target_id = target_id
+        self.current_state = current_state
+
+        current_show_name = current_state.get("show_name") or ""
+        self.show_name_input = discord.ui.TextInput(
+            style=discord.TextStyle.short,
+            placeholder="e.g. Priesty's News Lounge",
+            default=current_show_name,
+            required=False,
+            max_length=45
+        )
+        lbl_show = discord.ui.Label(
+            text="🎭 News Show Name",
+            description="Give your daily news broadcast a custom name. Leave blank for auto-branding.",
+            component=self.show_name_input
+        )
+        self.add_item(lbl_show)
+
+        next_ep = current_state.get("last_episode_number", 0) + 1
+        self.episode_input = discord.ui.TextInput(
+            style=discord.TextStyle.short,
+            placeholder="e.g. 1",
+            default=str(next_ep),
+            required=True,
+            max_length=6
+        )
+        lbl_ep = discord.ui.Label(
+            text="🔢 Next Episode Number",
+            description="Surgically adjust the counter for your next broadcast episode.",
+            component=self.episode_input
+        )
+        self.add_item(lbl_ep)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        ep_str = self.episode_input.value.strip()
+        try:
+            next_episode = int(ep_str)
+            if next_episode < 1:
+                next_episode = 1
+        except ValueError:
+            await interaction.followup.send("❌ Error: Next Episode must be a valid positive integer.", ephemeral=True)
+            return
+
+        new_show_name = self.show_name_input.value.strip()
+
+        self.current_state["show_name"] = new_show_name
+        self.current_state["last_episode_number"] = next_episode - 1
+        
+        import core.memory as memory
+        success = await memory.save_news_state(self.bot, self.bot.brain_server_id, self.target_id, self.current_state)
+        
+        if success:
+            await interaction.followup.send(
+                f"✅ **Branding & Ep settings successfully updated!**\n"
+                f"• **Show Name**: '{new_show_name if new_show_name else 'Auto-generated'}'\n"
+                f"• **Next Episode**: {next_episode}",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send("⚠️ Saved in-memory, but failed to write state updates to the Brain Server database.", ephemeral=True)

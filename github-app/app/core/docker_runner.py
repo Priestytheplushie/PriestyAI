@@ -3,12 +3,13 @@ import logging
 import os
 from typing import Any, Dict, List
 import docker
+from app.config import settings
 
 logger = logging.getLogger("priesty.docker")
 
 
 class DockerRunner:
-    """Executes dynamic repository tests and linters in isolated ephemeral containers asynchronously."""
+    """Executes dynamic repository tests in hardened, network-isolated ephemeral containers."""
 
     def __init__(self):
         try:
@@ -28,7 +29,6 @@ class DockerRunner:
         image: str = "python:3.11-slim",
         timeout: int = 120,
     ) -> Dict[str, Any]:
-        """Synchronous internal execution worker."""
         if not self.available or not self.client:
             return {
                 "success": True,
@@ -38,8 +38,6 @@ class DockerRunner:
             }
 
         combined_script = " && ".join(commands)
-        logger.info(f"Running sandbox commands in '{image}': {combined_script}")
-
         abs_workspace = os.path.abspath(workspace_dir)
         container = None
 
@@ -54,6 +52,9 @@ class DockerRunner:
                 mem_limit="2g",
                 nano_cpus=2000000000,
                 pids_limit=256,
+                network_mode=settings.DOCKER_NETWORK_MODE,
+                security_opt=["no-new-privileges:true"],
+                cap_drop=["ALL"],
             )
 
             result = container.wait(timeout=timeout)
@@ -94,7 +95,6 @@ class DockerRunner:
         image: str = "python:3.11-slim",
         timeout: int = 120,
     ) -> Dict[str, Any]:
-        """Asynchronously offloads container execution to a background thread to prevent event loop blocking."""
         return await asyncio.to_thread(
             self._run_commands_sync,
             workspace_dir=workspace_dir,

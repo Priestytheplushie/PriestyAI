@@ -4,7 +4,7 @@
 [![Add Discord Bot](https://img.shields.io/badge/Discord-Add_to_Server-5865F2?logo=discord&logoColor=white)](https://discord.com/oauth2/authorize?client_id=1509364708476452894)
 [![User App](https://img.shields.io/badge/User_App-Install_to_Account-eb459e?logo=discord&logoColor=white)](https://discord.com/oauth2/authorize?client_id=1509364708476452894)
 
-PriestyAI is an ecosystem of autonomous developer and community AI agents. This monorepo serves as the centralized codebase housing both the **GitHub Automation App** and the **Discord AI Companion**.
+PriestyAI is an ecosystem of autonomous developer and community AI agents. This monorepo houses both the **GitHub Automation App** and the **Discord AI Companion**, supervised by a terminal control plane.
 
 ---
 
@@ -28,7 +28,7 @@ Get both services running simultaneously in less than two minutes using the buil
 git clone https://github.com/YourUsername/PriestyAI.git
 cd PriestyAI
 
-# Create and activate unified virtual environment
+# Create and activate virtual environment
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1  # On Linux/macOS: source .venv/bin/activate
 
@@ -55,40 +55,54 @@ cp discord-bot/.env.example discord-bot/.env
 ### 3. Launch the PriestyAI CLI
 
 ```powershell
-# Launch full interactive TUI dashboard with hot-reloading
+# Launch the interactive TUI dashboard with hot-reloading
 priestyai
 
-# Alternatively, run without editable install:
+# Alternatively, run directly without editable install:
 python cli.py
 ```
 
 ---
 
-## PriestyAI CLI Usage & Cheatsheet
+## PriestyAI CLI Dashboard
 
-The **PriestyAI CLI** is an interactive, terminal-native supervisor built with [Textual](https://textual.textualize.io/) that runs both bots concurrently with isolated subprocesses, debounced file watchers, and real-time log search.
+The **PriestyAI CLI** is an interactive, terminal-native supervisor built with [Textual](https://textual.textualize.io/) and [Rich](https://rich.readthedocs.io/). It manages both bot subprocesses concurrently with debounced hot-reloading, live process telemetry, tokenized log syntax highlighting, and log search.
 
 ```text
-┌─ PriestyAI CLI ──────────────────────────────────────────────────────────────────────────────────┐
-│ GitHub: RUNNING (:8000)  │  Discord: RUNNING  │  Watchfiles: ACTIVE  │  View: SPLIT              │
+┌─ PriestyAI ──────────────────────────────────────────────────────────────────────────────────────┐
+│ GH: RUNNING (48MB|0.4%) │ DC: RUNNING (132MB|1.1%) │ Scroll: AUTO │ View: SPLIT │ Level: ALL     │
 ├─────────────────────────────────────┬────────────────────────────────────────────────────────────┤
-│ 📂 GitHub App                       │ 🤖 Discord Bot                                             │
+│ 📂 GitHub App (:8000)               │ 🤖 Discord Companion Bot                                   │
 │                                     │                                                            │
-│ 20:32:59 [api] Uvicorn running      │ 20:33:00 [bot] Logged in as PriestyAI#1234                 │
-│ 20:32:59 [smee] Connected to proxy  │ 20:33:01 [bot] Shard ID None connected to Gateway          │
-│ 20:33:05 [api] POST /webhook 200 OK │ 20:33:03 [news] Automated Server News loop started         │
+│ 20:41:15 [INFO] POST /webhook 200 OK │ 20:41:16 [INFO] [bot] Shard ID 0 connected (42ms ping)     │
+│ 20:41:15 [priesty.issue_to_pr]      │ 20:41:18 [chat] Message from @alex in #dev: "news"        │
+│   #42 Draft PR opened on branch     │ 20:41:19 [news] [Server News] Video rendering complete     │
+│   feature/cache-ttl [python:3.11]   │ 20:41:20 [memory] [Learned User Fact] Cached preference    │
 │                                     │                                                            │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ [g] Toggle GitHub  [d] Toggle Discord  [u] Unified Stream  [r] Restart Both  [/] Search  [q] Quit │
+│ [g] GitHub  [d] Discord  [u] Unified  [Space] Scroll  [1-3] Level  [e] Export  [/] Search  [q] Quit│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Key CLI Features
+
+* **Tokenized Syntax Highlighting:** Distinctly colorizes timestamps, log levels (`INFO`, `WARN`, `ERROR`), HTTP verbs & status codes, GitHub PR/Issue `#numbers`, `@mentions`, Git branches, Docker images, and Discord media events.
+* **Live Process Telemetry HUD:** Displays real-time CPU % and RAM (MB) usage for both services and their child workers via `psutil`.
+* **Auto-Scroll Freeze (`Space`):** Pause auto-scroll at any moment to inspect a traceback or error without incoming logs jumping your screen.
+* **Log Level Filtering (`1`, `2`, `3`):** Instantly isolate errors (`1`), warnings & errors (`2`), or view the full stream (`3`).
+* **One-Key Log Export (`e`):** Dumps the current buffer to timestamped log files in `logs/`.
+* **Safe Process Tree Termination:** Prevents zombie processes by recursively killing child subprocesses (Uvicorn reloaders, FFmpeg workers, Docker tasks) upon exit.
+
+---
+
+## Command Cheatsheet & Keybindings
 
 ### CLI Command Flags
 
 | Command | Description |
 | :--- | :--- |
 | `priestyai` | Launches the interactive side-by-side TUI dashboard with auto-reloading. |
-| `priestyai --headless` | Runs both services in raw scrolling terminal mode without the TUI (ideal for SSH / VPS). |
+| `priestyai --headless` | Runs both services in raw terminal stream mode (ideal for VPS / CI / SSH). |
 | `priestyai --github-only` | Boots only the GitHub App service on `:8000`. |
 | `priestyai --discord-only` | Boots only the Discord Bot gateway service. |
 | `priestyai --no-watch` | Launches services without the `watchfiles` hot-reloaders. |
@@ -102,10 +116,15 @@ The **PriestyAI CLI** is an interactive, terminal-native supervisor built with [
 | **`d`** | Starts, stops, or restarts the **Discord Bot** process independently. |
 | **`u`** | Toggles between **Split View** (side-by-side) and **Unified Stream** (chronological single feed). |
 | **`r`** | Manually triggers a clean restart for both running services. |
+| **`Space`** | **Pause / Resume Auto-Scroll** (freeze log viewport to inspect errors without interruption). |
+| **`1`** | **Filter: Errors Only** (`ERROR`, `CRITICAL`, `TRACEBACK`, `FATAL`). |
+| **`2`** | **Filter: Warnings + Errors** (`WARN`, `429`, `RATE LIMIT`, `COOLDOWN`). |
+| **`3`** | **Filter: All Logs** (reset log filter to standard verbose output). |
+| **`e`** | **Export Logs** (dumps active log buffer to `logs/priestyai_dump_<timestamp>.log`). |
 | **`c`** | Clears the current terminal scrollback buffer. |
-| **`/`** | Opens the Vim-style search bar (highlights keyword matches in **bright yellow** as you type). |
+| **`/`** | Opens the keyword search bar (highlights matches in **bright yellow** as you type). |
 | **`Esc`** | Closes search input / clears active search filter. |
-| **`Ctrl + C`** / **`q`** | Gracefully terminates all background subprocesses and exits. |
+| **`Ctrl + C`** / **`q`** | Gracefully terminates all background subprocess trees and exits. |
 
 ---
 
@@ -114,10 +133,12 @@ The **PriestyAI CLI** is an interactive, terminal-native supervisor built with [
 ```text
 PriestyAI/
 ├── .gitignore               # Unified root secret and build artifact exclusion rules
-├── cli.py                   # PriestyAI CLI & subprocess supervisor
+├── cli.py                   # PriestyAI CLI, TUI dashboard & subprocess supervisor
 ├── pyproject.toml           # Monorepo packaging & 'priestyai' console entrypoint
 ├── requirements.txt         # Consolidated dependency manifest
 ├── README.md                # Monorepo overview and developer guide
+│
+├── logs/                    # Exported log dumps from the CLI (git-ignored)
 │
 ├── github-app/              # GitHub App (FastAPI / Smee / Docker)
 │   ├── app/                 # Workflows, triage, reviews, and git clients
@@ -137,5 +158,4 @@ PriestyAI/
     ├── requirements.txt     # Service-specific requirements
     └── run.py               # Bot entrypoint
 ```
-
----
+```

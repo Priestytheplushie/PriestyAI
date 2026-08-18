@@ -25,7 +25,7 @@ Get both services running simultaneously in less than two minutes using the buil
 
 ```powershell
 # Clone the repository
-git clone https://github.com/YourUsername/PriestyAI.git
+git clone https://github.com/Priestytheplushie/PriestyAI.git
 cd PriestyAI
 
 # Create and activate virtual environment

@@ -650,7 +650,7 @@ class ChatHandler:
 
         if is_dm:
             base_sys_prompt = re.sub(
-                r"<!-- THREAD_INSTRUCTIONS_START -->.*?<!-- THREAD_INSTRUCTIONS_END -->",
+                r".*?",
                 "",
                 base_sys_prompt,
                 flags=re.DOTALL,
@@ -749,6 +749,11 @@ class ChatHandler:
         config = types.GenerateContentConfig(
             system_instruction=base_sys_prompt,
             tools=active_tools if active_tools else None,
+            automatic_function_calling=(
+                types.AutomaticFunctionCallingConfig(disable=True)
+                if active_tools
+                else None
+            ),
             temperature=0.7,
             thinking_config=types.ThinkingConfig(
                 thinking_level=thinking_level_for_stream, include_thoughts=True
@@ -774,6 +779,11 @@ class ChatHandler:
                     fallback_config = types.GenerateContentConfig(
                         system_instruction=base_sys_prompt,
                         tools=active_tools if active_tools else None,
+                        automatic_function_calling=(
+                            types.AutomaticFunctionCallingConfig(disable=True)
+                            if active_tools
+                            else None
+                        ),
                         temperature=0.7,
                     )
                     return await self.client.aio.models.generate_content_stream(

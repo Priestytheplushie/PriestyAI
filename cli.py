@@ -335,43 +335,18 @@ async def run_headless_supervisor(start_github: bool, start_discord: bool, watch
             return
 
         async def watch_github():
-            async for _ in awatch(str(GITHUB_DIR / "app")):
-                log_gh(
-                    "[bold yellow]⚡ File change in app/. Reloading GitHub App...[/]",
-                    is_markup=True,
-                )
-                await github_proc.stop(log_gh)
-                asyncio.create_task(github_proc.start(log_gh))
+            try:
+                async for _ in awatch(str(GITHUB_DIR / "app"), debounce=1000):
+                    log_gh(
+                        "[bold yellow]⚡ File change in app/. Reloading GitHub App...[/]",
+                        is_markup=True,
+                    )
+                    await github_proc.stop(log_gh)
+                    asyncio.create_task(github_proc.start(log_gh))
+            except asyncio.CancelledError:
+                pass
 
-        async def watch_discord():
-            def watch_filter(change: Change, path: str) -> bool:
-                p = path.replace("\\", "/").lower()
-                if any(
-                    x in p
-                    for x in [
-                        "/temp/",
-                        "/temp_",
-                        "__pycache__",
-                        "/.git/",
-                        ".venv",
-                        ".mp4",
-                        ".mp3",
-                    ]
-                ):
-                    return False
-                return p.endswith((".py", ".md", ".json"))
-
-            async for _ in awatch(
-                str(DISCORD_DIR), watch_filter=watch_filter, debounce=2500
-            ):
-                log_dc(
-                    "[bold yellow]⚡ Code change detected. Restarting Discord Bot...[/]",
-                    is_markup=True,
-                )
-                await discord_proc.stop(log_dc)
-                asyncio.create_task(discord_proc.start(log_dc))
-
-        await asyncio.gather(watch_github(), watch_discord())
+        await watch_github()
 
     watch_task = asyncio.create_task(watch_loop()) if watch else None
 
@@ -748,44 +723,16 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
 
         @work(exclusive=True, group="watchers")
         async def start_file_watchers(self):
-            async def watch_github():
-                async for _ in awatch(str(GITHUB_DIR / "app")):
+            try:
+                async for _ in awatch(str(GITHUB_DIR / "app"), debounce=1000):
                     self.log_github(
                         "[bold #f1fa8c]⚡ File change in app/. Reloading GitHub App...[/]",
                         is_markup=True,
                     )
                     await self.github_proc.stop(self.log_github)
                     self.run_github_app()
-
-            async def watch_discord():
-                def watch_filter(change: Change, path: str) -> bool:
-                    p = path.replace("\\", "/").lower()
-                    if any(
-                        x in p
-                        for x in [
-                            "/temp/",
-                            "/temp_",
-                            "__pycache__",
-                            "/.git/",
-                            ".venv",
-                            ".mp4",
-                            ".mp3",
-                        ]
-                    ):
-                        return False
-                    return p.endswith((".py", ".md", ".json"))
-
-                async for _ in awatch(
-                    str(DISCORD_DIR), watch_filter=watch_filter, debounce=2500
-                ):
-                    self.log_discord(
-                        "[bold #f1fa8c]⚡ Code change detected. Restarting Discord Bot...[/]",
-                        is_markup=True,
-                    )
-                    await self.discord_proc.stop(self.log_discord)
-                    self.run_discord_bot()
-
-            await asyncio.gather(watch_github(), watch_discord())
+            except asyncio.CancelledError:
+                pass
 
         @on(Button.Pressed, "#quit-btn")
         def on_quit_button_pressed(self):
@@ -857,18 +804,29 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
                     f.write(f"[{t_str}] [{source.upper()}] {line}\n")
             self.notify(f"Exported logs to {export_path.name}")
 
-        def action_restart_all(self):
+        @work(exclusive=True, group="restart_worker")
+        async def action_restart_all(self):
             self.log_github(
                 "[bold #f1fa8c]🔄 Manual restart triggered...[/]", is_markup=True
             )
             self.log_discord(
                 "[bold #f1fa8c]🔄 Manual restart triggered...[/]", is_markup=True
             )
+
+            stop_tasks = []
             if self.github_proc.is_running:
-                asyncio.create_task(self.github_proc.stop(self.log_github))
-                self.run_github_app()
+                stop_tasks.append(self.github_proc.stop(self.log_github))
             if self.discord_proc.is_running:
-                asyncio.create_task(self.discord_proc.stop(self.log_discord))
+                stop_tasks.append(self.discord_proc.stop(self.log_discord))
+
+            if stop_tasks:
+                await asyncio.gather(*stop_tasks)
+
+            await asyncio.sleep(0.5)
+
+            if start_github:
+                self.run_github_app()
+            if start_discord:
                 self.run_discord_bot()
 
         def action_clear_logs(self):

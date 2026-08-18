@@ -1,25 +1,33 @@
 """
-PriestyAI CLI
-An interactive terminal dashboard and headless process supervisor for running
-and hot-reloading both the GitHub App and Discord Bot concurrently.
+PriestyAI CLI V2 (Polished Control Plane)
+An interactive terminal dashboard and headless process supervisor for running,
+hot-reloading, monitoring, and debugging both the GitHub App and Discord Bot.
 """
 
 import argparse
 import asyncio
+from datetime import datetime
 import os
-import signal
+from pathlib import Path
+import re
 import sys
 import time
-from datetime import datetime
-from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from rich.text import Text
 from watchfiles import Change, awatch
 
+try:
+    import psutil
+
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
 ROOT_DIR = Path(__file__).parent.resolve()
 GITHUB_DIR = ROOT_DIR / "github-app"
 DISCORD_DIR = ROOT_DIR / "discord-bot"
+LOGS_DIR = ROOT_DIR / "logs"
 
 
 def find_python_executable(project_dir: Path) -> str:
@@ -38,90 +46,194 @@ def find_python_executable(project_dir: Path) -> str:
     return sys.executable
 
 
-def colorize_github_log(line: str, highlight_query: str = "") -> Text:
-    text = Text(line)
-    low = line.lower()
+def get_process_stats(pid: Optional[int]) -> Tuple[float, float]:
+    """Returns (cpu_percent, rss_memory_mb) for process and all child workers."""
+    if not pid or not PSUTIL_AVAILABLE:
+        return 0.0, 0.0
+    try:
+        proc = psutil.Process(pid)
+        cpu = proc.cpu_percent(interval=None)
+        mem = proc.memory_info().rss / (1024 * 1024)
+        for child in proc.children(recursive=True):
+            try:
+                cpu += child.cpu_percent(interval=None)
+                mem += child.memory_info().rss / (1024 * 1024)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        return round(cpu, 1), round(mem, 1)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return 0.0, 0.0
 
-    if any(
-        kw in low for kw in ["error", "exception", "failed", "traceback", "status=5"]
-    ):
-        text.stylize("bold red")
-    elif any(kw in low for kw in ["warning", "429", "rate limit", "rejected"]):
-        text.stylize("bold yellow")
-    elif "smee" in low:
-        text.stylize("cyan")
-    elif any(
-        event in line
-        for event in ["issues.", "pull_request", "discussion", "reaction."]
-    ):
-        text.stylize("bold magenta")
-    elif any(
-        kw in line for kw in ["200 OK", "completed successfully", "Created", "Triaged"]
-    ):
-        text.stylize("bold green")
-    elif "INFO:" in line or "Uvicorn running" in line:
-        text.stylize("dim white")
+
+async def terminate_process_tree(
+    process: Optional[asyncio.subprocess.Process], timeout: float = 3.0
+):
+    """Recursively terminates entire process trees to prevent orphan/zombie workers."""
+    if not process or process.returncode is not None:
+        return
+
+    pid = process.pid
+    if PSUTIL_AVAILABLE and pid:
+        try:
+            parent = psutil.Process(pid)
+            children = parent.children(recursive=True)
+            for ch in children:
+                try:
+                    ch.terminate()
+                except psutil.NoSuchProcess:
+                    pass
+            parent.terminate()
+            _, alive = psutil.wait_procs(children + [parent], timeout=timeout)
+            for p in alive:
+                try:
+                    p.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            return
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    try:
+        process.terminate()
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def colorize_log(line: str, service: str = "github", highlight_query: str = "") -> Text:
+    """Applies granular, tokenized Rich syntax highlighting to raw log lines."""
+    text = Text(line)
+
+    text.highlight_regex(
+        r"\b\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}(?:,\d+)?\b|\b\d{2}:\d{2}:\d{2}\b",
+        style="dim #6272a4",
+    )
+
+    text.highlight_regex(
+        r"\b(ERROR|CRITICAL|FATAL|Exception|Traceback)\b",
+        style="bold white on #ff5555",
+    )
+    text.highlight_regex(
+        r"\b(WARN|WARNING|rejected|cooldown|rate limit|429)\b",
+        style="bold black on #ffb86c",
+    )
+    text.highlight_regex(r"\b(INFO)\b", style="bold cyan")
+    text.highlight_regex(r"\b(DEBUG)\b", style="dim magenta")
+
+    text.highlight_regex(
+        r"\b(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\b", style="bold #f8f8f2"
+    )
+    text.highlight_regex(
+        r"\b200 OK\b|\b201 Created\b|\b204 No Content\b|\b304 Not Modified\b|\bstatus=2\d{2}\b",
+        style="bold #50fa7b",
+    )
+    text.highlight_regex(
+        r"\b400\b|\b401\b|\b403\b|\b404\b|\b422\b|\bstatus=4\d{2}\b",
+        style="bold #ffb86c",
+    )
+    text.highlight_regex(
+        r"\b500\b|\b502\b|\b503\b|\b504\b|\bstatus=5\d{2}\b", style="bold #ff5555"
+    )
+
+    text.highlight_regex(r"https?://[^\s]+", style="underline dim cyan")
+    text.highlight_regex(r"/(?:webhook|health|api|graphql)[^\s]*", style="bold cyan")
+
+    if service == "github":
+
+        text.highlight_regex(r"#\d+\b", style="bold #f1fa8c")
+        text.highlight_regex(r"@[\w-]+", style="bold #8be9fd")
+        text.highlight_regex(
+            r"\b(?:feature|fix|chore|docs|refactor|test)/[\w-]+", style="green"
+        )
+        text.highlight_regex(r"\b[0-9a-f]{7,40}\b", style="dim #bd93f9")
+        text.highlight_regex(r"\[priesty\.[^\]]+\]", style="bold #bd93f9")
+        text.highlight_regex(r"\[smee\]", style="bold #8be9fd")
+        text.highlight_regex(
+            r"\b(python:\S+|node:\S+|golang:\S+|rust:\S+)\b", style="bold #50fa7b"
+        )
+        text.highlight_regex(
+            r"\b(pytest|cargo test|go test|npm test)\b", style="italic #f8f8f2"
+        )
+        text.highlight_regex(
+            r"\b(PASSED|COMPLETED|VERIFIED|SUCCESS)\b", style="bold #50fa7b"
+        )
+        text.highlight_regex(r"\b(FAILED|FAILURE)\b", style="bold #ff5555")
+
+    elif service == "discord":
+
+        text.highlight_regex(
+            r"\[chat\]|\[news\]|\[voice\]|\[memory\]|\[core\]", style="bold #ff79c6"
+        )
+        text.highlight_regex(
+            r"\b(Memory Gatekeeper|Learned User Fact|Learned Server Fact)\b",
+            style="bold #50fa7b",
+        )
+        text.highlight_regex(
+            r"\b(Server News|NewsScraper|video_generator|FFmpeg|Streamable|Edge-TTS)\b",
+            style="bold #bd93f9",
+        )
+        text.highlight_regex(
+            r"\b(Reasoning Tier|Routing Tier|Thinking|Deduction)\b",
+            style="bold #ff79c6",
+        )
+        text.highlight_regex(
+            r"\b(LayoutView|Components V2|ActionRow|Button)\b", style="bold #8be9fd"
+        )
+        text.highlight_regex(
+            r"\b(Logged in as|Shard ready|synced|Connected to Gateway)\b",
+            style="bold #50fa7b",
+        )
 
     if highlight_query:
         text.highlight_words(
-            [highlight_query], style="black on bright_yellow", case_sensitive=False
+            [highlight_query], style="black on #f1fa8c", case_sensitive=False
         )
 
     return text
 
 
-def colorize_discord_log(line: str, highlight_query: str = "") -> Text:
-    text = Text(line)
+def matches_filter_level(line: str, level: str) -> bool:
+    """Evaluates if log line satisfies active log level threshold (1=Error, 2=Warn+, 3=All)."""
+    if level == "ALL":
+        return True
     low = line.lower()
-
-    if any(kw in low for kw in ["error", "exception", "failed", "crash", "traceback"]):
-        text.stylize("bold red")
-    elif any(kw in low for kw in ["warning", "429", "rate limit", "cooldown"]):
-        text.stylize("bold yellow")
-    elif any(
-        kw in line for kw in ["Logged in as", "Shard ready", "synced", "Successfully"]
-    ):
-        text.stylize("bold green")
-    elif any(kw in line for kw in ["[chat]", "Message from", "Spontaneous check-in"]):
-        text.stylize("cyan")
-    elif any(
-        kw in line for kw in ["Thinking", "Reasoning", "Deduction", "generate_reply"]
-    ):
-        text.stylize("bold magenta")
-    elif any(
-        kw in line
+    is_error = any(
+        kw in low
         for kw in [
-            "Server News",
-            "NewsScraper",
-            "video_generator",
-            "FFmpeg",
-            "Streamable",
+            "error",
+            "exception",
+            "failed",
+            "traceback",
+            "critical",
+            "crash",
+            "status=5",
         ]
-    ):
-        text.stylize("bold blue")
-    elif any(
-        kw in line
-        for kw in ["Learned User Fact", "Learned Server Fact", "Memory Gatekeeper"]
-    ):
-        text.stylize("bright_green")
-    elif any(kw in line for kw in ["LayoutView", "BUILD_MESSAGE", "Component"]):
-        text.stylize("bright_cyan")
-
-    if highlight_query:
-        text.highlight_words(
-            [highlight_query], style="black on bright_yellow", case_sensitive=False
+    )
+    if level == "ERROR":
+        return is_error
+    if level == "WARN+":
+        is_warn = any(
+            kw in low
+            for kw in ["warning", "warn", "429", "rate limit", "rejected", "cooldown"]
         )
-
-    return text
+        return is_error or is_warn
+    return True
 
 
 class ProcessManager:
-    def __init__(self, name: str, cwd: Path, command: list[str]):
+    def __init__(self, name: str, cwd: Path, command: List[str]):
         self.name = name
         self.cwd = cwd
         self.command = command
         self.process: Optional[asyncio.subprocess.Process] = None
         self.is_running = False
+
+    @property
+    def pid(self) -> Optional[int]:
+        return self.process.pid if self.process else None
 
     async def start(self, log_callback):
         if self.is_running:
@@ -161,19 +273,12 @@ class ProcessManager:
                 log_callback(
                     f"[bold yellow]⏹ Stopping {self.name}...[/]", is_markup=True
                 )
-            try:
-                self.process.terminate()
-                await asyncio.wait_for(self.process.wait(), timeout=3.0)
-            except Exception:
-                try:
-                    self.process.kill()
-                except Exception:
-                    pass
+            await terminate_process_tree(self.process)
             self.process = None
 
 
 async def run_headless_supervisor(start_github: bool, start_discord: bool, watch: bool):
-    """Runs processes directly in standard terminal with clean SIGINT handling."""
+    """Headless CLI stream with colorized token logs and clean SIGINT handling."""
     from rich.console import Console
 
     console = Console()
@@ -206,7 +311,7 @@ async def run_headless_supervisor(start_github: bool, start_discord: bool, watch
         if is_markup:
             console.print(f"[dim]{ts}[/] [bold cyan][GITHUB][/]  {line}")
         else:
-            colored = colorize_github_log(line)
+            colored = colorize_log(line, service="github")
             console.print(f"[dim]{ts}[/] [bold cyan][GITHUB][/]  ", end="")
             console.print(colored)
 
@@ -215,7 +320,7 @@ async def run_headless_supervisor(start_github: bool, start_discord: bool, watch
         if is_markup:
             console.print(f"[dim]{ts}[/] [bold magenta][DISCORD][/] {line}")
         else:
-            colored = colorize_discord_log(line)
+            colored = colorize_log(line, service="discord")
             console.print(f"[dim]{ts}[/] [bold magenta][DISCORD][/] ", end="")
             console.print(colored)
 
@@ -230,9 +335,9 @@ async def run_headless_supervisor(start_github: bool, start_discord: bool, watch
             return
 
         async def watch_github():
-            async for changes in awatch(str(GITHUB_DIR / "app")):
+            async for _ in awatch(str(GITHUB_DIR / "app")):
                 log_gh(
-                    "[bold yellow]⚡ File change detected in app/. Reloading GitHub App...[/]",
+                    "[bold yellow]⚡ File change in app/. Reloading GitHub App...[/]",
                     is_markup=True,
                 )
                 await github_proc.stop(log_gh)
@@ -256,11 +361,11 @@ async def run_headless_supervisor(start_github: bool, start_discord: bool, watch
                     return False
                 return p.endswith((".py", ".md", ".json"))
 
-            async for changes in awatch(
+            async for _ in awatch(
                 str(DISCORD_DIR), watch_filter=watch_filter, debounce=2500
             ):
                 log_dc(
-                    "[bold yellow]⚡ Code change detected. Debounce elapsed (2.5s). Restarting Discord Bot...[/]",
+                    "[bold yellow]⚡ Code change detected. Restarting Discord Bot...[/]",
                     is_markup=True,
                 )
                 await discord_proc.stop(log_dc)
@@ -271,7 +376,7 @@ async def run_headless_supervisor(start_github: bool, start_discord: bool, watch
     watch_task = asyncio.create_task(watch_loop()) if watch else None
 
     console.print(
-        "[bold green]PriestyAI Headless Runner Active[/] (Press Ctrl+C to cleanly stop both services)"
+        "[bold green]PriestyAI Headless Runner Active[/] (Press Ctrl+C to cleanly stop all services)"
     )
 
     try:
@@ -301,24 +406,24 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
         CSS = """
         Screen {
             background: #000000;
-            color: #e0e0e0;
+            color: #f8f8f2;
             overflow: hidden;
         }
 
         * {
             scrollbar-size-vertical: 1;
             scrollbar-background: #000000;
-            scrollbar-color: #333338;
-            scrollbar-color-hover: #55555e;
-            scrollbar-color-active: #7aa2f7;
+            scrollbar-color: #44475a;
+            scrollbar-color-hover: #6272a4;
+            scrollbar-color-active: #bd93f9;
         }
         
         #top-bar {
             dock: top;
             width: 100%;
             height: 3;
-            background: #0a0a0c;
-            border-bottom: solid #1c1c22;
+            background: #0a0a0f;
+            border-bottom: solid #282a36;
             padding: 0 1;
             align-vertical: middle;
         }
@@ -329,7 +434,7 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
         }
 
         #quit-btn {
-            background: #1c1c22;
+            background: #282a36;
             color: #ff5555;
             border: none;
             height: 1;
@@ -353,27 +458,27 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
         .pane-box {
             width: 1fr;
             height: 100%;
-            border: solid #1c1c22;
-            background: #050507;
+            border: solid #1e1f29;
+            background: #050508;
             margin: 0;
             padding: 0 1;
         }
 
         .pane-box:focus-within {
-            border: solid #3d4455;
+            border: solid #6272a4;
         }
 
         .pane-title {
             text-style: bold;
             padding: 0 1;
-            background: #0f0f13;
-            color: #888899;
+            background: #0f1016;
+            color: #bd93f9;
             margin-bottom: 0;
         }
 
         RichLog {
             height: 1fr;
-            background: #050507;
+            background: #050508;
             padding: 0;
         }
 
@@ -381,21 +486,21 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
             display: none;
             width: 100%;
             height: 100%;
-            border: solid #1c1c22;
-            background: #050507;
+            border: solid #1e1f29;
+            background: #050508;
             padding: 0 1;
         }
 
         #unified-pane:focus-within {
-            border: solid #3d4455;
+            border: solid #6272a4;
         }
 
         #filter-container {
             dock: bottom;
             width: 100%;
             height: 3;
-            background: #0a0a0c;
-            border-top: solid #3d4455;
+            background: #0a0a0f;
+            border-top: solid #6272a4;
             padding: 0 1;
             display: none;
         }
@@ -405,34 +510,44 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
         }
 
         Input {
-            background: #050507;
+            background: #050508;
             border: none;
-            color: #f0f0f0;
+            color: #f8f8f2;
             height: 1;
         }
 
         Footer {
-            background: #0a0a0c;
-            color: #777788;
+            background: #0a0a0f;
+            color: #6272a4;
         }
         """
 
         BINDINGS = [
             Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
             Binding("q", "quit", "Quit", show=False),
-            Binding("g", "toggle_github", "Toggle GitHub"),
-            Binding("d", "toggle_discord", "Toggle Discord"),
-            Binding("u", "toggle_unified", "Unified Stream (U)"),
-            Binding("r", "restart_all", "Restart Both"),
-            Binding("c", "clear_logs", "Clear Logs"),
+            Binding("g", "toggle_github", "GitHub (G)"),
+            Binding("d", "toggle_discord", "Discord (D)"),
+            Binding("u", "toggle_unified", "Unified (U)"),
+            Binding("r", "restart_all", "Restart (R)"),
+            Binding("space", "toggle_autoscroll", "Scroll (Space)", show=True),
+            Binding("1", "filter_errors", "Errors (1)"),
+            Binding("2", "filter_warnings", "Warns (2)"),
+            Binding("3", "filter_all", "All (3)"),
+            Binding("e", "export_logs", "Export (E)", show=True),
+            Binding("c", "clear_logs", "Clear (C)"),
             Binding("slash", "open_filter", "Search (/)", show=True),
-            Binding("escape", "handle_escape", "Clear / Close", show=False),
+            Binding("escape", "handle_escape", "Esc", show=False),
         ]
 
         github_status = reactive("[bold red]STOPPED[/]")
         discord_status = reactive("[bold red]STOPPED[/]")
         filter_query = reactive("")
         is_unified_mode = reactive(False)
+        auto_scroll = reactive(True)
+        log_level_filter = reactive("ALL")
+
+        github_metrics = reactive((0.0, 0.0))
+        discord_metrics = reactive((0.0, 0.0))
 
         def __init__(self):
             super().__init__()
@@ -460,7 +575,7 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
                 command=[dc_python, "run.py"],
             )
 
-            self.unified_logs: list[tuple[float, str, str, bool]] = []
+            self.unified_logs: List[Tuple[float, str, str, bool]] = []
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="top-bar"):
@@ -469,13 +584,13 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
 
             with Horizontal(id="main-container"):
                 with Vertical(classes="pane-box", id="github-pane"):
-                    yield Label("GitHub App", classes="pane-title")
+                    yield Label("GitHub App (:8000)", classes="pane-title")
                     yield RichLog(
                         id="github-log", highlight=False, markup=True, wrap=True
                     )
 
                 with Vertical(classes="pane-box", id="discord-pane"):
-                    yield Label("Discord Bot", classes="pane-title")
+                    yield Label("Discord Companion Bot", classes="pane-title")
                     yield RichLog(
                         id="discord-log", highlight=False, markup=True, wrap=True
                     )
@@ -490,7 +605,7 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
 
             with Horizontal(id="filter-container"):
                 yield Input(
-                    placeholder="/search query (Enter to lock, Esc to cancel)...",
+                    placeholder="/search keyword (Enter to save, Esc to clear)...",
                     id="filter-input",
                 )
 
@@ -498,6 +613,7 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
 
         async def on_mount(self):
             self.update_top_bar()
+            self.set_interval(1.5, self.update_telemetry)
             if start_github:
                 self.run_github_app()
             if start_discord:
@@ -505,79 +621,137 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
             if watch:
                 self.start_file_watchers()
 
+        def update_telemetry(self):
+            if self.github_proc.is_running:
+                self.github_metrics = get_process_stats(self.github_proc.pid)
+            else:
+                self.github_metrics = (0.0, 0.0)
+
+            if self.discord_proc.is_running:
+                self.discord_metrics = get_process_stats(self.discord_proc.pid)
+            else:
+                self.discord_metrics = (0.0, 0.0)
+
+            self.update_top_bar()
+
         def update_top_bar(self):
             bar = self.query_one("#top-bar-label", Label)
             mode_label = (
-                "[magenta]UNIFIED[/]" if self.is_unified_mode else "[dim]SPLIT[/]"
+                "[#ff79c6]UNIFIED[/]" if self.is_unified_mode else "[dim]SPLIT[/]"
             )
-            filter_status = (
-                f"  │  Filter: [yellow]'{self.filter_query}'[/]"
-                if self.filter_query
-                else ""
+            scroll_label = (
+                "[#50fa7b]AUTO[/]"
+                if self.auto_scroll
+                else "[bold #ff5555 on #282a36]PAUSED[/]"
             )
+
+            filter_badge = ""
+            if self.log_level_filter != "ALL":
+                filter_badge += f"  │  Level: [#f1fa8c]{self.log_level_filter}[/]"
+            if self.filter_query:
+                filter_badge += f"  │  Query: [#f1fa8c]'{self.filter_query}'[/]"
+
+            gh_stats = ""
+            if self.github_proc.is_running and PSUTIL_AVAILABLE:
+                gh_stats = f" [dim]({self.github_metrics[1]:.0f}MB|{self.github_metrics[0]:.0f}%)[/]"
+
+            dc_stats = ""
+            if self.discord_proc.is_running and PSUTIL_AVAILABLE:
+                dc_stats = f" [dim]({self.discord_metrics[1]:.0f}MB|{self.discord_metrics[0]:.0f}%)[/]"
+
             bar.update(
-                f"[bold #ffffff]PriestyAI CLI[/]  │  "
-                f"GitHub: {self.github_status}  │  "
-                f"Discord: {self.discord_status}  │  "
-                f"Watchfiles: {'[green]ACTIVE[/]' if watch else '[dim]OFF[/]'}  │  "
+                f"[bold #ffffff]PriestyAI[/]  │  "
+                f"GH: {self.github_status}{gh_stats}  │  "
+                f"DC: {self.discord_status}{dc_stats}  │  "
+                f"Scroll: {scroll_label}  │  "
                 f"View: {mode_label}"
-                f"{filter_status}"
+                f"{filter_badge}"
             )
 
         def log_github(self, line: str, is_markup: bool = False):
             ts = time.time()
             self.unified_logs.append((ts, "github", line, is_markup))
-            if not self.filter_query or self.filter_query.lower() in line.lower():
-                self.query_one("#github-log", RichLog).write(
-                    Text.from_markup(line)
-                    if is_markup
-                    else colorize_github_log(line, self.filter_query)
-                )
-                if self.is_unified_mode:
-                    time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
-                    unified_line = f"[dim]{time_str}[/] [cyan][GITHUB][/]  {line}"
-                    self.query_one("#unified-log", RichLog).write(
-                        colorize_github_log(unified_line, self.filter_query)
+
+            if matches_filter_level(line, self.log_level_filter):
+                if not self.filter_query or self.filter_query.lower() in line.lower():
+                    self.query_one("#github-log", RichLog).write(
+                        (
+                            Text.from_markup(line)
+                            if is_markup
+                            else colorize_log(
+                                line,
+                                service="github",
+                                highlight_query=self.filter_query,
+                            )
+                        ),
+                        scroll_end=self.auto_scroll,
                     )
+                    if self.is_unified_mode:
+                        time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+                        unified_line = f"[dim]{time_str}[/] [cyan][GITHUB][/]  {line}"
+                        self.query_one("#unified-log", RichLog).write(
+                            colorize_log(
+                                unified_line,
+                                service="github",
+                                highlight_query=self.filter_query,
+                            ),
+                            scroll_end=self.auto_scroll,
+                        )
 
         def log_discord(self, line: str, is_markup: bool = False):
             ts = time.time()
             self.unified_logs.append((ts, "discord", line, is_markup))
-            if not self.filter_query or self.filter_query.lower() in line.lower():
-                self.query_one("#discord-log", RichLog).write(
-                    Text.from_markup(line)
-                    if is_markup
-                    else colorize_discord_log(line, self.filter_query)
-                )
-                if self.is_unified_mode:
-                    time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
-                    unified_line = f"[dim]{time_str}[/] [magenta][DISCORD][/] {line}"
-                    self.query_one("#unified-log", RichLog).write(
-                        colorize_discord_log(unified_line, self.filter_query)
+
+            if matches_filter_level(line, self.log_level_filter):
+                if not self.filter_query or self.filter_query.lower() in line.lower():
+                    self.query_one("#discord-log", RichLog).write(
+                        (
+                            Text.from_markup(line)
+                            if is_markup
+                            else colorize_log(
+                                line,
+                                service="discord",
+                                highlight_query=self.filter_query,
+                            )
+                        ),
+                        scroll_end=self.auto_scroll,
                     )
+                    if self.is_unified_mode:
+                        time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+                        unified_line = (
+                            f"[dim]{time_str}[/] [magenta][DISCORD][/] {line}"
+                        )
+                        self.query_one("#unified-log", RichLog).write(
+                            colorize_log(
+                                unified_line,
+                                service="discord",
+                                highlight_query=self.filter_query,
+                            ),
+                            scroll_end=self.auto_scroll,
+                        )
 
         @work(exclusive=True, group="github_worker")
         async def run_github_app(self):
-            self.github_status = "[bold green]RUNNING (:8000)[/]"
+            self.github_status = "[bold #50fa7b]RUNNING[/]"
             self.update_top_bar()
             await self.github_proc.start(self.log_github)
-            self.github_status = "[bold red]STOPPED[/]"
+            self.github_status = "[bold #ff5555]STOPPED[/]"
             self.update_top_bar()
 
         @work(exclusive=True, group="discord_worker")
         async def run_discord_bot(self):
-            self.discord_status = "[bold green]RUNNING[/]"
+            self.discord_status = "[bold #50fa7b]RUNNING[/]"
             self.update_top_bar()
             await self.discord_proc.start(self.log_discord)
-            self.discord_status = "[bold red]STOPPED[/]"
+            self.discord_status = "[bold #ff5555]STOPPED[/]"
             self.update_top_bar()
 
         @work(exclusive=True, group="watchers")
         async def start_file_watchers(self):
             async def watch_github():
-                async for changes in awatch(str(GITHUB_DIR / "app")):
+                async for _ in awatch(str(GITHUB_DIR / "app")):
                     self.log_github(
-                        "[bold yellow]⚡ File change detected in app/. Reloading GitHub App...[/]",
+                        "[bold #f1fa8c]⚡ File change in app/. Reloading GitHub App...[/]",
                         is_markup=True,
                     )
                     await self.github_proc.stop(self.log_github)
@@ -601,11 +775,11 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
                         return False
                     return p.endswith((".py", ".md", ".json"))
 
-                async for changes in awatch(
+                async for _ in awatch(
                     str(DISCORD_DIR), watch_filter=watch_filter, debounce=2500
                 ):
                     self.log_discord(
-                        "[bold yellow]⚡ Code change detected. Debounce elapsed (2.5s). Restarting Discord Bot...[/]",
+                        "[bold #f1fa8c]⚡ Code change detected. Restarting Discord Bot...[/]",
                         is_markup=True,
                     )
                     await self.discord_proc.stop(self.log_discord)
@@ -647,12 +821,48 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
             self.repopulate_filtered_logs()
             self.update_top_bar()
 
+        def action_toggle_autoscroll(self):
+            self.auto_scroll = not self.auto_scroll
+            status = "RESUMED" if self.auto_scroll else "PAUSED"
+            self.notify(f"Auto-scroll {status}")
+            self.update_top_bar()
+
+        def action_filter_errors(self):
+            self.log_level_filter = "ERROR"
+            self.notify("Filtering: ERRORS ONLY")
+            self.repopulate_filtered_logs()
+            self.update_top_bar()
+
+        def action_filter_warnings(self):
+            self.log_level_filter = "WARN+"
+            self.notify("Filtering: WARNINGS & ERRORS")
+            self.repopulate_filtered_logs()
+            self.update_top_bar()
+
+        def action_filter_all(self):
+            self.log_level_filter = "ALL"
+            self.notify("Filtering: ALL LOGS")
+            self.repopulate_filtered_logs()
+            self.update_top_bar()
+
+        def action_export_logs(self):
+            os.makedirs(LOGS_DIR, exist_ok=True)
+            export_path = (
+                LOGS_DIR
+                / f"priestyai_dump_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            )
+            with open(export_path, "w", encoding="utf-8") as f:
+                for ts, source, line, _ in self.unified_logs:
+                    t_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                    f.write(f"[{t_str}] [{source.upper()}] {line}\n")
+            self.notify(f"Exported logs to {export_path.name}")
+
         def action_restart_all(self):
             self.log_github(
-                "[bold yellow]🔄 Manual restart triggered...[/]", is_markup=True
+                "[bold #f1fa8c]🔄 Manual restart triggered...[/]", is_markup=True
             )
             self.log_discord(
-                "[bold yellow]🔄 Manual restart triggered...[/]", is_markup=True
+                "[bold #f1fa8c]🔄 Manual restart triggered...[/]", is_markup=True
             )
             if self.github_proc.is_running:
                 asyncio.create_task(self.github_proc.stop(self.log_github))
@@ -666,6 +876,7 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
             self.query_one("#github-log", RichLog).clear()
             self.query_one("#discord-log", RichLog).clear()
             self.query_one("#unified-log", RichLog).clear()
+            self.notify("Logs Cleared")
 
         def action_open_filter(self):
             filter_box = self.query_one("#filter-container")
@@ -718,40 +929,65 @@ def run_tui(start_github: bool, start_discord: bool, watch: bool):
             q = self.filter_query.lower()
 
             for ts, source, line, is_markup in self.unified_logs:
-                if not q or q in line.lower():
-                    time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+                if matches_filter_level(line, self.log_level_filter):
+                    if not q or q in line.lower():
+                        time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
 
-                    if source == "github":
-                        if is_markup:
-                            gh_widget.write(Text.from_markup(line))
-                        else:
-                            gh_widget.write(
-                                colorize_github_log(line, self.filter_query)
-                            )
+                        if source == "github":
+                            if is_markup:
+                                gh_widget.write(
+                                    Text.from_markup(line), scroll_end=self.auto_scroll
+                                )
+                            else:
+                                gh_widget.write(
+                                    colorize_log(
+                                        line,
+                                        service="github",
+                                        highlight_query=self.filter_query,
+                                    ),
+                                    scroll_end=self.auto_scroll,
+                                )
 
-                        if self.is_unified_mode:
-                            unified_line = (
-                                f"[dim]{time_str}[/] [cyan][GITHUB][/]  {line}"
-                            )
-                            un_widget.write(
-                                colorize_github_log(unified_line, self.filter_query)
-                            )
+                            if self.is_unified_mode:
+                                unified_line = (
+                                    f"[dim]{time_str}[/] [cyan][GITHUB][/]  {line}"
+                                )
+                                un_widget.write(
+                                    colorize_log(
+                                        unified_line,
+                                        service="github",
+                                        highlight_query=self.filter_query,
+                                    ),
+                                    scroll_end=self.auto_scroll,
+                                )
 
-                    elif source == "discord":
-                        if is_markup:
-                            dc_widget.write(Text.from_markup(line))
-                        else:
-                            dc_widget.write(
-                                colorize_discord_log(line, self.filter_query)
-                            )
+                        elif source == "discord":
+                            if is_markup:
+                                dc_widget.write(
+                                    Text.from_markup(line), scroll_end=self.auto_scroll
+                                )
+                            else:
+                                dc_widget.write(
+                                    colorize_log(
+                                        line,
+                                        service="discord",
+                                        highlight_query=self.filter_query,
+                                    ),
+                                    scroll_end=self.auto_scroll,
+                                )
 
-                        if self.is_unified_mode:
-                            unified_line = (
-                                f"[dim]{time_str}[/] [magenta][DISCORD][/] {line}"
-                            )
-                            un_widget.write(
-                                colorize_discord_log(unified_line, self.filter_query)
-                            )
+                            if self.is_unified_mode:
+                                unified_line = (
+                                    f"[dim]{time_str}[/] [magenta][DISCORD][/] {line}"
+                                )
+                                un_widget.write(
+                                    colorize_log(
+                                        unified_line,
+                                        service="discord",
+                                        highlight_query=self.filter_query,
+                                    ),
+                                    scroll_end=self.auto_scroll,
+                                )
 
         async def on_unmount(self):
             await asyncio.gather(
@@ -771,9 +1007,14 @@ Interactive TUI Keybindings (Dashboard Mode):
   [d]             Toggle / Restart Discord Bot
   [u]             Toggle Unified Stream vs Split View
   [r]             Restart Both Services
+  [Space]         Pause / Resume Auto-Scroll (Freeze view to inspect stack traces)
+  [1]             Show Errors Only
+  [2]             Show Warnings + Errors
+  [3]             Show All Logs
+  [e]             Export Current Log Stream to logs/priestyai_dump_<time>.log
   [c]             Clear Screen Logs
-  [/]             Open Vim-Style Search Bar (Highlights matches)
-  [Esc]           Clear Filter / Unfocus Search
+  [/]             Open Keyword Search Bar (Highlights matches in bright yellow)
+  [Esc]           Clear Active Search / Unfocus Bar
   [Ctrl+C] / [q]  Quit and cleanly stop all background processes
 
 Quick Examples:

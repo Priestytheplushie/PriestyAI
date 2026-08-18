@@ -1,8 +1,14 @@
-﻿discord.py[voice]
+# CLI & Development Runner
+rich
+textual
+watchfiles
+
+# Discord Bot
+discord.py[voice]
+audioop-lts; python_version >= "3.13"
 discord-ext-voice-recv
 google-genai
 numpy
-pydantic
 aiohttp
 python-dotenv
 beautifulsoup4
@@ -12,6 +18,22 @@ python-docx
 openpyxl
 sympy
 matplotlib
-moviepy 
+moviepy
+imageio-ffmpeg
 edge-tts
-pillow
+requests
+
+# GitHub App
+fastapi
+uvicorn
+httpx
+pydantic
+pydantic-settings
+pyjwt[crypto]
+cryptography
+docker
+
+# Dev & Quality Tools
+pytest
+ruff
+mypy

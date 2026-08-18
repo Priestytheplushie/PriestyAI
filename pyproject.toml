@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "priestyai"
+version = "0.1.0"
+description = "Developer CLI for the PriestyAI GitHub App and Discord Bot"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[project.scripts]
+priestyai = "cli:main"
+
+[tool.setuptools]
+py-modules = ["cli"]

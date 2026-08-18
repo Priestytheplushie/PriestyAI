@@ -751,19 +751,37 @@ class MachineUserClient:
             **GITHUB_HEADERS,
             "Authorization": f"Bearer {settings.GITHUB_TOKEN}",
         }
+        self._invitations_etag: Optional[str] = None
 
     async def list_pending_invitations(self) -> List[Dict[str, Any]]:
         url = f"{GITHUB_API_BASE}/user/repository_invitations"
+        headers = dict(self.headers)
+        if self._invitations_etag:
+            headers["If-None-Match"] = self._invitations_etag
+
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            resp = await client.get(url, headers=self.headers)
+            resp = await client.get(url, headers=headers)
+
+            if resp.status_code == 304:
+                return []
+
             resp.raise_for_status()
+
+            etag = resp.headers.get("etag")
+            if etag:
+                self._invitations_etag = etag
+
             return resp.json()
 
     async def accept_invitation(self, invitation_id: int) -> bool:
         url = f"{GITHUB_API_BASE}/user/repository_invitations/{invitation_id}"
         async with httpx.AsyncClient(follow_redirects=True) as client:
             resp = await client.patch(url, headers=self.headers)
-            return resp.status_code == 204
+            if resp.status_code == 204:
+
+                self._invitations_etag = None
+                return True
+            return False
 
     async def create_issue(
         self,

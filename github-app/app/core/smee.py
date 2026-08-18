@@ -55,8 +55,9 @@ async def run_smee_listener(
                                     ) or parsed.get("x-github-event", "")
 
                                     if gh_event:
-                                        await dispatch_event(
-                                            gh_event, req_headers, body
+
+                                        asyncio.create_task(
+                                            dispatch_event(gh_event, req_headers, body)
                                         )
                                 except json.JSONDecodeError:
                                     logger.warning(

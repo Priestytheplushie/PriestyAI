@@ -5,7 +5,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 from app.config import settings
 from app.core.lock_manager import lock_manager
 from app.core.smee import run_smee_listener
@@ -95,61 +95,66 @@ async def dispatch_webhook_event(
         f"Received GitHub event: '{event_name}' (action: '{action}') for resource '{lock_key}'"
     )
 
-    async with lock_manager.lock(lock_key):
-        if event_name in ("installation", "installation_repositories"):
-            await handle_installation_event(event_name, payload)
+    try:
+        async with lock_manager.lock(lock_key):
+            if event_name in ("installation", "installation_repositories"):
+                await handle_installation_event(event_name, payload)
 
-        elif event_name == "pull_request":
-            if action == "opened":
-                await handle_pr_opened(payload)
-            elif action == "review_requested":
-                await handle_pr_review_requested(payload)
+            elif event_name == "pull_request":
+                if action == "opened":
+                    await handle_pr_opened(payload)
+                elif action == "review_requested":
+                    await handle_pr_review_requested(payload)
 
-        elif event_name == "pull_request_review" and action == "submitted":
-            await handle_pr_review_submitted(payload)
+            elif event_name == "pull_request_review" and action == "submitted":
+                await handle_pr_review_submitted(payload)
 
-        elif event_name == "issues":
-            if action == "opened":
-                await handle_issue_opened(payload)
-            elif action == "assigned":
-                await handle_issue_assigned(payload)
+            elif event_name == "issues":
+                if action == "opened":
+                    await handle_issue_opened(payload)
+                elif action == "assigned":
+                    await handle_issue_assigned(payload)
 
-        elif (
-            event_name in ("issue_comment", "pull_request_review_comment")
-            and action == "created"
-        ):
-            await handle_comment_created(payload)
+            elif (
+                event_name in ("issue_comment", "pull_request_review_comment")
+                and action == "created"
+            ):
+                await handle_comment_created(payload)
 
-        elif event_name == "discussion" and action == "created":
-            await handle_discussion_opened(payload)
+            elif event_name == "discussion" and action == "created":
+                await handle_discussion_opened(payload)
 
-        elif event_name == "discussion_comment" and action == "created":
-            await handle_discussion_comment(payload)
+            elif event_name == "discussion_comment" and action == "created":
+                await handle_discussion_comment(payload)
 
-        elif event_name == "reaction" and action == "created":
-            content = payload.get("reaction", {}).get("content")
-            if content in ("+1", "rocket", "eyes"):
-                issue = payload.get("issue", {})
-                if "pull_request" in issue:
-                    installation_id = payload.get("installation", {}).get("id")
-                    repo_data = payload.get("repository", {})
-                    owner = repo_data.get("owner", {}).get("login")
-                    repo = repo_data.get("name")
-                    pull_number = issue.get("number")
-                    logger.info(
-                        f"Emoji reaction '{content}' detected on PR #{pull_number}. Triggering plan execution..."
-                    )
-                    await execute_approved_plan(
-                        installation_id, owner, repo, pull_number
-                    )
+            elif event_name == "reaction" and action == "created":
+                content = payload.get("reaction", {}).get("content")
+                if content in ("+1", "rocket", "eyes"):
+                    issue = payload.get("issue", {})
+                    if "pull_request" in issue:
+                        installation_id = payload.get("installation", {}).get("id")
+                        repo_data = payload.get("repository", {})
+                        owner = repo_data.get("owner", {}).get("login")
+                        repo = repo_data.get("name")
+                        pull_number = issue.get("number")
+                        logger.info(
+                            f"Emoji reaction '{content}' detected on PR #{pull_number}. Triggering plan execution..."
+                        )
+                        await execute_approved_plan(
+                            installation_id, owner, repo, pull_number
+                        )
 
-        else:
-            logger.debug(f"Event '{event_name}.{action}' not handled.")
+            else:
+                logger.debug(f"Event '{event_name}.{action}' not handled.")
+    except Exception as e:
+        logger.error(
+            f"Unhandled error in background event handler for {event_name}.{action} ({lock_key}): {e}",
+            exc_info=True,
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-
     invitation_task = asyncio.create_task(auto_accept_invitations_worker())
 
     smee_task = None
@@ -189,6 +194,7 @@ async def health_check():
 @app.post("/webhook")
 async def webhook_endpoint(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_github_event: str = Header(None, alias="X-GitHub-Event"),
     x_hub_signature_256: Optional[str] = Header(None, alias="X-Hub-Signature-256"),
 ):
@@ -212,7 +218,9 @@ async def webhook_endpoint(
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
     headers = dict(request.headers)
-    await dispatch_webhook_event(x_github_event, headers, payload)
+
+    background_tasks.add_task(dispatch_webhook_event, x_github_event, headers, payload)
+
     return Response(
         status_code=200, content='{"status": "ok"}', media_type="application/json"
     )

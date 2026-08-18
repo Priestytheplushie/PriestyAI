@@ -39,6 +39,7 @@ class DockerRunner:
         logger.info(f"Running sandbox commands in '{image}': {combined_script}")
 
         abs_workspace = os.path.abspath(workspace_dir)
+        container = None
 
         try:
             container = self.client.containers.run(
@@ -48,6 +49,9 @@ class DockerRunner:
                 working_dir="/workspace",
                 detach=True,
                 remove=False,
+                mem_limit="2g",
+                nano_cpus=2000000000,
+                pids_limit=256,
             )
 
             result = container.wait(timeout=timeout)
@@ -58,7 +62,6 @@ class DockerRunner:
             stderr = container.logs(stdout=False, stderr=True).decode(
                 "utf-8", errors="replace"
             )
-            container.remove(force=True)
 
             return {
                 "success": exit_code == 0,
@@ -75,6 +78,12 @@ class DockerRunner:
                 "stderr": str(e),
                 "exit_code": 1,
             }
+        finally:
+            if container:
+                try:
+                    container.remove(force=True)
+                except Exception:
+                    pass
 
     async def run_commands(
         self,

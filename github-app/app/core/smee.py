@@ -11,7 +11,7 @@ async def run_smee_listener(
     smee_url: str,
     dispatch_event: Callable[[str, dict, dict], Coroutine[Any, Any, None]],
 ) -> None:
-    """Connects to Smee.io SSE stream in the same process and forwards payloads."""
+    """Connects to Smee.io SSE stream in the same process and forwards payloads non-blockingly."""
     headers = {"Accept": "text/event-stream"}
 
     while True:
@@ -56,8 +56,9 @@ async def run_smee_listener(
                                     ) or parsed.get("x-github-event", "")
 
                                     if gh_event:
-                                        await dispatch_event(
-                                            gh_event, req_headers, body
+
+                                        asyncio.create_task(
+                                            dispatch_event(gh_event, req_headers, body)
                                         )
                                 except json.JSONDecodeError:
                                     logger.warning(

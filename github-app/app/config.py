@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,12 +15,20 @@ class Settings(BaseSettings):
     GITHUB_APP_PRIVATE_KEY_PATH: str = "github_app.pem"
     GITHUB_WEBHOOK_SECRET: str = ""
 
-    SMEE_URL: str
+    SMEE_URL: str = ""
+
+    LLM_PROVIDER: Literal["gemini", "vertex"] = "gemini"
 
     GEMINI_API_KEY: str = ""
     GEMINI_API_KEY_2: str = ""
     GEMINI_API_KEY_3: str = ""
     GEMINI_API_KEY_4: str = ""
+
+    GCP_PROJECT_ID: str = ""
+    GCP_REGION: str = "us-central1"
+    VERTEX_MODEL: str = "gemini-1.5-pro-002"
+
+    DOCKER_NETWORK_MODE: str = "none"
 
     PORT: int = 8000
     HOST: str = "0.0.0.0"

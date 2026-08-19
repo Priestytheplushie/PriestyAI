@@ -132,3 +132,7 @@ pytest -v --cov=github-app/app github-app/tests
 * **Isolated Ephemeral Sandboxes:** Test suites execute in isolated Docker containers with strict timeouts and memory boundaries.
 * **External Fork Protection:** Automated container execution is skipped on external untrusted forks unless explicitly authorized by a maintainer.
 * **Base Branch Compliance:** Coding guidelines and rules are strictly pinned to the base branch's `CONTRIBUTING.md`.
+
+## License
+
+This subproject is part of the PriestyAI monorepo and is licensed under the [GNU AGPLv3](../../LICENSE). For trademark, persona, and self-hosting branding rules, see the [Root README](../../README.md#trademark-persona--identity-policy).

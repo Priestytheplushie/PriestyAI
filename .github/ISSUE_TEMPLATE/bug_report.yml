@@ -1,10 +1,25 @@
 name: Bug Report
-description: Report a bug or unintended behavior
+description: Report an error, unexpected crash, or unintended behavior
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
-      value: Thanks for reporting an issue!
+      value: |
+        Thanks for taking the time to report an issue! Please provide as much context as possible.
+
+  - type: dropdown
+    id: subproject
+    attributes:
+      label: Affected Subproject / Component
+      description: Which part of the PriestyAI monorepo is experiencing the issue?
+      options:
+        - "GitHub Automation App (FastAPI / Webhooks)"
+        - "Discord Companion Bot (Discord.py / Agents / News)"
+        - "PriestyAI CLI & Terminal Dashboard"
+        - "Monorepo Infrastructure / CI"
+    validations:
+      required: true
+
   - type: textarea
     id: description
     attributes:
@@ -12,10 +27,31 @@ body:
       placeholder: A clear and concise description of what happened.
     validations:
       required: true
+
   - type: textarea
     id: reproduction
     attributes:
       label: Steps to Reproduce
-      placeholder: 1. Go to...\n2. Run...\n3. Error happens...
+      placeholder: |
+        1. Run command '...'
+        2. Trigger event '...'
+        3. See error traceback in logs...
     validations:
       required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      placeholder: What did you expect to happen instead?
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs / Tracebacks
+      description: Paste any terminal logs or stack traces (press 'e' in CLI to export logs).
+      render: shell
+    validations:
+      required: false

@@ -43,7 +43,6 @@ MANIFEST
 htmlcov/
 .mypy_cache/
 
-clean_project.py
 prepare_assets.py
 print_project_tree.py
 tree_checker.py

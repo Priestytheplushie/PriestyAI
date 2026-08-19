@@ -37,7 +37,7 @@ docker
 pytest
 ruff
 mypy
-pustil
+psutil
 
 pytest
 pytest-asyncio

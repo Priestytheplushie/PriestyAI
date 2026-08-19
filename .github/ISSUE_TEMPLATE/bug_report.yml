@@ -1,0 +1,21 @@
+name: Bug Report
+description: Report a bug or unintended behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting an issue!
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      placeholder: A clear and concise description of what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      placeholder: 1. Go to...\n2. Run...\n3. Error happens...
+    validations:
+      required: true

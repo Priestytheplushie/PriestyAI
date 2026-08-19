@@ -135,4 +135,4 @@ pytest -v --cov=github-app/app github-app/tests
 
 ## License
 
-This subproject is part of the PriestyAI monorepo and is licensed under the [GNU AGPLv3](../../LICENSE). For trademark, persona, and self-hosting branding rules, see the [Root README](../../README.md#trademark-persona--identity-policy).
+This subproject is part of the PriestyAI monorepo and is licensed under the [GNU AGPLv3](../LICENSE). For trademark, persona, and self-hosting branding rules, see the [Root README](../README.md#license--brand-guidelines).

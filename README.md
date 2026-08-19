@@ -200,7 +200,7 @@ PriestyAI/
 ### Software License
 This repository is licensed under the **GNU Affero General Public License v3.0 (GNU AGPLv3)**. You are free to inspect, run, modify, and self-host this software. If you host or run a modified version of this software as a network service, you must make the complete corresponding source code available under the same AGPLv3 license. See [LICENSE](LICENSE) for full details.
 
-### Trademark, Persona & Identity Policy
+### Persona & Identity Policy
 "PriestyAI", the character assets/sprites, and the `@PriestyAI` machine account represent the official identity and persona of the project creator.
 * **Self-Hosting:** You are welcome to deploy your own instance of the bot for your team or organization.
 * **Branding Requirement:** If you host or distribute your own public instance, you must configure your own bot credentials/app registrations and **must not** use the name "PriestyAI", use the official character sprites/avatars, or represent your instance as the official `@PriestyAI` service.

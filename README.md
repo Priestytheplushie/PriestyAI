@@ -1,10 +1,15 @@
 # PriestyAI
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Install GitHub App](https://img.shields.io/badge/GitHub_App-Install-blue?logo=github)](https://github.com/apps/priestyai)
+[![Machine Account](https://img.shields.io/badge/Machine_User-@PriestyAI-181717?logo=github)](https://github.com/PriestyAI)
 [![Add Discord Bot](https://img.shields.io/badge/Discord-Add_to_Server-5865F2?logo=discord&logoColor=white)](https://discord.com/oauth2/authorize?client_id=1509364708476452894)
 [![User App](https://img.shields.io/badge/User_App-Install_to_Account-eb459e?logo=discord&logoColor=white)](https://discord.com/oauth2/authorize?client_id=1509364708476452894)
 
 PriestyAI is an ecosystem of autonomous developer and community AI agents. This monorepo houses both the **GitHub Automation App** and the **Discord AI Companion**, supervised by a terminal control plane.
+
+> [!TIP]
+> Just want to use the hosted bot without compiling code? Visit the [PriestyAI Machine Account](https://github.com/PriestyAI/PriestyAI) for 1-click installations.
 
 ---
 
@@ -32,7 +37,7 @@ cd PriestyAI
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1  # On Linux/macOS: source .venv/bin/activate
 
-# Install all dependencies (including test suites) and register the CLI
+# Install all dependencies and register the CLI
 pip install -r requirements.txt
 pip install -e .
 ```
@@ -62,19 +67,20 @@ priestyai
 python cli.py
 ```
 
-### 4. Running Unit Tests
+### 4. Running Automated Tests
 
-Run the full automated test suite using `pytest`:
+Run the full automated test suite across all projects using `pytest`:
 
 ```powershell
-# Run all tests across the entire monorepo
+# Run all tests across the monorepo
 pytest
 
 # Run tests with code coverage report
-pytest --cov=.
+pytest --cov
 
 # Run tests for a specific subproject
 pytest github-app/tests
+pytest discord-bot/tests
 pytest tests/              # Root CLI tests
 ```
 
@@ -82,7 +88,7 @@ pytest tests/              # Root CLI tests
 
 ## PriestyAI CLI
 
-The **PriestyAI CLI** is an interactive, terminal-native supervisor built with [Textual](https://textual.textualize.io/) and [Rich](https://rich.readthedocs.io/). It manages both bot subprocesses concurrently with debounced hot-reloading, live process telemetry, tokenized log syntax highlighting, and log search.
+The **PriestyAI CLI** is an interactive, terminal-native supervisor built with [Textual](https://textual.textualize.io/) and [Rich](https://rich.readthedocs.io/). It manages both bot subprocesses concurrently with debounced hot-reloading, live process telemetry, tokenized log syntax highlighting, and keyword log search.
 
 ```text
 ┌─ PriestyAI ──────────────────────────────────────────────────────────────────────────────────────┐
@@ -148,11 +154,18 @@ The **PriestyAI CLI** is an interactive, terminal-native supervisor built with [
 
 ```text
 PriestyAI/
-├── .gitignore               # Unified root secret and build artifact exclusion rules
+├── .github/                 # CI workflows & issue templates
+│   ├── workflows/ci.yml     # Automated tests, coverage & lint checks
+│   └── ISSUE_TEMPLATE/      # Bug reports and feature request forms
+├── .gitignore               # Unified secret & build artifact exclusion rules
 ├── cli.py                   # PriestyAI CLI, TUI dashboard & subprocess supervisor
 ├── pyproject.toml           # Monorepo packaging, entrypoints & pytest config
 ├── requirements.txt         # Consolidated dependency & test runner manifest
+├── LICENSE                  # GNU Affero General Public License (AGPLv3)
 ├── README.md                # Monorepo overview, quickstart & developer guide
+│
+├── scripts/
+│   └── clean_project.py     # Codebase hygiene & formatting validator
 │
 ├── logs/                    # Exported log dumps from the CLI (git-ignored)
 │
@@ -164,7 +177,6 @@ PriestyAI/
 │   ├── app/                 # Workflows, triage, reviews, and git clients
 │   ├── tests/               # GitHub App unit & integration tests
 │   ├── .env.example         # GitHub App environment template
-│   ├── github_app.pem       # GitHub App private key (git-ignored)
 │   ├── README.md            # GitHub App documentation & developer guide
 │   └── requirements.txt     # Service-specific requirements
 │
@@ -179,3 +191,16 @@ PriestyAI/
     ├── README.md            # Discord Bot documentation
     ├── requirements.txt     # Service-specific requirements
     └── run.py               # Bot entrypoint
+```
+
+---
+
+## License & Brand Guidelines
+
+### Software License
+This repository is licensed under the **GNU Affero General Public License v3.0 (GNU AGPLv3)**. You are free to inspect, run, modify, and self-host this software. If you host or run a modified version of this software as a network service, you must make the complete corresponding source code available under the same AGPLv3 license. See [LICENSE](LICENSE) for full details.
+
+### Trademark, Persona & Identity Policy
+"PriestyAI", the character assets/sprites, and the `@PriestyAI` machine account represent the official identity and persona of the project creator.
+* **Self-Hosting:** You are welcome to deploy your own instance of the bot for your team or organization.
+* **Branding Requirement:** If you host or distribute your own public instance, you must configure your own bot credentials/app registrations and **must not** use the name "PriestyAI", use the official character sprites/avatars, or represent your instance as the official `@PriestyAI` service.

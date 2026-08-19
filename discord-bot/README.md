@@ -7,7 +7,7 @@ PriestyAI is an intelligent, multi-modal Discord AI companion and server automat
 
 ---
 
-## QuickStart
+## QuickStart (Using the Hosted Discord Bot)
 
 Get up and running in three steps:
 
@@ -63,12 +63,13 @@ Run `/agent` to launch an autonomous multi-step reasoning agent inside a private
 1. **Plan Formulation:** PriestyAI analyzes your prompt, formulates an execution plan, and presents a pre-start checklist.
 2. **Context Snapshots:** Attach saved message transcripts, user profile snapshots, or server lore to ground the agent's research.
 3. **Execution Loop:** The agent uses tools, investigates logs, performs web queries, and delivers modular diagnostic reports.
+4. **Deep Web Research:** Recursively crawls web search indexes, reconciles data discrepancies, and outputs comprehensive Word (`.docx`) or Markdown (`.md`) reports.
 
 ---
 
 ### 5. Semantic Memory Journals
 
-PriestyAI maintains a long-term memory database backed by dense vector embeddings
+PriestyAI maintains a long-term memory database backed by dense vector embeddings:
 
 * **Factual Durability Gatekeeper:** Audits conversations in the background to extract meaningful facts while ignoring temporary slang, noise, or short-term banter.
 * **Semantic Recall:** Performs cosine similarity lookups to retrieve relevant background context across user traits, server lore, and global knowledge bases.
@@ -77,8 +78,6 @@ PriestyAI maintains a long-term memory database backed by dense vector embedding
 ---
 
 ## Command & Context Menu Cheatsheet
-
-PriestyAI offers slash commands and right-click context menu apps for quick interaction:
 
 ### Slash Commands
 
@@ -104,12 +103,54 @@ PriestyAI offers slash commands and right-click context menu apps for quick inte
 
 ---
 
-## Key Capabilities
+## Local Development & Setup
 
-* **Multi-Backend Image Generation:** Generates and edits images with automatic fallback routing across Pollinations AI, Pixazo Gateway (Flux-1 / SDXL), and AI Horde.
-* **User-Installed App Support:** Installable as a personal Discord User App to invoke `/chat` inside group DMs, private chats, or servers where the bot is not present.
-* **Multi-Format Document Extraction:** Automatically extracts text from uploaded `.pdf`, `.docx`, `.xlsx`, `.py`, `.json`, and source code files.
-* **Server Profile Customization:** Modify PriestyAI's server-specific nickname, biography, avatar, and banner directly from `/config target:Server Identity`.
+If you are developing, testing, or hosting the Discord Bot service yourself:
+
+### 1. Prerequisites
+* **Python 3.11+**
+* **FFmpeg** installed and accessible in your system `PATH` (required for video/audio rendering).
+* A **Discord Bot Application** with all **Privileged Gateway Intents** enabled (Server Members, Presence, Message Content) in the [Discord Developer Portal](https://discord.com/developers/applications).
+* A private **Discord Brain Server** (used by the bot to store long-term vector memories and forum configurations).
+* A **Google Gemini API Key** from [Google AI Studio](https://aistudio.google.com/).
+
+### 2. Environment Configuration
+Copy the template inside `discord-bot/` and fill in your credentials:
+```bash
+cp discord-bot/.env.example discord-bot/.env
+```
+
+Key environment variables:
+* `DISCORD_TOKEN`: Discord Bot token from the Developer Portal.
+* `BRAIN_SERVER_ID`: Guild ID of your private Discord storage server.
+* `GEMINI_API_KEY`: Primary Google Gemini API key.
+* `OWNER_ID`: Your personal Discord User ID (for admin commands like `/start`).
+* `PEXELS_KEY`: *(Optional)* Pexels API key for HD news video backgrounds.
+* `STREAMABLE_EMAIL` / `STREAMABLE_PASSWORD`: *(Optional)* Streamable credentials for hosting news broadcast clips.
+* `PIXAZO_API_KEY`: *(Optional)* Pixazo Gateway key for Flux/SDXL image generation fallback.
+
+### 3. Running the Service
+```bash
+# Run standalone from within discord-bot/
+python run.py
+
+# Or run via the PriestyAI CLI from the repository root
+priestyai --discord-only
+```
+
+---
+
+## Running Unit Tests
+
+Run the test suite from the repository root or inside the `discord-bot` directory using `pytest`:
+
+```bash
+# Run all Discord Bot unit tests
+pytest discord-bot/tests
+
+# Run with verbose output and test coverage report
+pytest -v --cov=discord-bot discord-bot/tests
+```
 
 ---
 
@@ -119,3 +160,7 @@ PriestyAI offers slash commands and right-click context menu apps for quick inte
 * **Ephemeral Reasoning Visibility:** Inner thinking blocks are served through private ephemeral interactions to keep public channels clean and secure.
 * **Strict Memory Gating:** Background evaluators use threshold scoring to prevent temporary chat logs or private user chatter from polluting persistent memory stores.
 * **Sandboxed Layout Execution:** Layout scripts execute through a strict AST-validated compiler that strips imports, loops, and unapproved component definitions.
+
+## License
+
+This subproject is part of the PriestyAI monorepo and is licensed under the [GNU AGPLv3](../../LICENSE). For trademark, persona, and self-hosting branding rules, see the [Root README](../../README.md#trademark-persona--identity-policy).

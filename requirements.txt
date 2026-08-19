@@ -38,3 +38,8 @@ pytest
 ruff
 mypy
 pustil
+
+pytest
+pytest-asyncio
+pytest-cov
+respx

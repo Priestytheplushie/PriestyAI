@@ -7,7 +7,7 @@
 
 ---
 
-## QuickStart
+## QuickStart (Using the GitHub App)
 
 Get up and running in three steps:
 
@@ -77,13 +77,52 @@ PriestyAI uses intent routing to understand natural developer instructions witho
 
 ---
 
-## Key Capabilities
+## Local Development & Setup
 
-* **Automated Issue & PR Triage:** Analyzes incoming issues for duplicates and missing reproduction steps, labels them, and provides natural diff summaries on newly opened PRs.
-* **Native Sub-Issue Decomposition:** Breaks large tasks into atomic child issues natively linked via GitHub's Sub-Issues API.
-* **Self-Healing Test Loops:** Runs tests locally in Docker during implementation and fix passes, diagnosing test tracebacks up to 2 self-healing cycles.
-* **True 2-Parent Merge Commits:** Resolves conflicts between the base branch and PR branch by constructing valid two-parent Git merge commits.
-* **Native GitHub Check Runs:** Publishes status check results directly to PR commits (`PriestyAI Sandbox Verification`).
+If you are developing or hosting the FastAPI backend yourself:
+
+### 1. Prerequisites
+* **Python 3.10+**
+* **Docker Desktop / Docker Engine** (running locally for sandbox verification)
+* A **GitHub App** created under your GitHub Account / Organization with Webhook permissions.
+* A **Machine Account Personal Access Token (PAT)** for `@PriestyAI` (or your bot user).
+
+### 2. Environment Configuration
+Copy the template and fill in your credentials:
+```bash
+cp .env.example .env
+```
+
+Key environment variables:
+* `GITHUB_TOKEN`: Personal access token for the machine user account.
+* `GITHUB_APP_ID`: Your GitHub App ID.
+* `GITHUB_APP_PRIVATE_KEY_PATH`: Path to your downloaded `.pem` file (e.g. `github_app.pem`).
+* `GITHUB_WEBHOOK_SECRET`: Secret token configured in your GitHub App settings.
+* `SMEE_URL`: Optional [Smee.io](https://smee.io) webhook forwarding URL for local debugging without public ports.
+* `GEMINI_API_KEY`: Google AI Studio API key (supports key rotation with `GEMINI_API_KEY_2`, `_3`, `_4`).
+
+### 3. Running the Service
+```bash
+# Run standalone with Uvicorn
+uvicorn app.main:app --port 8000 --reload
+
+# Or run via the PriestyAI CLI
+priestyai --github-only
+```
+
+---
+
+## Running Unit Tests
+
+Run the test suite from the repository root or inside the `github-app` directory:
+
+```bash
+# Run all GitHub App unit tests
+pytest github-app/tests
+
+# Run with verbose output and coverage
+pytest -v --cov=github-app/app github-app/tests
+```
 
 ---
 

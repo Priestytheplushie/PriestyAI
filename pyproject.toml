@@ -14,3 +14,29 @@ priestyai = "cli:main"
 
 [tool.setuptools]
 py-modules = ["cli"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+    "github-app/tests",
+    "discord-bot/tests",
+]
+asyncio_mode = "auto"
+pythonpath = [
+    ".",
+    "github-app",
+    "discord-bot"
+]
+
+[tool.coverage.run]
+source = ["github-app/app"]
+omit = [
+    "*/__init__.py",
+    "*/smee.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1

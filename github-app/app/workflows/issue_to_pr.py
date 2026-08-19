@@ -22,15 +22,20 @@ logger = logging.getLogger("priesty.issue_to_pr")
 
 
 def clean_branch_slug(title: str) -> str:
-    """Strips issue prefixes, IDs, and special characters into a clean slug."""
+    """Strips issue prefixes, scopes, IDs, and special characters into a clean slug."""
+
     cleaned = re.sub(
-        r"^(?:fix|feat|chore|refactor|docs|style|bug|feature|issue)[\s:\-\(\)\#\d]*",
+        r"^(?:fix|feat|chore|refactor|docs|style|bug|feature|issue)(?:\([^\)]*\))?[\s:\-\(\)\#\d]*",
         "",
         title,
         flags=re.IGNORECASE,
     ).strip()
+
+    cleaned = re.sub(r"^#?\d+[\s:\-\.]*", "", cleaned).strip()
+
     if not cleaned:
         cleaned = title
+
     cleaned = cleaned.lower()
     cleaned = re.sub(r"[^\w\s-]", "", cleaned)
     cleaned = re.sub(r"[-\s]+", "-", cleaned).strip("-")

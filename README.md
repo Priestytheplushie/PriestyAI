@@ -17,7 +17,7 @@ PriestyAI is an ecosystem of autonomous developer and community AI agents. This 
 
 ---
 
-## QuickStart (Local Development CLI)
+## QuickStart (Local Development & Testing)
 
 Get both services running simultaneously in less than two minutes using the built-in **PriestyAI CLI**:
 
@@ -32,7 +32,7 @@ cd PriestyAI
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1  # On Linux/macOS: source .venv/bin/activate
 
-# Install all dependencies and register the CLI command
+# Install all dependencies (including test suites) and register the CLI
 pip install -r requirements.txt
 pip install -e .
 ```
@@ -62,9 +62,25 @@ priestyai
 python cli.py
 ```
 
+### 4. Running Unit Tests
+
+Run the full automated test suite using `pytest`:
+
+```powershell
+# Run all tests across the entire monorepo
+pytest
+
+# Run tests with code coverage report
+pytest --cov=.
+
+# Run tests for a specific subproject
+pytest github-app/tests
+pytest tests/              # Root CLI tests
+```
+
 ---
 
-## PriestyAI CLI Dashboard
+## PriestyAI CLI
 
 The **PriestyAI CLI** is an interactive, terminal-native supervisor built with [Textual](https://textual.textualize.io/) and [Rich](https://rich.readthedocs.io/). It manages both bot subprocesses concurrently with debounced hot-reloading, live process telemetry, tokenized log syntax highlighting, and log search.
 
@@ -134,17 +150,22 @@ The **PriestyAI CLI** is an interactive, terminal-native supervisor built with [
 PriestyAI/
 ├── .gitignore               # Unified root secret and build artifact exclusion rules
 ├── cli.py                   # PriestyAI CLI, TUI dashboard & subprocess supervisor
-├── pyproject.toml           # Monorepo packaging & 'priestyai' console entrypoint
-├── requirements.txt         # Consolidated dependency manifest
-├── README.md                # Monorepo overview and developer guide
+├── pyproject.toml           # Monorepo packaging, entrypoints & pytest config
+├── requirements.txt         # Consolidated dependency & test runner manifest
+├── README.md                # Monorepo overview, quickstart & developer guide
 │
 ├── logs/                    # Exported log dumps from the CLI (git-ignored)
 │
+├── tests/                   # Root CLI & supervisor test suite
+│   ├── conftest.py          # Global pytest configuration and fixtures
+│   └── test_cli.py          # CLI log colorizer and filter unit tests
+│
 ├── github-app/              # GitHub App (FastAPI / Smee / Docker)
 │   ├── app/                 # Workflows, triage, reviews, and git clients
+│   ├── tests/               # GitHub App unit & integration tests
 │   ├── .env.example         # GitHub App environment template
 │   ├── github_app.pem       # GitHub App private key (git-ignored)
-│   ├── README.md            # GitHub App documentation
+│   ├── README.md            # GitHub App documentation & developer guide
 │   └── requirements.txt     # Service-specific requirements
 │
 └── discord-bot/             # Discord Bot (Discord.py / MoviePy / Agents)
@@ -152,10 +173,9 @@ PriestyAI/
     ├── assets/              # Host sprites, UI cards, and background audio
     ├── config/              # Core Markdown system prompts and guidelines
     ├── core/                # Bot lifecycle, chat handler, memory, and UI components
+    ├── tests/               # Discord Bot test suite
     ├── tools/               # Components V2 message builder and Server News pipeline
     ├── .env.example         # Discord Bot environment template
     ├── README.md            # Discord Bot documentation
     ├── requirements.txt     # Service-specific requirements
     └── run.py               # Bot entrypoint
-```
-```

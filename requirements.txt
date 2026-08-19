@@ -1,7 +1,8 @@
-# CLI & Development Runner
+# CLI & Runner
 rich
 textual
 watchfiles
+psutil
 
 # Discord Bot
 discord.py[voice]
@@ -35,11 +36,9 @@ docker
 
 # Dev & Quality Tools
 pytest
-ruff
-mypy
-psutil
-
-pytest
 pytest-asyncio
 pytest-cov
 respx
+ruff
+black
+mypy

@@ -1,121 +1,97 @@
 import json
 import logging
-import asyncio
-from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field
 from google.genai import types
-
-import config
-from core.key_pool import KeyPoolManager
+from config.settings import (
+    ROUTER_PRIMARY,
+    ROUTER_FALLBACK,
+    WORKHORSE_MODEL,
+    FLAGSHIP_MODELS,
+    LITE_MODELS
+)
+from core.client_manager import client_manager
 
 logger = logging.getLogger("PriestyAI.Router")
 
-ROUTER_SYSTEM_PROMPT = """
-You are the routing and status synthesis engine for PriestyAI.
-Evaluate the incoming Discord chat context and produce a strict JSON response.
+class RouteDecision(BaseModel):
+    target_model: str = Field(
+        description="The chosen model: 'gemini-3.7-flash', 'gemini-3.5-flash-lite', or 'gemma-4-31b-it'"
+    )
+    thinking_level: str = Field(
+        description="Reasoning depth: 'MINIMAL', 'LOW', 'MEDIUM', or 'HIGH'"
+    )
+    witty_statuses: list[str] = Field(
+        description="5 to 7 query-specific, witty, humorous 3-5 word loading messages"
+    )
+    reasoning_summary: str = Field(
+        description="A brief 1-sentence technical reason for this route decision"
+    )
+
+ROUTER_SYSTEM_INSTRUCTION = """
+You are the routing and complexity classifier for PriestyAI.
+Analyze the user's message and channel context, then output a JSON object adhering strictly to the schema.
 
 Routing Guidelines:
-1. Needs Web / Real-time / Tools / Deep Math (e.g. game patch notes, Fortnite updates, Marvel Rivals meta, live news, coding execution, complex math):
-   - Target: "gemini-3.5-flash" or "gemini-3.7-flash".
-2. Casual banter, server greetings, simple chat:
-   - Target: "gemma-4-31b-it".
+1. CASUAL / CHITCHAT / QUICK (Greetings, jokes, small talk, translations, simple Q&A):
+   - target_model: "gemma-4-31b-it" or "gemini-3.5-flash-lite"
+   - thinking_level: "MINIMAL"
 
-Status Generation:
-- Generate 'status_cycle': A list of exactly 5 to 7 concise, witty loading status lines (max 6 words each, NO emojis).
+2. MODERATE / FACTUAL / MULTI-USER (Context analysis, general questions, explanations):
+   - target_model: "gemini-3.5-flash-lite"
+   - thinking_level: "MEDIUM"
 
-Output ONLY valid JSON matching this schema:
-{
-  "complexity": 4,
-  "intent": "web_search",
-  "target_model": "gemini-3.5-flash",
-  "status_cycle": [
-    "Searching the live web archives...",
-    "Extracting patch notes...",
-    "Analyzing battle pass data...",
-    "Formulating the intel...",
-    "Polishing the final answer..."
-  ]
-}
+3. COMPLEX / CODING / LOGIC / MATH (Programming, code review, debugging, multi-step reasoning):
+   - target_model: "gemini-3.7-flash"
+   - thinking_level: "HIGH"
+
+Witty Statuses:
+Generate exactly 5 to 7 dynamic, humorous, contextual 3-5 word phrases relevant to the query.
+Examples:
+- Programming: ["Untangling pointer arithmetic", "Negotiating with compiler", "Searching for missing semicolons", "Calibrating logic gates", "Praying to memory gods"]
+- Gaming: ["Linking the First Flame", "Dodging roll spam", "Consulting ancient scrolls", "Deciphering cryptic NPC lore", "Buffing player stats"]
 """
 
-class RouteDecision:
-    def __init__(
-        self,
-        target_model: str,
-        complexity: int,
-        intent: str,
-        status_cycle: List[str]
-    ):
-        self.target_model = target_model
-        self.complexity = complexity
-        self.intent = intent
-        self.status_cycle = status_cycle
+class Router:
+    @staticmethod
+    async def route(user_prompt: str, context_summary: str = "") -> RouteDecision:
+        payload = f"Context:\n{context_summary}\n\nUser Query:\n{user_prompt}"
 
-class FastRouter:
-    def __init__(self, key_pool: KeyPoolManager):
-        self.key_pool = key_pool
-        self.default_cycle = [
-            "Herding digital sheep...",
-            "Consulting server archives...",
-            "Untangling neural pathways...",
-            "Syncing with Discord gateway...",
-            "Polishing the response..."
-        ]
+        for router_model in [ROUTER_PRIMARY, ROUTER_FALLBACK]:
+            client, key_idx, active_model = client_manager.get_client(router_model)
+            try:
+                config = types.GenerateContentConfig(
+                    system_instruction=ROUTER_SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=RouteDecision,
+                    temperature=0.3
+                )
+                response = await client.aio.models.generate_content(
+                    model=active_model,
+                    contents=payload,
+                    config=config
+                )
+                if response.text:
+                    decision_data = json.loads(response.text)
+                    decision = RouteDecision(**decision_data)
+                    logger.info(
+                        f"[Route Success] Model: '{decision.target_model}' | "
+                        f"Thinking: '{decision.thinking_level}' | Key: #{key_idx}"
+                    )
+                    return decision
+            except Exception as e:
+                client_manager.report_error(key_idx, active_model, e)
+                logger.warning(f"Router attempt failed on {active_model} (Key #{key_idx}): {e}")
 
-    async def route(self, xml_context: str, has_media: bool = False) -> RouteDecision:
-        if not has_media and len(xml_context.strip()) < 140 and any(w in xml_context.lower() for w in ["good morning", "gm", "hello", "hi", "hey", "good afternoon", "yo", "sup"]):
-            return RouteDecision(
-                target_model=config.WORKHORSE_MODEL,
-                complexity=1,
-                intent="casual",
-                status_cycle=[
-                    "Waking up the neural circuits...",
-                    "Syncing with channel context...",
-                    "Formulating greeting...",
-                    "Ready to roll..."
-                ]
-            )
-
-        try:
-            client_state = self.key_pool._get_next_available_key()
-            if not client_state:
-                client_state = self.key_pool.keys[0]
-
-            prompt = f"Analyze this context and output routing JSON:\n\n{xml_context[-1500:]}"
-            
-            gen_config = types.GenerateContentConfig(
-                system_instruction=ROUTER_SYSTEM_PROMPT,
-                temperature=0.2,
-                response_mime_type="application/json",
-                max_output_tokens=400
-            )
-
-            response = await client_state.client.aio.models.generate_content(
-                model="gemini-3.5-flash-lite",
-                contents=[prompt],
-                config=gen_config
-            )
-
-            data = json.loads(response.text)
-            
-            complexity = int(data.get("complexity", 3))
-            intent = str(data.get("intent", "chat"))
-            target_model = data.get("target_model", "gemini-3.5-flash")
-
-            if target_model not in config.FULL_FALLBACK_CASCADE:
-                target_model = "gemini-3.5-flash"
-
-            status_cycle = data.get("status_cycle", self.default_cycle)
-            if not isinstance(status_cycle, list) or len(status_cycle) < 3:
-                status_cycle = self.default_cycle
-
-            logger.info(f"Router Decision: Model='{target_model}' | Complexity={complexity} | Intent='{intent}'")
-            return RouteDecision(target_model, complexity, intent, status_cycle)
-
-        except Exception as e:
-            logger.warning(f"Flash-Lite Router fallback ({e}), routing to gemini-3.5-flash.")
-            return RouteDecision(
-                target_model="gemini-3.5-flash",
-                complexity=3,
-                intent="chat",
-                status_cycle=self.default_cycle
-            )
+        logger.error("All router models failed. Falling back to default deterministic route.")
+        return RouteDecision(
+            target_model="gemini-3.5-flash-lite",
+            thinking_level="MEDIUM",
+            witty_statuses=[
+                "Warming up synaptic cores",
+                "Herding digital sheep",
+                "Analyzing query vectors",
+                "Consulting internal databanks",
+                "Formulating optimal answer"
+            ],
+            reasoning_summary="Router fallback triggered due to API unavailability."
+        )

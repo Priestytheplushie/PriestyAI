@@ -2,7 +2,7 @@ import re
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from google import genai
 from google.genai import types
 from src.core.config import config
@@ -18,9 +18,8 @@ class RouteDecision:
     is_deterministic: bool = False
     reason: str = "default"
 
-CODE_EXEC_PATTERN = re.compile(r"```(python|js|javascript|bash|sh|rust|cpp|c)\b", re.IGNORECASE)
-LATEX_MATH_PATTERN = re.compile(r"(\$\$[\s\S]+?\$\$|\\[a-zA-Z]+|\b(integral|derivative|matrix|eigenvector)\b)", re.IGNORECASE)
 IMAGE_GEN_PATTERN = re.compile(r"^(draw|generate|paint|create an image of|show me an image of)\b", re.IGNORECASE)
+CODE_EXEC_PATTERN = re.compile(r"```(python|js|javascript|bash|sh|rust|cpp|c)\b|execute this code|run this code", re.IGNORECASE)
 
 class ModelRouter:
     def __init__(self, key_rotator: KeyRotator):
@@ -28,24 +27,14 @@ class ModelRouter:
 
     def deterministic_route(self, prompt: str) -> Optional[RouteDecision]:
         cleaned = prompt.strip()
-        length = len(cleaned)
 
         if IMAGE_GEN_PATTERN.search(cleaned):
             return RouteDecision(
-                target_model="gemini-3.1-flash-lite",
+                target_model="gemma-4-31b-it",
                 thinking_level="minimal",
                 requires_tools=["generate_image"],
                 is_deterministic=True,
-                reason="image_generation_intent"
-            )
-
-        if LATEX_MATH_PATTERN.search(cleaned):
-            return RouteDecision(
-                target_model="gemini-3.7-flash",
-                thinking_level="high",
-                requires_tools=["render_latex_math"],
-                is_deterministic=True,
-                reason="latex_math_detected"
+                reason="image_generation"
             )
 
         if CODE_EXEC_PATTERN.search(cleaned):
@@ -54,16 +43,7 @@ class ModelRouter:
                 thinking_level="high",
                 requires_tools=["run_sandbox_code"],
                 is_deterministic=True,
-                reason="code_execution_detected"
-            )
-
-        if length < 50 and "http://" not in cleaned and "https://" not in cleaned:
-            return RouteDecision(
-                target_model="gemini-3.1-flash-lite",
-                thinking_level="minimal",
-                requires_tools=[],
-                is_deterministic=True,
-                reason="short_casual_chat"
+                reason="code_execution"
             )
 
         return None
@@ -79,13 +59,12 @@ class ModelRouter:
         client = genai.Client(api_key=api_key)
 
         router_system_prompt = (
-            "You are an AI router. Analyze the user's prompt and output a strict JSON object deciding the best model.\n"
-            "Options:\n"
-            "- 'gemini-3.7-flash' (for deep reasoning, heavy multi-step logic, complex coding, or difficult problems)\n"
-            "- 'gemma-4-31b-it' (for creative writing, banter, long roleplay, or general chat)\n"
-            "- 'gemini-3.1-flash-lite' (for standard QA, summaries, and medium queries)\n\n"
-            "Output format:\n"
-            '{"target_model": "...", "thinking_level": "minimal"|"medium"|"high", "reason": "..."}'
+            "You are an AI router. Categorize the user's prompt into the appropriate model.\n"
+            "Rules:\n"
+            "- 'gemini-3.7-flash': Use ONLY for complex multi-step reasoning, logic puzzles/riddles, university-level mathematics, proofs, advanced code debugging, or deep analysis. Set thinking_level to 'medium' or 'high'.\n"
+            "- 'gemma-4-31b-it': Use for EVERYTHING ELSE (casual banter, jokes, gaming talk, simple arithmetic/algebra, roleplay, summaries, general QA). Set thinking_level to 'minimal'.\n\n"
+            "Output strict JSON:\n"
+            '{"target_model": "gemini-3.7-flash"|"gemma-4-31b-it", "thinking_level": "minimal"|"medium"|"high", "reason": "..."}'
         )
 
         try:
@@ -104,8 +83,8 @@ class ModelRouter:
             data = json.loads(response.text)
 
             decision = RouteDecision(
-                target_model=data.get("target_model", "gemini-3.1-flash-lite"),
-                thinking_level=data.get("thinking_level", "medium"),
+                target_model=data.get("target_model", "gemma-4-31b-it"),
+                thinking_level=data.get("thinking_level", "minimal"),
                 requires_tools=[],
                 is_deterministic=False,
                 reason=data.get("reason", "semantic_eval")
@@ -114,10 +93,10 @@ class ModelRouter:
             return decision
 
         except Exception as e:
-            logger.warning(f"Semantic routing failed ({e}), falling back to gemini-3.1-flash-lite.")
+            logger.warning(f"Semantic routing failed ({e}), defaulting to gemma-4-31b-it.")
             await self.key_rotator.report_error(api_key, e)
             return RouteDecision(
-                target_model="gemini-3.1-flash-lite",
+                target_model="gemma-4-31b-it",
                 thinking_level="minimal",
                 requires_tools=[],
                 is_deterministic=False,

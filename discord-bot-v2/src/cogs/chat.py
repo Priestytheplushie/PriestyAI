@@ -77,19 +77,19 @@ class ChatCog(commands.Cog):
         if not cleaned_prompt and not media_parts:
             return
 
-        channel_history = await memory_manager.get_channel_history(str(channel.id), limit=12)
+        channel_history = await memory_manager.get_channel_history(str(channel.id), limit=10)
         user_memories = await memory_manager.get_user_memories(str(author.id), limit=5)
-        server_lore = await memory_manager.get_server_lore(str(guild.id), limit=8) if guild else []
+        server_lore = await memory_manager.get_server_lore(str(guild.id), limit=6) if guild else []
         server_vibe = await memory_manager.get_server_vibe(str(guild.id)) if guild else None
 
         channel_topic = getattr(channel, "topic", None)
         system_instruction = PromptBuilder.build_system_prompt(
+            current_speaker=author.display_name,
             guild_name=guild.name if guild else None,
             channel_name=channel.name if hasattr(channel, "name") else "dm",
             channel_topic=channel_topic,
             server_vibe=server_vibe,
             server_lore=server_lore,
-            user_name=author.display_name,
             user_memories=user_memories
         )
 
@@ -115,7 +115,7 @@ class ChatCog(commands.Cog):
 
         placeholder_msg: Optional[discord.Message] = None
         status_task: Optional[asyncio.Task] = None
-        needs_heavy_thinking = (route.thinking_level in ("medium", "high") or not route.is_deterministic)
+        needs_heavy_thinking = (route.thinking_level in ("medium", "high"))
 
         if needs_heavy_thinking:
             try:
@@ -124,9 +124,9 @@ class ChatCog(commands.Cog):
                 logger.error(f"Failed to send placeholder message: {e}")
 
             thinking_steps = [
-                f"{LOADING_EMOTE} PriestyAI is analyzing the conversation...",
-                f"{LOADING_EMOTE} PriestyAI is formulating a solution...",
-                f"{LOADING_EMOTE} PriestyAI is polishing the response..."
+                f"{LOADING_EMOTE} PriestyAI is analyzing the request...",
+                f"{LOADING_EMOTE} PriestyAI is processing data...",
+                f"{LOADING_EMOTE} PriestyAI is formatting the answer..."
             ]
 
             async def animate_status():
@@ -146,6 +146,23 @@ class ChatCog(commands.Cog):
         tools = ToolManager.get_tool_declarations()
         context = ToolContext(guild=guild, channel=channel, author=author, message=message)
 
+        attachment_files: List[discord.File] = []
+        dynamic_view: Optional[discord.ui.View] = None
+
+        async def execute_tool_wrapper(func_call: types.FunctionCall) -> Dict[str, Any]:
+            nonlocal dynamic_view
+            tool_result = await ToolManager.dispatch_tool_call(func_call, context)
+
+            if "_latex_bytes" in tool_result and tool_result["_latex_bytes"]:
+                attachment_files.append(
+                    discord.File(fp=io.BytesIO(tool_result["_latex_bytes"]), filename="latex_formula.png")
+                )
+
+            if "_modal_view" in tool_result and tool_result["_modal_view"]:
+                dynamic_view = tool_result["_modal_view"]
+
+            return tool_result
+
         try:
             if not placeholder_msg:
                 await channel.typing()
@@ -155,53 +172,36 @@ class ChatCog(commands.Cog):
                 system_instruction=system_instruction,
                 conversation_history=formatted_history,
                 tools=tools,
-                thinking_level=route.thinking_level
+                thinking_level=route.thinking_level,
+                tool_dispatcher=execute_tool_wrapper
             )
 
             if status_task:
                 status_task.cancel()
 
-            attachment_files: List[discord.File] = []
-            dynamic_view: Optional[discord.ui.View] = None
-            tools_executed_names: List[str] = []
-
-            if response.tool_calls:
-                for func_call in response.tool_calls:
-                    tools_executed_names.append(func_call.name)
-                    tool_result = await ToolManager.dispatch_tool_call(func_call, context)
-
-                    if "_latex_bytes" in tool_result and tool_result["_latex_bytes"]:
-                        attachment_files.append(
-                            discord.File(fp=io.BytesIO(tool_result["_latex_bytes"]), filename="latex_formula.png")
-                        )
-
-                    if "_modal_view" in tool_result and tool_result["_modal_view"]:
-                        dynamic_view = tool_result["_modal_view"]
-
             final_text = response.content.strip()
             if not final_text:
                 if attachment_files:
-                    final_text = "Here is the rendered result:"
+                    final_text = "Here is the rendered formula:"
                 elif dynamic_view:
                     final_text = "Click the button below to open the form:"
                 else:
-                    final_text = "Done!"
+                    final_text = "Action completed!"
 
             final_text = TimestampParser.convert_relative_dates(final_text)
             final_text = Sanitizer.sanitize_outgoing_content(final_text)
             chunks = MessageSplitter.split(final_text, max_length=1900)
 
+            has_real_thoughts = bool(response.thought_content and len(response.thought_content.strip()) > 0)
+            has_tools = bool(response.tools_executed)
+
             trace_view = None
-            show_trace_button = bool(response.thought_content) or (response.duration >= 2.0) or bool(tools_executed_names)
-            
-            if show_trace_button:
-                details = response.thought_content or ""
-                if tools_executed_names:
-                    details = f"[Tools Executed: {', '.join(tools_executed_names)}]\n\n" + details
+            if has_real_thoughts or has_tools:
                 trace_view = ThinkingTraceView(
                     model_used=response.model_used,
                     duration=response.duration,
-                    thought_content=details
+                    thought_content=response.thought_content if has_real_thoughts else None,
+                    tools_executed=response.tools_executed
                 )
 
             active_view = dynamic_view or trace_view

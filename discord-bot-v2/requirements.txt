@@ -1,0 +1,9 @@
+discord.py
+google-genai
+aiosqlite
+python-dotenv
+aiohttp
+docker
+matplotlib
+dateparser
+pillow

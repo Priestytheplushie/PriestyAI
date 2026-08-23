@@ -1,196 +1,119 @@
-import json
+import inspect
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Callable, Any, get_type_hints
+from dataclasses import dataclass, field
+import discord
 from google.genai import types
-
-from tools.discord_tools import (
-    DiscordToolsContext,
-    execute_react,
-    execute_send_message,
-    execute_read_channel_history,
-    execute_get_server_channels,
-    execute_get_user_profile,
-    execute_search_server,
-    execute_create_thread
-)
-from tools.web_tools import execute_search_web
-from tools.image_tools import execute_generate_image
-from tools.code_tools import execute_code
-from tools.expert_tools import execute_ask_expert
 
 logger = logging.getLogger("PriestyAI.ToolRegistry")
 
-TOOL_DECLARATIONS = [
-    types.FunctionDeclaration(
-        name="react",
-        description="Adds an emoji reaction to any message in the channel or server.",
-        parameters=types.Schema(
-            type="OBJECT",
-            properties={
-                "emoji": types.Schema(type="STRING", description="The emoji character or custom emoji string, e.g. '🔥', '👍'."),
-                "message_id": types.Schema(type="STRING", description="Optional message ID to react to. Defaults to current message.")
-            },
-            required=["emoji"]
-        )
-    ),
-    types.FunctionDeclaration(
-        name="send_message",
-        description="Sends a standalone message to the current channel or another channel.",
-        parameters=types.Schema(
-            type="OBJECT",
-            properties={
-                "content": types.Schema(type="STRING", description="The message content to send."),
-                "channel_id": types.Schema(type="STRING", description="Optional channel ID.")
-            },
-            required=["content"]
-        )
-    ),
-    types.FunctionDeclaration(
-        name="search_web",
-        description="Searches the live internet for up-to-date information, news, documentation, or patch notes.",
-        parameters=types.Schema(
-            type="OBJECT",
-            properties={
-                "query": types.Schema(type="STRING", description="The search query."),
-                "num_results": types.Schema(type="INTEGER", description="Number of results (1 to 5).")
-            },
-            required=["query"]
-        )
-    ),
-    types.FunctionDeclaration(
-        name="generate_image",
-        description="Generates an image from a prompt using Pollinations AI.",
-        parameters=types.Schema(
-            type="OBJECT",
-            properties={
-                "prompt": types.Schema(type="STRING", description="Descriptive prompt of the image."),
-                "model": types.Schema(type="STRING", description="Image model: 'flux', 'turbo', or 'flux-real'."),
-                "width": types.Schema(type="INTEGER", description="Image width (default 1024)."),
-                "height": types.Schema(type="INTEGER", description="Image height (default 1024).")
-            },
-            required=["prompt"]
-        )
-    ),
-    types.FunctionDeclaration(
-        name="execute_code",
-        description="Executes code in an isolated Docker sandbox (Python, JS, Bash, C++, Rust) with network access.",
-        parameters=types.Schema(
-            type="OBJECT",
-            properties={
-                "language": types.Schema(type="STRING", description="Language: 'python', 'javascript', 'bash', 'cpp', 'rust'."),
-                "code": types.Schema(type="STRING", description="The code snippet to run.")
-            },
-            required=["language", "code"]
-        )
-    ),
-    types.FunctionDeclaration(
-        name="read_channel_history",
-        description="Reads recent messages from any channel in the server.",
-        parameters=types.Schema(
-            type="OBJECT",
-            properties={
-                "channel_id": types.Schema(type="STRING", description="Optional channel ID."),
-                "limit": types.Schema(type="INTEGER", description="Number of messages (up to 30).")
-            }
-        )
-    ),
-    types.FunctionDeclaration(
-        name="get_server_channels",
-        description="Lists all text and voice channels available in the Discord server.",
-        parameters=types.Schema(type="OBJECT", properties={})
-    ),
-    types.FunctionDeclaration(
-        name="get_user_profile",
-        description="Inspects detailed user info (roles, account age, avatar, permissions).",
-        parameters=types.Schema(
-            type="OBJECT",
-            properties={
-                "user_id": types.Schema(type="STRING", description="User ID or mention tag.")
-            },
-            required=["user_id"]
-        )
-    ),
-    types.FunctionDeclaration(
-        name="search_server",
-        description="Searches messages in the channel for specific keywords or discussions.",
-        parameters=types.Schema(
-            type="OBJECT",
-            properties={
-                "query": types.Schema(type="STRING", description="Keyword or phrase to search for."),
-                "limit": types.Schema(type="INTEGER", description="Max matches (default 15).")
-            },
-            required=["query"]
-        )
-    ),
-    types.FunctionDeclaration(
-        name="create_thread",
-        description="Creates a public thread from a message or topic.",
-        parameters=types.Schema(
-            type="OBJECT",
-            properties={
-                "thread_name": types.Schema(type="STRING", description="Name of the thread."),
-                "message_id": types.Schema(type="STRING", description="Optional message ID to attach thread to.")
-            },
-            required=["thread_name"]
-        )
-    ),
-    types.FunctionDeclaration(
-        name="ask_expert",
-        description="Escalates a complex mathematical or logical subproblem to Gemini 3.7 Flash.",
-        parameters=types.Schema(
-            type="OBJECT",
-            properties={
-                "prompt": types.Schema(type="STRING", description="The rigorous problem prompt.")
-            },
-            required=["prompt"]
-        )
-    )
-]
+@dataclass
+class ToolExecutionContext:
+    channel: discord.abc.Messageable | None = None
+    guild: discord.Guild | None = None
+    author: discord.User | discord.Member | None = None
+    bot: discord.Client | None = None
+    staged_components: list[Any] = field(default_factory=list)
+    staged_modals: list[Any] = field(default_factory=list)
+    staged_image_bytes: bytes | None = None
+    staged_image_filename: str = "generated_image.png"
+    active_thread: Any | None = None
+    clear_history_requested: bool = False
 
-GEMINI_TOOLS = [types.Tool(function_declarations=TOOL_DECLARATIONS)]
+def python_type_to_genai_type(py_type: Any) -> types.Type:
+    if py_type in (str, Any):
+        return types.Type.STRING
+    elif py_type == int:
+        return types.Type.INTEGER
+    elif py_type == float:
+        return types.Type.NUMBER
+    elif py_type == bool:
+        return types.Type.BOOLEAN
+    elif py_type in (list, list[str], list[int], list[Any]):
+        return types.Type.ARRAY
+    elif py_type in (dict, dict[str, Any]):
+        return types.Type.OBJECT
+    return types.Type.STRING
 
+class ToolRegistry:
+    def __init__(self):
+        self._tools: dict[str, Callable] = {}
+        self._declarations: list[types.FunctionDeclaration] = []
 
-class ToolDispatcher:
-    def __init__(self, key_pool: Any):
-        self.key_pool = key_pool
+    def register(self, name: str | None = None, description: str = ""):
+        def decorator(func: Callable):
+            tool_name = name or func.__name__
+            sig = inspect.signature(func)
+            type_hints = get_type_hints(func)
 
-    async def dispatch(
-        self,
-        name: str,
-        args: Dict[str, Any],
-        context: DiscordToolsContext
-    ) -> Dict[str, Any]:
-        logger.info(f"Executing tool '{name}' with args: {args}")
-        try:
-            if name == "react":
-                return await execute_react(context, emoji=args.get("emoji", "👍"), message_id=args.get("message_id"))
-            elif name == "send_message":
-                return await execute_send_message(context, content=args.get("content", ""), channel_id=args.get("channel_id"))
-            elif name == "search_web":
-                return await execute_search_web(query=args.get("query", ""), num_results=int(args.get("num_results", 5)))
-            elif name == "generate_image":
-                return await execute_generate_image(
-                    prompt=args.get("prompt", ""),
-                    model=args.get("model", "flux"),
-                    width=int(args.get("width", 1024)),
-                    height=int(args.get("height", 1024))
+            properties: dict[str, types.Schema] = {}
+            required_params: list[str] = []
+
+            for param_name, param in sig.parameters.items():
+                if param_name == "context":
+                    continue
+
+                param_type = type_hints.get(param_name, str)
+                genai_type = python_type_to_genai_type(param_type)
+
+                properties[param_name] = types.Schema(
+                    type=genai_type,
+                    description=f"Parameter: {param_name}"
                 )
-            elif name == "execute_code":
-                return await execute_code(language=args.get("language", "python"), code=args.get("code", ""))
-            elif name == "read_channel_history":
-                return await execute_read_channel_history(context, channel_id=args.get("channel_id"), limit=int(args.get("limit", 15)))
-            elif name == "get_server_channels":
-                return await execute_get_server_channels(context)
-            elif name == "get_user_profile":
-                return await execute_get_user_profile(context, user_id=args.get("user_id", ""))
-            elif name == "search_server":
-                return await execute_search_server(context, query=args.get("query", ""), limit=int(args.get("limit", 15)))
-            elif name == "create_thread":
-                return await execute_create_thread(context, thread_name=args.get("thread_name", "Discussion"), message_id=args.get("message_id"))
-            elif name == "ask_expert":
-                return await execute_ask_expert(self.key_pool, prompt=args.get("prompt", ""))
+
+                if param.default == inspect.Parameter.empty:
+                    required_params.append(param_name)
+
+            parameters_schema = types.Schema(
+                type=types.Type.OBJECT,
+                properties=properties,
+                required=required_params
+            )
+
+            doc = description or func.__doc__ or f"Executes {tool_name}"
+            declaration = types.FunctionDeclaration(
+                name=tool_name,
+                description=doc.strip(),
+                parameters=parameters_schema
+            )
+
+            self._tools[tool_name] = func
+            self._declarations.append(declaration)
+            logger.info(f"Registered tool: '{tool_name}'")
+            return func
+
+        return decorator
+
+    def get_tool_declarations(self) -> list[types.Tool]:
+        if not self._declarations:
+            return []
+        return [types.Tool(function_declarations=self._declarations)]
+
+    async def execute(self, tool_name: str, args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+        if tool_name not in self._tools:
+            logger.error(f"Tool '{tool_name}' not found in registry.")
+            return {"error": f"Tool '{tool_name}' is not recognized."}
+
+        func = self._tools[tool_name]
+        sig = inspect.signature(func)
+
+        call_args = dict(args)
+        if "context" in sig.parameters:
+            call_args["context"] = context
+
+        logger.info(f"Executing tool '{tool_name}' with args: {args}")
+        try:
+            if inspect.iscoroutinefunction(func):
+                result = await func(**call_args)
             else:
-                return {"status": "error", "error": f"Tool '{name}' is not recognized."}
+                result = func(**call_args)
+            
+            if isinstance(result, dict):
+                return result
+            return {"output": str(result)}
+
         except Exception as e:
-            logger.error(f"Error executing tool '{name}': {e}", exc_info=True)
-            return {"status": "error", "error": str(e)}
+            logger.exception(f"Error executing tool '{tool_name}': {e}")
+            return {"error": f"Tool execution failed: {str(e)}"}
+
+tool_registry = ToolRegistry()

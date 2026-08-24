@@ -261,6 +261,7 @@ class DynamicActionView(ui.View):
             cid = comp.get("custom_id", f"btn_{len(self.children)}")
             placeholder = comp.get("placeholder") or "Select an option..."
             modal_id = comp.get("modal_id") or cid
+            option_modals = comp.get("option_modals", {})
             disabled = comp.get("disabled", False)
             min_v = max(0, int(comp.get("min_values", 1)))
             max_v = max(1, min(25, int(comp.get("max_values", 1))))
@@ -353,12 +354,35 @@ class DynamicActionView(ui.View):
                     row=min(4, current_row)
                 )
 
-                async def select_callback(interaction: discord.Interaction, c_id=cid, s_comp=sel):
-                    await self.interaction_dispatcher(interaction, "select_option", {
-                        "custom_id": c_id,
-                        "component_type": "string_select",
-                        "selected": s_comp.values
-                    })
+                async def select_callback(interaction: discord.Interaction, c_id=cid, s_comp=sel, opt_mod_map=option_modals):
+                    selected_val = s_comp.values[0] if s_comp.values else None
+                    target_modal_key = opt_mod_map.get(selected_val)
+
+                    if target_modal_key and target_modal_key in self.modals_map:
+                        modal_spec = self.modals_map[target_modal_key]
+
+                        async def handle_select_modal_submit(sub_interaction: discord.Interaction, data: dict[str, Any]):
+                            await self.interaction_dispatcher(sub_interaction, "modal_submit", {
+                                "modal_id": target_modal_key,
+                                "source_select": c_id,
+                                "selected_option": selected_val,
+                                "title": modal_spec.get("title", "Form"),
+                                "values": data
+                            })
+
+                        modal_obj = DynamicModalV2(
+                            title=modal_spec.get("title", "Form"),
+                            custom_id=target_modal_key,
+                            fields_schema=modal_spec.get("fields", []),
+                            on_submit_callback=handle_select_modal_submit
+                        )
+                        await interaction.response.send_modal(modal_obj)
+                    else:
+                        await self.interaction_dispatcher(interaction, "select_option", {
+                            "custom_id": c_id,
+                            "component_type": "string_select",
+                            "selected": s_comp.values
+                        })
 
                 sel.callback = select_callback
                 self.add_item(sel)

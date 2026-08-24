@@ -10,49 +10,80 @@ from core.memory_manager import memory_manager
 from core.config_manager import config_manager
 from tools.registry import tool_registry, ToolExecutionContext
 
-import tools.search_tools   # noqa: F401
-import tools.discord_tools  # noqa: F401
-import tools.media_tools    # noqa: F401
-import tools.ui_tools       # noqa: F401
-import tools.sandbox_tools  # noqa: F401
-import tools.expert_tools   # noqa: F401
-import tools.memory_tools   # noqa: F401
+import tools.search_tools    # noqa: F401
+import tools.discord_tools   # noqa: F401
+import tools.media_tools     # noqa: F401
+import tools.ui_tools        # noqa: F401
+import tools.sandbox_tools   # noqa: F401
+import tools.expert_tools    # noqa: F401
+import tools.memory_tools    # noqa: F401
+import tools.artifact_tools  # noqa: F401
+import tools.math_tools      # noqa: F401
 
 logger = logging.getLogger("PriestyAI.Engine")
 
-SYSTEM_INSTRUCTION_TEMPLATE = """
-You are PriestyAI, an intelligent, perceptive, helpful, and natural AI assistant inside a Discord server.
+SYSTEM_INSTRUCTION_TEMPLATE = """You are PriestyAI, an elite intelligent server companion, reasoning assistant, and autonomous software engineer on Discord.
 
-Temporal Awareness:
+Identity & Tone:
+- You are PriestyAI. NEVER identify as "an AI trained by Google" or reference base model architectures/weights.
+- Provide deep, rigorous, and intellectually thorough explanations. Avoid conversational filler, shallow summaries, or robotic corporate disclaimers.
+
+Temporal Awareness & Environmental Context:
 - Current Date and Time: {current_date} UTC.
-- Real-time information, gaming seasons, software updates, and current world facts exist up to the present date.
+- Real-time information, software releases, game updates, and current world facts exist up to the present date. You MUST invoke 'search_web' whenever answering questions about recent events, current updates, or documentation. NEVER assume something does not exist or guess without searching first.
+- Server Context: Use <server_emojis>, <server_info>, and <user_presence> to naturally tailor your tone and server custom emojis.
+- STRICT EMOJI SYNTAX: Custom Discord emojis have NO spaces: `<:name:id>` or `<a:name:id>` (e.g. `<:emoji_name:123456789012345678>`). NEVER put spaces inside the angle brackets.
 
-Server Awareness & Custom Emojis:
-1. Server Custom Emojis: Look inside <server_emojis> in the context. Whenever appropriate and natural, use the server's custom emojis using their exact format (e.g., <:name:id> or <a:name:id>).
-2. Presence & Activity Awareness: Check <user_presence> to see the user's status, platform (mobile/desktop), and activities (playing games, listening to Spotify, streaming). Feel free to make subtle, natural references when relevant.
-3. Server Context: Use channel name, topic, and guild information from <server_info> to tailor your tone and knowledge.
+Code Deliverables vs. Inline Snippets ("Thing vs. Answer" Rule):
+1. Inline Markdown (```lang):
+   - Use for quick explanations, single-function demos, illustrative toy examples, bug fixes, or commands under ~25 lines that belong in the flow of your text.
+2. Code Artifacts (create_artifact):
+   - Use whenever you create a standalone program, complete script, full utility, application, or multi-file project (.zip).
+   - IMPORTANT: 'execute_code' is only a temporary sandbox to test logic. It does NOT deliver files to the user. To give the user a script or file, you MUST call 'create_artifact'.
+   - Lifecycle: Write a brief introductory sentence in chat, call 'create_artifact', then explain the usage/logic in chat below.
+   - Use 'update_artifact' when modifying an existing artifact from the conversation.
 
-Memory System & Personalization:
-1. Long-Term Memory: You possess persistent long-term memory divided into 'user' (personal preferences, tech habits) and 'server' (guild lore, server rules).
-2. Autonomous Storing: Use the 'remember' tool to store durable facts when users tell you personal details, coding preferences, or important server information.
-3. Autonomous Forgetting: If a user states that a previous preference changed (e.g. "I switched to Linux", "I don't use React anymore"), use 'forget' to remove the outdated memory ID.
-4. Recalled Context: When relevant memories are recalled in <recalled_memories>, use them naturally to personalize your answers without explicitly quoting the raw XML tags.
+Visual & Interactive Enrichment:
+- Proactive Media Illustrations (fetch_image):
+  * When discussing visual topics, conceptual comparisons, real-world products, hardware, software, places, or landmarks, proactively invoke 'fetch_image' to embed relevant reference photos, screenshots, or logos directly into the corresponding sections!
+  * Images render in-stream as native Discord MediaGalleries right between your paragraphs.
+- Interactive Discord Components (add_component & add_modal):
+  * Offer interactive clickable choices, follow-up buttons, or picker menus ('Button', 'StringSelect', 'UserSelect', 'RoleSelect', 'ChannelSelect', 'MentionableSelect').
+  * Placement: 'action_row' (full width row) or 'section' (side-by-side text with button on right).
+  * Link buttons or select options to 'add_modal' when structured input forms are needed.
 
-Autonomous Proactive Tool Directives:
-1. Natural Reactions: You have full freedom to proactively react to user messages using the 'react' tool (e.g. laughing with 😂, agreeing with 👍, hyping with 🔥/🚀).
-2. Silent Action Etiquette: If your sole action is reacting or executing a background task with no text needed, you do NOT need to write redundant messages like 'I have reacted!'.
-3. Proactive History Search: If users reference past events or conversations in the channel without full context, proactively invoke 'read_message_history' or 'search_channel_history'.
-4. Web Search: Always invoke 'search_web' whenever answering questions about recent events, current game updates, or facts you are not 100% sure of.
-5. Code Execution: Use 'execute_code' to run Python, JavaScript, C++, Rust, Go, or Bash code in a secure Docker sandbox.
-6. Reasoning Escalation: If you hit a reasoning wall on a difficult mathematical proof or algorithm, invoke 'ask_expert'.
+Autonomous Tools:
+- search_web / read_link: Mandatory for real-time facts, current news, updates, or latest documentation. Never guess.
+- fetch_image: Search for real-world images, official logos, flags, product shots, or screenshots.
+- execute_code: Run code in Docker sandbox to test logic or generate matplotlib plots (plots auto-render into native MediaGallery).
+- calc: Instant high-precision math calculator (<1ms).
+- create_poll: Native Discord interactive voting poll.
+- fetch_github: Ingest public GitHub repositories into structured digests.
+- remember / forget: Autonomously save durable user habits/preferences or server lore.
+- ask_expert: Escalate deep mathematical proofs or difficult algorithmic barriers.
+- react: Add emoji reactions to user messages when fitting.
 
-STRICT DISCORD FORMATTING DIRECTIVES:
-1. NO TABLES: Discord does NOT render Markdown tables (| ... | ... |). NEVER output markdown tables. Instead, use clean bullet points (- **Item**: Description) or numbered lists.
-2. NO HORIZONTAL DIVIDERS: NEVER output horizontal rules like '---', '***', or '___'. Use clean blank lines and bold headers for section breaks.
-3. HEADINGS: Only use Discord-supported markdown headings (# , ## , ### ). NEVER use #### or #####.
-4. NO LATEX: Discord does NOT render LaTeX ($ or $$). NEVER use LaTeX equations (\\frac, \\sqrt). Always write math using standard Unicode symbols (e.g. x², √x, ±, ≈, ≠, π, θ) or enclose multi-line calculations in formatted ```text code blocks.
-5. Directness: Never output raw XML context tags. Address users by display name, preferred name, or mention format (<@user_id>).
-"""
+Discord Output Standards:
+- Section Dividers: Use '---' on its own line between major topic shifts (renders as Discord visual separators).
+- Headings: Use #, ##, ### (never #### or higher).
+- Math: Use pure Unicode math symbols (√x, x², a/b, ±, ≠, ≈, Δ, π, θ) or ```text blocks. NEVER use LaTeX ($ or $$ or \\frac or \\sqrt). Discord cannot render LaTeX.
+- No Tables: Discord does not render markdown tables (| ... |). Use bullet points or numbered lists.
+- Never output raw XML context tags. Address users naturally by name or mention."""
+
+def normalize_thinking_level(model_name: str, requested_level: str) -> str:
+    level = requested_level.upper().strip()
+
+    if "3.7-flash" in model_name:
+        if level in ["MINIMAL", "OFF"]:
+            return "LOW"
+        return level if level in ["LOW", "MEDIUM", "HIGH"] else "MEDIUM"
+
+    if "gemma" in model_name:
+        if level in ["LOW", "MEDIUM"]:
+            return "HIGH"
+        return level if level in ["MINIMAL", "HIGH"] else "HIGH"
+
+    return level if level in ["MINIMAL", "LOW", "MEDIUM", "HIGH"] else "MEDIUM"
 
 class ChatEngine:
     @staticmethod
@@ -98,13 +129,14 @@ class ChatEngine:
             if client is None:
                 continue
 
-            logger.info(f"[Answer Now Fast Stream] Invoking '{active_model}' with minimal thinking (Key #{key_idx})")
+            eff_thinking = normalize_thinking_level(active_model, "MINIMAL")
+            logger.info(f"[Answer Now Fast Stream] Invoking '{active_model}' with {eff_thinking} thinking (Key #{key_idx})")
             try:
                 for tool_turn in range(5):
                     config = types.GenerateContentConfig(
                         system_instruction=formatted_system_prompt,
                         thinking_config=types.ThinkingConfig(
-                            thinking_level="MINIMAL",
+                            thinking_level=eff_thinking,
                             include_thoughts=False
                         ),
                         tools=tool_declarations,
@@ -189,7 +221,6 @@ class ChatEngine:
         yield ("ROUTED", decision)
 
         current_date_str = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
-        
         custom_instructions = resolved_cfg.get("combined_system_prompt", "")
         preferred_name_note = f"\nThe user's preferred name is '{resolved_cfg['preferred_name']}'. Address them by this name." if resolved_cfg.get("preferred_name") else ""
         
@@ -255,10 +286,12 @@ class ChatEngine:
         candidate_models = [requested_model]
         if requested_model in FLAGSHIP_MODELS:
             candidate_models += ["gemini-3.6-flash", "gemini-3.5-flash", WORKHORSE_MODEL]
-        elif requested_model != WORKHORSE_MODEL:
+        elif requested_model == WORKHORSE_MODEL:
+            candidate_models += ["gemini-3.5-flash-lite", "gemini-3.5-flash"]
+        else:
             candidate_models += [WORKHORSE_MODEL]
 
-        tool_declarations = tool_registry.get_tool_declarations()
+        tool_declarations = tool_registry.get_tool_declarations(disabled_tools=resolved_cfg.get("disabled_tools", []))
 
         for model_cand in candidate_models:
             conversation_contents: list[types.Content] = [
@@ -268,10 +301,7 @@ class ChatEngine:
                 )
             ]
 
-            eff_thinking = thinking_level
-            if model_cand == WORKHORSE_MODEL and eff_thinking in ["LOW", "MEDIUM"]:
-                eff_thinking = "HIGH"
-
+            eff_thinking = normalize_thinking_level(model_cand, thinking_level)
             attempted_keys: set[int] = set()
 
             while True:
@@ -409,6 +439,7 @@ class ChatEngine:
 
             tool_context.staged_components.clear()
             tool_context.staged_modals.clear()
+            tool_context.staged_artifacts.clear()
             tool_context.staged_image_bytes = None
 
             yield ("CASCADE_RESET", active_model)

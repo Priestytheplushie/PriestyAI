@@ -56,7 +56,135 @@ class BranchManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    active_version INTEGER DEFAULT 1,
+                    versions_json TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_channel_file ON conversation_artifacts(channel_id, filename)")
             conn.commit()
+
+
+    def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM conversation_artifacts WHERE artifact_id = ?", (str(artifact_id),))
+            row = cursor.fetchone()
+            if row:
+                d = dict(row)
+                d["versions"] = json.loads(d.get("versions_json") or "[]")
+                return d
+        return None
+
+    def get_artifact_by_channel_and_file(self, channel_id: str | int, filename: str) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM conversation_artifacts WHERE channel_id = ? AND filename = ? ORDER BY updated_at DESC LIMIT 1",
+                (str(channel_id), filename.strip())
+            )
+            row = cursor.fetchone()
+            if row:
+                d = dict(row)
+                d["versions"] = json.loads(d.get("versions_json") or "[]")
+                return d
+        return None
+
+    def save_or_update_artifact(
+        self,
+        channel_id: str | int,
+        filename: str,
+        title: str,
+        content: str,
+        files: list[dict[str, Any]] | None = None,
+        change_summary: str = "",
+        is_update: bool = False
+    ) -> dict[str, Any]:
+        existing = self.get_artifact_by_channel_and_file(channel_id, filename) if is_update else None
+        now_ts = int(time.time())
+
+        if existing:
+            artifact_id = existing["artifact_id"]
+            versions = existing.get("versions", [])
+            new_v_num = len(versions) + 1
+            
+            lines = len(content.splitlines()) if content else sum(len(f.get("content", "").splitlines()) for f in (files or []))
+            size_b = len(content.encode("utf-8")) if content else sum(len(f.get("content", "").encode("utf-8")) for f in (files or []))
+
+            version_entry = {
+                "version": new_v_num,
+                "summary": change_summary.strip() or f"Updated {filename}",
+                "content": content,
+                "files": files or [],
+                "lines": max(1, lines),
+                "size_bytes": size_b,
+                "timestamp": now_ts
+            }
+
+            versions.append(version_entry)
+            if len(versions) > 25:
+                versions = versions[-25:]
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE conversation_artifacts
+                    SET title = ?, active_version = ?, versions_json = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE artifact_id = ?
+                """, (title or existing.get("title", filename), new_v_num, json.dumps(versions), str(artifact_id)))
+                conn.commit()
+
+            return {
+                "artifact_id": artifact_id,
+                "filename": filename,
+                "title": title or existing.get("title", filename),
+                "active_version": new_v_num,
+                "total_versions": len(versions),
+                "versions": versions,
+                "latest_version_data": version_entry
+            }
+        else:
+            artifact_id = f"art_{int(time.time() * 1000)}"
+            lines = len(content.splitlines()) if content else sum(len(f.get("content", "").splitlines()) for f in (files or []))
+            size_b = len(content.encode("utf-8")) if content else sum(len(f.get("content", "").encode("utf-8")) for f in (files or []))
+
+            initial_version = {
+                "version": 1,
+                "summary": change_summary.strip() or "Initial implementation",
+                "content": content,
+                "files": files or [],
+                "lines": max(1, lines),
+                "size_bytes": size_b,
+                "timestamp": now_ts
+            }
+            versions = [initial_version]
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO conversation_artifacts (
+                        artifact_id, channel_id, filename, title, active_version, versions_json
+                    ) VALUES (?, ?, ?, ?, 1, ?)
+                """, (str(artifact_id), str(channel_id), filename.strip(), title or filename, json.dumps(versions)))
+                conn.commit()
+
+            return {
+                "artifact_id": artifact_id,
+                "filename": filename,
+                "title": title or filename,
+                "active_version": 1,
+                "total_versions": 1,
+                "versions": versions,
+                "latest_version_data": initial_version
+            }
 
 
     def create_branch(

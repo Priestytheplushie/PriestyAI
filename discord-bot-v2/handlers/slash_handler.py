@@ -17,10 +17,12 @@ from core.client_manager import client_manager
 from core.memory_manager import memory_manager
 from core.config_manager import config_manager
 from core.branch_manager import branch_manager
-from handlers.stream_handler import DiscordStreamDispatcher, merge_views, apply_message_parsers
+from core.moderation import check_moderation, generate_friendly_refusal, log_moderation_violation
+from handlers.stream_handler import DiscordStreamDispatcher, build_v2_message_layout, apply_message_parsers
 from tools.registry import ToolExecutionContext
-from ui.thought_container import ThinkingButtonView, ThoughtContainerView, PlaceholderLayoutView
-from ui.context_views import build_version_switcher_view, BranchHeaderView, BranchTranscriptView
+from ui.thought_container import ThoughtContainerView, PlaceholderLayoutView
+from ui.context_views import BranchHeaderView, BranchTranscriptView
+from ui.onboarding_views import build_welcome_terms_modal
 from ui.config_views import (
     ServerIdentityDashboardView,
     ConfigHelpView,
@@ -51,10 +53,13 @@ SETTINGS_SCOPE_MAP = {
 }
 
 def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
-    if tool_name == "execute_code":
+    if tool_name in ["create_artifact", "update_artifact"]:
+        t = args.get("title") or args.get("filename", "Artifact")
+        return f"-# 📦 Packaging artifact: **{t}**..."
+    elif tool_name == "execute_code":
         lang = args.get("language", "Python").capitalize()
         pkgs = args.get("packages", "")
-        pkg_str = f" ({pkgs})" if pkgs else ""
+        pkg_str = f" ({pkgs})" if pkg_str else ""
         return f"-# 💻 Running {lang} sandbox{pkg_str}..."
     elif tool_name == "search_web":
         q = args.get("query", "")[:35]
@@ -62,7 +67,17 @@ def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
     elif tool_name == "read_link":
         url = args.get("url", "")
         domain = url.split("//")[-1].split("/")[0] if "//" in url else url[:30]
-        return f"-# 📄 Reading article from `{domain}`..."
+        return f"-# 📄 Reading link from `{domain}`..."
+    elif tool_name == "fetch_image":
+        q = args.get("query", "")[:30]
+        return f"-# 🖼️ Fetching image for '{q}'..."
+    elif tool_name == "fetch_github":
+        r = args.get("repo_url", "")[:30]
+        return f"-# 🐙 Inspecting GitHub repo `{r}`..."
+    elif tool_name == "create_poll":
+        return "-# 📊 Creating Discord poll..."
+    elif tool_name == "calc":
+        return "-# 🔢 Computing math..."
     elif tool_name == "generate_image":
         return "-# 🎨 Rendering artwork..."
     elif tool_name == "ask_expert":
@@ -154,7 +169,6 @@ async def scope_autocomplete(interaction: discord.Interaction, current: str) -> 
     return filtered_scopes[:25]
 
 
-
 def setup_slash_commands(tree: app_commands.CommandTree):
 
     @tree.command(name="ask", description="Ask PriestyAI a quick question anywhere on Discord")
@@ -166,20 +180,33 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         app_commands.Choice(name="Ephemeral", value="private")
     ])
     async def ask_command(interaction: discord.Interaction, query: str, visibility: str = "public"):
+        if not config_manager.has_user_agreed(interaction.user.id):
+            async def on_agreed(sub_inter: discord.Interaction):
+                await sub_inter.response.defer(ephemeral=(visibility == "private"))
+                await _execute_ask(sub_inter, query, is_ephemeral=(visibility == "private"))
+
+            modal = build_welcome_terms_modal(on_agree_callback=on_agreed)
+            await interaction.response.send_modal(modal)
+            return
+
         is_ephemeral = (visibility == "private")
         await interaction.response.defer(ephemeral=is_ephemeral)
+        await _execute_ask(interaction, query, is_ephemeral=is_ephemeral)
+
+    async def _execute_ask(interaction: discord.Interaction, query: str, is_ephemeral: bool):
+        is_flagged, flagged_cats, score = await check_moderation(query)
+        if is_flagged:
+            log_moderation_violation(interaction.user.id, interaction.guild_id, flagged_cats, score)
+            refusal_text = await generate_friendly_refusal(flagged_cats)
+            await interaction.followup.send(content=refusal_text, ephemeral=is_ephemeral)
+            return
 
         thinking_start_time = time.time()
-        active_witty = "Thinking"
-        await interaction.edit_original_response(content=f"{LOADING_EMOJI} *{active_witty}...*")
-
         stream_dispatcher = DiscordStreamDispatcher(interaction=interaction, is_ephemeral=is_ephemeral, guild=interaction.guild)
         tool_context = ToolExecutionContext(channel=interaction.channel, guild=interaction.guild, author=interaction.user, bot=interaction.client)
 
         accumulated_thoughts = []
         tool_call_history = []
-        first_content = False
-        full_content_accumulator = ""
 
         try:
             async for event_type, payload in ChatEngine.stream_chat(
@@ -201,70 +228,60 @@ def setup_slash_commands(tree: app_commands.CommandTree):
                 elif event_type == "THOUGHT":
                     accumulated_thoughts.append(payload)
 
+                elif event_type == "TOOL_START":
+                    t_name = payload.get("name", "")
+                    t_args = payload.get("args", {})
+                    if t_name in ["create_artifact", "update_artifact"]:
+                        stream_dispatcher.add_artifact_placeholder(t_name, t_args)
+
                 elif event_type == "TOOL_END":
+                    t_name = payload.get("name", "")
                     tool_call_history.append(payload)
+                    if t_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
+                        last_art = tool_context.staged_artifacts[-1]
+                        stream_dispatcher.update_artifact_ready(last_art)
+                        art_bytes = last_art.get("data_bytes", b"")
+                        art_fname = last_art.get("filename", "artifact.zip")
+                        if art_bytes:
+                            stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
+
+                    elif t_name in ["generate_image", "fetch_image", "execute_code"] and tool_context.staged_image_bytes:
+                        img_fname = tool_context.staged_image_filename
+                        img_bytes = tool_context.staged_image_bytes
+                        stream_dispatcher.add_media_block(img_fname, img_bytes)
+                        tool_context.staged_image_bytes = None
 
                 elif event_type == "CONTENT":
-                    full_content_accumulator += payload
-                    if not first_content:
-                        first_content = True
-                        stream_dispatcher.buffer = ""
                     await stream_dispatcher.append_text(payload)
 
             final_dur = max(1, int(time.time() - thinking_start_time))
             has_reasoning = bool(accumulated_thoughts or tool_call_history)
 
-            final_file = None
             stored_attachments = []
-            if tool_context.staged_image_bytes:
-                b64 = base64.b64encode(tool_context.staged_image_bytes).decode("utf-8")
-                stored_attachments.append({"filename": tool_context.staged_image_filename, "data_b64": b64})
-                final_file = discord.File(io.BytesIO(tool_context.staged_image_bytes), filename=tool_context.staged_image_filename)
+            for raw_att in stream_dispatcher.raw_attachment_buffers:
+                b64 = base64.b64encode(raw_att["bytes"]).decode("utf-8")
+                stored_attachments.append({"filename": raw_att["filename"], "data_b64": b64})
 
-            await stream_dispatcher.finalize(view=None, file=final_file)
+            for art in tool_context.staged_artifacts:
+                art_bytes = art.get("data_bytes", b"")
+                art_fname = art.get("filename", "artifact.zip")
+                if art_bytes:
+                    stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
 
-            sent_msg = stream_dispatcher.primary_message or (stream_dispatcher.sent_messages[0] if stream_dispatcher.sent_messages else None)
-            if sent_msg:
-                parsed_content = apply_message_parsers(full_content_accumulator, interaction.guild)
-                initial_v_data = {
-                    "version_idx": 1,
-                    "content": parsed_content,
-                    "duration_seconds": final_dur,
-                    "has_thoughts": has_reasoning,
-                    "thoughts": "".join(accumulated_thoughts),
-                    "tool_calls": tool_call_history,
-                    "attachments": stored_attachments,
-                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                }
-                branch_manager.save_generation(
-                    message_id=sent_msg.id,
-                    channel_id=interaction.channel.id,
-                    guild_id=interaction.guild.id if interaction.guild else None,
-                    author_id=interaction.user.id,
-                    prompt_text=query,
-                    attachments=[],
-                    context_xml="<context></context>",
-                    initial_version_data=initial_v_data
-                )
-
-                if has_reasoning and not is_ephemeral:
-                    permanent_view = build_version_switcher_view(
-                        message_id=sent_msg.id,
-                        active_idx=1,
-                        total_versions=1,
-                        thought_duration=final_dur,
-                        has_thoughts=has_reasoning
-                    )
-                    if permanent_view is not None:
-                        try:
-                            await sent_msg.edit(view=permanent_view)
-                        except Exception:
-                            pass
+            await stream_dispatcher.finalize(
+                staged_artifacts=tool_context.staged_artifacts,
+                staged_components=tool_context.staged_components,
+                thought_duration=final_dur,
+                has_thoughts=has_reasoning,
+                active_version=1,
+                total_versions=1
+            )
 
         except Exception as e:
             logger.exception(f"Error in /ask command: {e}")
             try:
-                await interaction.edit_original_response(content=f"⚠️ Error: `{e}`")
+                err_view = build_v2_message_layout(raw_text=f"⚠️ Error: `{e}`", guild=interaction.guild)
+                await interaction.edit_original_response(view=err_view)
             except discord.HTTPException:
                 pass
 
@@ -272,6 +289,17 @@ def setup_slash_commands(tree: app_commands.CommandTree):
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def chat_command(interaction: discord.Interaction):
+        if not config_manager.has_user_agreed(interaction.user.id):
+            async def on_agreed_chat(sub_inter: discord.Interaction):
+                await _open_chat_modal(sub_inter)
+
+            modal = build_welcome_terms_modal(on_agree_callback=on_agreed_chat)
+            await interaction.response.send_modal(modal)
+            return
+
+        await _open_chat_modal(interaction)
+
+    async def _open_chat_modal(interaction: discord.Interaction):
         session_id = str(uuid.uuid4())[:8]
         fields = [
             {
@@ -293,6 +321,14 @@ def setup_slash_commands(tree: app_commands.CommandTree):
             if not user_text:
                 await sub_inter.response.send_message(content="Please provide a message to begin.", ephemeral=True)
                 return
+
+            is_flagged, flagged_cats, score = await check_moderation(user_text)
+            if is_flagged:
+                log_moderation_violation(sub_inter.user.id, sub_inter.guild_id, flagged_cats, score)
+                refusal_text = await generate_friendly_refusal(flagged_cats)
+                await sub_inter.response.send_message(content=refusal_text, ephemeral=True)
+                return
+
             await sub_inter.response.defer(ephemeral=False)
             dispatcher = DiscordStreamDispatcher(interaction=sub_inter, is_ephemeral=False, guild=sub_inter.guild)
             tool_ctx = ToolExecutionContext(channel=sub_inter.channel, guild=sub_inter.guild, author=sub_inter.user, bot=sub_inter.client)
@@ -500,7 +536,8 @@ def setup_slash_commands(tree: app_commands.CommandTree):
             async def handle_tool_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
                 allowed_bundles = data.get("allowed_tools", [])
                 all_tools = {
-                    "execute_code", "search_web", "read_link", "generate_image",
+                    "create_artifact", "execute_code", "search_web", "read_link", "generate_image",
+                    "fetch_image", "calc", "fetch_github", "create_poll",
                     "react", "add_component", "add_modal", "remember", "forget",
                     "read_message_history", "search_channel_history", "ask_expert",
                     "get_user_profile", "get_server_info", "create_thread"
@@ -560,10 +597,7 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         except Exception:
             pass
 
-        thread = await interaction.channel.create_thread(
-            name=title,
-            type=discord.ChannelType.public_thread
-        )
+        thread = await interaction.channel.create_thread(name=title, type=discord.ChannelType.public_thread)
 
         try:
             await thread.add_user(interaction.user)
@@ -599,7 +633,6 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         )
         header_view = BranchHeaderView(branch_id=branch_id)
         await thread.send(content=header_card_text, view=header_view)
-
         await interaction.followup.send(content=f"🧵 **Branch Created:** Joined thread <#{thread.id}>.", ephemeral=True)
 
     @tree.context_menu(name="Retry")
@@ -611,39 +644,40 @@ def setup_slash_commands(tree: app_commands.CommandTree):
             return
 
         gen_record = branch_manager.get_generation(message.id)
+        if not gen_record and message.reference and message.reference.message_id:
+            try:
+                ref_msg = await message.channel.fetch_message(message.reference.message_id)
+                clean_p = re.sub(rf'<@!?{interaction.client.user.id}>', '', ref_msg.content).strip()
+                if not clean_p:
+                    clean_p = "Analyze attached content" if ref_msg.attachments else "Hello!"
 
-        if not gen_record:
-            if message.reference and message.reference.message_id:
-                try:
-                    ref_msg = await message.channel.fetch_message(message.reference.message_id)
-                    clean_p = re.sub(rf'<@!?{interaction.client.user.id}>', '', ref_msg.content).strip()
-                    if not clean_p:
-                        clean_p = "Analyze attached content" if ref_msg.attachments else "Hello!"
+                initial_v_data = {
+                    "version_idx": 1,
+                    "content": apply_message_parsers(message.content, message.guild),
+                    "duration_seconds": 0,
+                    "has_thoughts": False,
+                    "thoughts": "",
+                    "tool_calls": [],
+                    "attachments": [],
+                    "staged_components": [],
+                    "staged_artifacts": [],
+                    "staged_modals": [],
+                    "created_at": message.created_at.isoformat()
+                }
 
-                    initial_v_data = {
-                        "version_idx": 1,
-                        "content": apply_message_parsers(message.content, message.guild),
-                        "duration_seconds": 0,
-                        "has_thoughts": False,
-                        "thoughts": "",
-                        "tool_calls": [],
-                        "attachments": [],
-                        "created_at": message.created_at.isoformat()
-                    }
-
-                    branch_manager.save_generation(
-                        message_id=message.id,
-                        channel_id=message.channel.id,
-                        guild_id=message.guild.id if message.guild else None,
-                        author_id=ref_msg.author.id,
-                        prompt_text=clean_p,
-                        attachments=[],
-                        context_xml="<context></context>",
-                        initial_version_data=initial_v_data
-                    )
-                    gen_record = branch_manager.get_generation(message.id)
-                except Exception as ex:
-                    logger.warning(f"Legacy retry reconstruction exception: {ex}")
+                branch_manager.save_generation(
+                    message_id=message.id,
+                    channel_id=message.channel.id,
+                    guild_id=message.guild.id if message.guild else None,
+                    author_id=ref_msg.author.id,
+                    prompt_text=clean_p,
+                    attachments=[],
+                    context_xml="<context></context>",
+                    initial_version_data=initial_v_data
+                )
+                gen_record = branch_manager.get_generation(message.id)
+            except Exception as ex:
+                logger.warning(f"Legacy retry reconstruction exception: {ex}")
 
         if not gen_record:
             await interaction.response.send_message(content="❌ No prompt history or reference found for this message.", ephemeral=True)
@@ -698,7 +732,7 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         accumulated_thoughts = []
         tool_call_history = []
         active_tool_start_times = {}
-        new_content_buffer = ""
+        stream_dispatcher = DiscordStreamDispatcher(existing_response_msg=message, guild=interaction.guild)
 
         try:
             async for event_type, payload in ChatEngine.stream_chat(
@@ -736,6 +770,8 @@ def setup_slash_commands(tree: app_commands.CommandTree):
                     active_tool_start_times[tool_name] = time.perf_counter()
                     active_tool_subtext = get_tool_subtext(tool_name, args)
                     placeholder_view.enable_thinking()
+                    if tool_name in ["create_artifact", "update_artifact"]:
+                        stream_dispatcher.add_artifact_placeholder(tool_name, args)
 
                 elif event_type == "TOOL_END":
                     tool_name = payload.get("name", "Tool")
@@ -745,10 +781,24 @@ def setup_slash_commands(tree: app_commands.CommandTree):
                     active_tool_subtext = None
                     placeholder_view.enable_thinking()
                     placeholder_view.thought_data["tool_calls"] = tool_call_history
+                    if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
+                        last_art = tool_context.staged_artifacts[-1]
+                        stream_dispatcher.update_artifact_ready(last_art)
+                        art_bytes = last_art.get("data_bytes", b"")
+                        art_fname = last_art.get("filename", "artifact.zip")
+                        if art_bytes:
+                            stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
+
+                    elif tool_name in ["generate_image", "fetch_image", "execute_code"] and tool_context.staged_image_bytes:
+                        img_fname = tool_context.staged_image_filename
+                        img_bytes = tool_context.staged_image_bytes
+                        stream_dispatcher.add_media_block(img_fname, img_bytes)
+                        tool_context.staged_image_bytes = None
+
                     await placeholder_view.push_live_update()
 
                 elif event_type == "CONTENT":
-                    new_content_buffer += payload
+                    await stream_dispatcher.append_text(payload)
 
             stop_loop.set()
             if placeholder_task:
@@ -756,43 +806,71 @@ def setup_slash_commands(tree: app_commands.CommandTree):
 
             dur_sec = max(1, int(time.time() - start_t))
             has_thoughts = bool(accumulated_thoughts or tool_call_history)
-            parsed_final_content = apply_message_parsers(new_content_buffer, interaction.guild)
+            final_content = stream_dispatcher.get_accumulated_text()
+            parsed_final_content = apply_message_parsers(final_content, interaction.guild)
 
             stored_attachments = []
-            final_file = None
-            if tool_context.staged_image_bytes:
-                b64 = base64.b64encode(tool_context.staged_image_bytes).decode("utf-8")
-                stored_attachments.append({
-                    "filename": tool_context.staged_image_filename,
-                    "data_b64": b64
-                })
-                final_file = discord.File(io.BytesIO(tool_context.staged_image_bytes), filename=tool_context.staged_image_filename)
+            files_to_send = []
+
+            for raw_att in stream_dispatcher.raw_attachment_buffers:
+                b64 = base64.b64encode(raw_att["bytes"]).decode("utf-8")
+                stored_attachments.append({"filename": raw_att["filename"], "data_b64": b64})
+                files_to_send.append(discord.File(io.BytesIO(raw_att["bytes"]), filename=raw_att["filename"]))
+
+            sanitized_artifacts = []
+            for art in tool_context.staged_artifacts:
+                art_bytes = art.get("data_bytes", b"")
+                art_fname = art.get("filename", "artifact.zip")
+                b64_art = base64.b64encode(art_bytes).decode("utf-8") if art_bytes else ""
+                clean_art = {k: v for k, v in art.items() if k != "data_bytes"}
+                clean_art["data_b64"] = b64_art
+                sanitized_artifacts.append(clean_art)
+
+            sanitized_timeline = []
+            for b in stream_dispatcher.timeline:
+                b_copy = dict(b)
+                if b_copy.get("type") == "artifact" and "artifact" in b_copy:
+                    art_copy = dict(b_copy["artifact"])
+                    art_copy.pop("data_bytes", None)
+                    b_copy["artifact"] = art_copy
+                sanitized_timeline.append(b_copy)
 
             new_v_data = {
                 "version_idx": total_v,
                 "content": parsed_final_content,
+                "timeline_blocks": sanitized_timeline,
                 "duration_seconds": dur_sec,
                 "has_thoughts": has_thoughts,
                 "thoughts": "".join(accumulated_thoughts),
                 "tool_calls": tool_call_history,
                 "attachments": stored_attachments,
+                "staged_components": tool_context.staged_components,
+                "staged_artifacts": sanitized_artifacts,
+                "staged_modals": tool_context.staged_modals,
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
 
             new_active_idx = branch_manager.add_retry_version(message.id, new_v_data)
+            mod_map = {m["modal_id"]: m for m in tool_context.staged_modals}
 
-            switcher_view = build_version_switcher_view(
-                message_id=message.id,
-                active_idx=new_active_idx,
-                total_versions=total_v,
+            v2_view = build_v2_message_layout(
+                guild=interaction.guild,
+                timeline_blocks=stream_dispatcher.timeline,
+                staged_components=tool_context.staged_components,
+                staged_artifacts=tool_context.staged_artifacts,
+                modals_map=mod_map,
                 thought_duration=dur_sec,
-                has_thoughts=has_thoughts
+                has_thoughts=has_thoughts,
+                active_version=new_active_idx,
+                total_versions=total_v,
+                message_id=message.id,
+                is_live_stream=False
             )
 
-            if final_file:
-                await message.edit(content=parsed_final_content, view=switcher_view, attachments=[final_file])
+            if files_to_send:
+                await message.edit(view=v2_view, attachments=files_to_send)
             else:
-                await message.edit(content=parsed_final_content, view=switcher_view)
+                await message.edit(view=v2_view)
 
             try:
                 await interaction.delete_original_response()
@@ -819,41 +897,8 @@ def setup_slash_commands(tree: app_commands.CommandTree):
             return
 
         gen_record = branch_manager.get_generation(message.id)
-
-        if not gen_record and message.reference and message.reference.message_id:
-            try:
-                ref_msg = await message.channel.fetch_message(message.reference.message_id)
-                clean_p = re.sub(rf'<@!?{interaction.client.user.id}>', '', ref_msg.content).strip()
-                if not clean_p:
-                    clean_p = "Analyze attached content" if ref_msg.attachments else "Hello!"
-
-                initial_v_data = {
-                    "version_idx": 1,
-                    "content": apply_message_parsers(message.content, message.guild),
-                    "duration_seconds": 0,
-                    "has_thoughts": False,
-                    "thoughts": "",
-                    "tool_calls": [],
-                    "attachments": [],
-                    "created_at": message.created_at.isoformat()
-                }
-
-                branch_manager.save_generation(
-                    message_id=message.id,
-                    channel_id=message.channel.id,
-                    guild_id=message.guild.id if message.guild else None,
-                    author_id=ref_msg.author.id,
-                    prompt_text=clean_p,
-                    attachments=[],
-                    context_xml="<context></context>",
-                    initial_version_data=initial_v_data
-                )
-                gen_record = branch_manager.get_generation(message.id)
-            except Exception as ex:
-                logger.warning(f"Legacy view prompt reconstruction exception: {ex}")
-
         if not gen_record:
-            await interaction.response.send_message(content="❌ No prompt record or reference found for this response.", ephemeral=True)
+            await interaction.response.send_message(content="❌ No prompt record found for this response.", ephemeral=True)
             return
 
         active_idx = gen_record.get("active_version", 1)
@@ -864,25 +909,11 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         author_id = gen_record.get("author_id", "0")
         dur = v_data.get("duration_seconds", 0)
 
-        created_raw = v_data.get("created_at") or gen_record.get("created_at")
-        created_ts = int(time.time())
-        if created_raw:
-            try:
-                if isinstance(created_raw, (int, float)):
-                    created_ts = int(created_raw)
-                else:
-                    dt = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
-                    created_ts = int(dt.timestamp())
-            except Exception:
-                created_ts = int(message.created_at.timestamp())
-        else:
-            created_ts = int(message.created_at.timestamp())
-
         card_text = (
             f"### Prompt Inspector (Version {active_idx}/{len(versions)})\n"
             f"**Invoking User:** <@{author_id}>\n"
             f"**Input Prompt:**\n> {prompt_txt}\n\n"
-            f"-# Duration: `{dur}s` • Created: <t:{created_ts}:R>"
+            f"-# Duration: `{dur}s`"
         )
         await interaction.response.send_message(content=card_text, ephemeral=True)
 
@@ -902,65 +933,39 @@ def setup_slash_commands(tree: app_commands.CommandTree):
             await interaction.response.send_message(content="❌ You lack permission to edit this response.", ephemeral=True)
             return
 
+        active_idx = gen_record.get("active_version", 1) if gen_record else 1
+        versions = gen_record.get("versions", []) if gen_record else []
+        current_text = versions[active_idx - 1].get("content", "") if 1 <= active_idx <= len(versions) else message.content
+
         fields = [
             {
                 "type": "text_display",
-                "content": "Edit this response directly. Modifications will update the message in-place and save to persistent history."
+                "content": "Edit this response directly. Modifications will update the message in-place in Components V2 layout."
             },
             {
                 "type": "text_input",
                 "custom_id": "edited_content",
                 "label": "Response Content",
-                "description": "The updated markdown message text",
                 "style": "paragraph",
-                "value": message.content,
+                "value": current_text,
                 "required": True,
                 "max_length": 4000
-            },
-            {
-                "type": "file_upload",
-                "custom_id": "edited_files",
-                "label": "Upload Attachments",
-                "description": "Upload up to 10 replacement or additional files",
-                "required": False,
-                "max_values": 10
             }
         ]
 
         async def on_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
             new_text = data.get("edited_content", "").strip()
             parsed_text = apply_message_parsers(new_text, interaction.guild)
-            uploaded_files = data.get("edited_files", [])
 
-            discord_files = []
-            stored_attachments = []
+            branch_manager.update_active_version_content(message.id, parsed_text)
 
-            if uploaded_files and isinstance(uploaded_files, list):
-                async with aiohttp.ClientSession() as session:
-                    for f in uploaded_files:
-                        if isinstance(f, dict) and "url" in f:
-                            try:
-                                async with session.get(f["url"]) as resp:
-                                    if resp.status == 200:
-                                        raw_bytes = await resp.read()
-                                        fname = f.get("filename", "attachment.png")
-                                        b64 = base64.b64encode(raw_bytes).decode("utf-8")
-                                        stored_attachments.append({"filename": fname, "data_b64": b64})
-                                        discord_files.append(discord.File(io.BytesIO(raw_bytes), filename=fname))
-                            except Exception as ex:
-                                logger.warning(f"Failed to process edit attachment: {ex}")
-
-            branch_manager.update_active_version_content(
-                message.id,
-                parsed_text,
-                new_attachments=stored_attachments if stored_attachments else None
+            v2_view = build_v2_message_layout(
+                raw_text=parsed_text,
+                guild=interaction.guild,
+                message_id=message.id,
+                is_live_stream=False
             )
-
-            if discord_files:
-                await message.edit(content=parsed_text, attachments=discord_files)
-            else:
-                await message.edit(content=parsed_text)
-
+            await message.edit(view=v2_view)
             await sub_inter.response.send_message(content="✅ **Response edited in-place successfully.**", ephemeral=True)
 
         modal = DynamicModalV2(

@@ -15,26 +15,28 @@ from google.genai import types
 from config.settings import LOADING_EMOJI
 from core.engine import ChatEngine
 from core.branch_manager import branch_manager
-from handlers.stream_handler import DiscordStreamDispatcher, merge_views, apply_message_parsers
+from core.config_manager import config_manager
+from core.moderation import check_moderation, generate_friendly_refusal, log_moderation_violation
+from handlers.stream_handler import DiscordStreamDispatcher, apply_message_parsers
 from tools.registry import ToolExecutionContext
-from ui.modals import DynamicActionView
-from ui.thought_container import PlaceholderLayoutView, ThinkingButtonView
-from ui.context_views import build_version_switcher_view
+from ui.thought_container import PlaceholderLayoutView
+from ui.onboarding_views import WelcomeOnboardingCardView
 
 logger = logging.getLogger("PriestyAI.ChatHandler")
 
 MAX_INLINE_FILE_SIZE = 20 * 1024 * 1024
 
-async def extract_message_attachments(message: discord.Message) -> list[types.Part]:
+async def extract_message_attachments_raw(message: discord.Message) -> tuple[list[types.Part], list[bytes]]:
     parts: list[types.Part] = []
-    
+    raw_image_bytes: list[bytes] = []
+
     target_attachments = list(message.attachments)
     if not target_attachments and message.reference and message.reference.resolved:
         if isinstance(message.reference.resolved, discord.Message):
             target_attachments = list(message.reference.resolved.attachments)
 
     if not target_attachments:
-        return parts
+        return parts, raw_image_bytes
 
     async with aiohttp.ClientSession() as session:
         for attachment in target_attachments:
@@ -51,20 +53,24 @@ async def extract_message_attachments(message: discord.Message) -> list[types.Pa
             try:
                 async with session.get(attachment.url) as resp:
                     if resp.status == 200:
-                        raw_bytes = await resp.read()
-                        part = types.Part.from_bytes(data=raw_bytes, mime_type=mime_type)
+                        raw_data = await resp.read()
+                        part = types.Part.from_bytes(data=raw_data, mime_type=mime_type)
                         parts.append(part)
+                        if mime_type.startswith("image/"):
+                            raw_image_bytes.append(raw_data)
             except Exception as e:
                 logger.warning(f"Failed to download attachment {attachment.filename}: {e}")
 
-    return parts
-
+    return parts, raw_image_bytes
 
 def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
-    if tool_name == "execute_code":
+    if tool_name in ["create_artifact", "update_artifact"]:
+        t = args.get("title") or args.get("filename", "Artifact")
+        return f"-# 📦 Packaging artifact: **{t}**..."
+    elif tool_name == "execute_code":
         lang = args.get("language", "Python").capitalize()
         pkgs = args.get("packages", "")
-        pkg_str = f" ({pkgs})" if pkgs else ""
+        pkg_str = f" ({pkgs})" if pkg_str else ""
         return f"-# 💻 Running {lang} sandbox{pkg_str}..."
     elif tool_name == "search_web":
         q = args.get("query", "")[:35]
@@ -72,7 +78,17 @@ def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
     elif tool_name == "read_link":
         url = args.get("url", "")
         domain = url.split("//")[-1].split("/")[0] if "//" in url else url[:30]
-        return f"-# 📄 Reading article from `{domain}`..."
+        return f"-# 📄 Reading link from `{domain}`..."
+    elif tool_name == "fetch_image":
+        q = args.get("query", "")[:30]
+        return f"-# 🖼️ Fetching image for '{q}'..."
+    elif tool_name == "fetch_github":
+        r = args.get("repo_url", "")[:30]
+        return f"-# 🐙 Inspecting GitHub repo `{r}`..."
+    elif tool_name == "create_poll":
+        return "-# 📊 Creating Discord poll..."
+    elif tool_name == "calc":
+        return "-# 🔢 Computing math..."
     elif tool_name == "generate_image":
         return "-# 🎨 Rendering artwork..."
     elif tool_name == "ask_expert":
@@ -86,13 +102,11 @@ def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
         return f"-# 🔘 Staging {type_names.get(c_type, 'Component')}..."
     return None
 
-
 def format_placeholder_content(witty_text: str, subtext: str | None = None) -> str:
     content = f"{LOADING_EMOJI} *{witty_text}...*"
     if subtext:
         content += f"\n{subtext}"
     return content
-
 
 async def update_placeholder_loop(
     get_message_func,
@@ -133,39 +147,7 @@ async def update_placeholder_loop(
         except Exception:
             break
 
-
 class ChatHandler:
-    @staticmethod
-    def extract_user_presence(member: discord.Member | None) -> str:
-        if not member or not hasattr(member, "status"):
-            return ""
-
-        status_name = str(member.status)
-        platforms = []
-        if getattr(member, "desktop_status", None) != discord.Status.offline:
-            platforms.append("desktop")
-        if getattr(member, "mobile_status", None) != discord.Status.offline:
-            platforms.append("mobile")
-        if getattr(member, "web_status", None) != discord.Status.offline:
-            platforms.append("web")
-        platform_str = f" ({', '.join(platforms)})" if platforms else ""
-
-        activity_lines = []
-        for act in getattr(member, "activities", []):
-            if isinstance(act, discord.Spotify):
-                activity_lines.append(f'  <spotify track="{act.title}" artist="{act.artist}" album="{act.album}"/>')
-            elif isinstance(act, discord.Game):
-                activity_lines.append(f'  <activity type="playing">{act.name}</activity>')
-            elif isinstance(act, discord.Streaming):
-                activity_lines.append(f'  <activity type="streaming" platform="{act.platform}">{act.name}</activity>')
-            elif isinstance(act, discord.CustomActivity) and act.name:
-                activity_lines.append(f'  <custom_status>{act.name}</custom_status>')
-            elif hasattr(act, "name") and act.name:
-                activity_lines.append(f'  <activity type="general">{act.name}</activity>')
-
-        act_xml = "\n" + "\n".join(activity_lines) if activity_lines else ""
-        return f'<user_presence user_id="{member.id}">\n  <status>{status_name}{platform_str}</status>{act_xml}\n</user_presence>'
-
     @staticmethod
     def extract_server_emojis(guild: discord.Guild | None) -> str:
         if not guild or not guild.emojis:
@@ -200,11 +182,6 @@ class ChatHandler:
         emojis_xml = ChatHandler.extract_server_emojis(guild)
         if emojis_xml:
             envelope.append(f"  {emojis_xml}")
-
-        if isinstance(author, discord.Member):
-            presence_xml = ChatHandler.extract_user_presence(author)
-            if presence_xml:
-                envelope.append(f"  {presence_xml}")
 
         try:
             raw_history = [msg async for msg in channel.history(limit=limit)]
@@ -267,15 +244,40 @@ class ChatHandler:
         if not (force_respond or is_dm or is_mentioned or is_reply_to_bot):
             return
 
+        if not config_manager.has_user_agreed(message.author.id):
+            async def on_user_agreed_in_card(interaction: discord.Interaction, card_msg: discord.Message):
+                await interaction.response.defer()
+                try:
+                    await card_msg.delete()
+                except Exception as ex:
+                    logger.debug(f"Failed to delete welcome card: {ex}")
+                await cls.handle_message(bot, message, force_respond=True)
+
+            welcome_view = WelcomeOnboardingCardView(
+                author=message.author,
+                on_accepted_callback=on_user_agreed_in_card
+            )
+            welcome_msg = await message.reply(view=welcome_view, mention_author=False)
+            welcome_view.message = welcome_msg
+            welcome_view.start_cleanup_timer()
+            return
+
         clean_prompt = re.sub(rf'<@!?{bot_id}>', '', message.content)
         if bot_member:
             for r in bot_member.roles:
                 clean_prompt = clean_prompt.replace(f"<@&{r.id}>", "")
         clean_prompt = clean_prompt.replace(f"@{bot.user.name}", "").strip()
 
-        attachment_parts = await extract_message_attachments(message)
+        attachment_parts, raw_image_bytes = await extract_message_attachments_raw(message)
         if not clean_prompt:
             clean_prompt = "Please analyze the attached content." if attachment_parts else "Hello!"
+
+        is_flagged, flagged_cats, score = await check_moderation(clean_prompt, raw_image_bytes)
+        if is_flagged:
+            log_moderation_violation(message.author.id, message.guild.id if message.guild else None, flagged_cats, score)
+            friendly_refusal = await generate_friendly_refusal(flagged_cats)
+            await message.reply(content=friendly_refusal, mention_author=False)
+            return
 
         logger.info(f"Incoming message from {message.author} ({message.author.id}): {clean_prompt[:60]}")
 
@@ -288,7 +290,7 @@ class ChatHandler:
         context_xml = await cls.build_context_xml(channel=message.channel, current_user_id=message.author.id, guild=message.guild, author=message.author)
 
         response_msg: discord.Message | None = None
-        stream_dispatcher: DiscordStreamDispatcher | None = None
+        stream_dispatcher = DiscordStreamDispatcher(origin_message=message, guild=message.guild)
 
         accumulated_thought_buffer: list[str] = []
         tool_call_history: list[dict[str, Any]] = []
@@ -303,7 +305,6 @@ class ChatHandler:
         placeholder_view: PlaceholderLayoutView | None = None
         placeholder_task: asyncio.Task | None = None
         first_content_received = False
-        full_content_accumulator = ""
 
         def get_current_msg():
             return response_msg
@@ -312,19 +313,11 @@ class ChatHandler:
             return active_tool_subtext
 
         async def on_answer_now_clicked(inter: discord.Interaction):
-            nonlocal response_msg
             logger.info(f"[Answer Now Triggered] User {inter.user} requested instant response.")
             answer_now_event.set()
             stop_loop.set()
             if placeholder_task:
                 placeholder_task.cancel()
-
-            if response_msg:
-                try:
-                    await response_msg.delete()
-                    response_msg = None
-                except Exception:
-                    pass
 
         async def ensure_placeholder_spawned():
             nonlocal placeholder_view, placeholder_task, response_msg
@@ -342,6 +335,7 @@ class ChatHandler:
 
             try:
                 response_msg = await message.reply(view=placeholder_view, mention_author=False)
+                stream_dispatcher.bind_response_message(response_msg)
                 placeholder_task = asyncio.create_task(
                     update_placeholder_loop(
                         get_current_msg, placeholder_view, active_witty_statuses, get_active_subtext, thinking_start_time, stop_loop
@@ -395,6 +389,9 @@ class ChatHandler:
                         if placeholder_view:
                             placeholder_view.enable_thinking()
 
+                        if tool_name in ["create_artifact", "update_artifact"]:
+                            stream_dispatcher.add_artifact_placeholder(tool_name, args)
+
                     elif event_type == "TOOL_END":
                         await ensure_placeholder_spawned()
                         tool_name = payload.get("name", "Tool")
@@ -407,6 +404,21 @@ class ChatHandler:
                             "duration_ms": duration_ms
                         })
                         active_tool_subtext = None
+
+                        if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
+                            last_art = tool_context.staged_artifacts[-1]
+                            stream_dispatcher.update_artifact_ready(last_art)
+                            art_bytes = last_art.get("data_bytes", b"")
+                            art_fname = last_art.get("filename", "artifact.zip")
+                            if art_bytes:
+                                stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
+
+                        elif tool_name in ["generate_image", "fetch_image", "execute_code"] and tool_context.staged_image_bytes:
+                            img_fname = tool_context.staged_image_filename
+                            img_bytes = tool_context.staged_image_bytes
+                            stream_dispatcher.add_media_block(img_fname, img_bytes)
+                            tool_context.staged_image_bytes = None
+
                         if placeholder_view:
                             placeholder_view.enable_thinking()
                             placeholder_view.thought_data["tool_calls"] = tool_call_history
@@ -421,7 +433,6 @@ class ChatHandler:
                             await placeholder_view.push_live_update()
 
                     elif event_type == "CONTENT":
-                        full_content_accumulator += payload
                         if not first_content_received:
                             first_content_received = True
                             stop_loop.set()
@@ -429,114 +440,117 @@ class ChatHandler:
                                 placeholder_task.cancel()
 
                             if response_msg:
-                                try:
-                                    await response_msg.delete()
-                                except Exception:
-                                    pass
-                                response_msg = None
+                                stream_dispatcher.bind_response_message(response_msg)
 
-                            stream_dispatcher = DiscordStreamDispatcher(origin_message=message, guild=message.guild, existing_response_msg=None)
-
-                        if stream_dispatcher:
-                            await stream_dispatcher.append_text(payload)
+                        await stream_dispatcher.append_text(payload)
 
                     elif event_type == "ERROR":
                         stop_loop.set()
                         if placeholder_task:
                             placeholder_task.cancel()
-                        if stream_dispatcher:
-                            await stream_dispatcher.append_text(f"\n\n⚠️ {payload}")
+                        await stream_dispatcher.append_text(f"\n\n⚠️ {payload}")
 
             stop_loop.set()
             if placeholder_task:
                 placeholder_task.cancel()
 
             final_duration = max(1, int(time.time() - thinking_start_time))
-            
             active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
             has_reasoning = bool(accumulated_thought_buffer or active_tools)
 
-            action_view = None
-            if tool_context.staged_components:
-                modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
+            modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
 
-                async def handle_interaction_event(inter: discord.Interaction, ev_type: str, data: Any):
-                    if not inter.response.is_done():
-                        await inter.response.defer(ephemeral=False)
+            async def handle_interaction_event(inter: discord.Interaction, ev_type: str, data: Any):
+                if not inter.response.is_done():
+                    await inter.response.defer(ephemeral=False)
 
-                    data_str = json.dumps(data) if isinstance(data, (dict, list)) else str(data)
-                    interaction_prompt = f'<interaction_event type="{ev_type}" user="{inter.user.name}">\n  {data_str}\n</interaction_event>'
-                    sub_dispatcher = DiscordStreamDispatcher(inter.message, inter.guild)
-                    sub_tool_ctx = ToolExecutionContext(channel=inter.channel, guild=inter.guild, author=inter.user, bot=bot)
+                data_str = json.dumps(data) if isinstance(data, (dict, list)) else str(data)
+                interaction_prompt = f'<interaction_event type="{ev_type}" user="{inter.user.name}">\n  {data_str}\n</interaction_event>'
+                sub_dispatcher = DiscordStreamDispatcher(origin_message=inter.message, guild=inter.guild)
+                sub_tool_ctx = ToolExecutionContext(channel=inter.channel, guild=inter.guild, author=inter.user, bot=bot)
 
-                    async for sub_type, sub_payload in ChatEngine.stream_chat(
-                        prompt=interaction_prompt,
-                        context_xml=await cls.build_context_xml(inter.channel, inter.user.id, inter.guild, inter.user),
-                        bot_user_id=bot.user.id,
-                        tool_context=sub_tool_ctx
-                    ):
-                        if sub_type == "CONTENT":
-                            await sub_dispatcher.append_text(sub_payload)
+                async for sub_type, sub_payload in ChatEngine.stream_chat(
+                    prompt=interaction_prompt,
+                    context_xml=await cls.build_context_xml(inter.channel, inter.user.id, inter.guild, inter.user),
+                    bot_user_id=bot.user.id,
+                    tool_context=sub_tool_ctx
+                ):
+                    if sub_type == "CONTENT":
+                        await sub_dispatcher.append_text(sub_payload)
 
-                    await sub_dispatcher.finalize()
+                await sub_dispatcher.finalize()
 
-                action_view = DynamicActionView(components_schema=tool_context.staged_components, modals_map=modals_map, interaction_dispatcher=handle_interaction_event)
+            stored_attachments: list[dict[str, Any]] = []
 
-            final_file = None
-            stored_attachments = []
-            if tool_context.staged_image_bytes:
-                b64 = base64.b64encode(tool_context.staged_image_bytes).decode("utf-8")
-                stored_attachments.append({"filename": tool_context.staged_image_filename, "data_b64": b64})
-                final_file = discord.File(io.BytesIO(tool_context.staged_image_bytes), filename=tool_context.staged_image_filename)
+            for raw_att in stream_dispatcher.raw_attachment_buffers:
+                b64 = base64.b64encode(raw_att["bytes"]).decode("utf-8")
+                stored_attachments.append({"filename": raw_att["filename"], "data_b64": b64})
 
-            if stream_dispatcher:
-                await stream_dispatcher.finalize(view=action_view, file=final_file)
+            sanitized_artifacts: list[dict[str, Any]] = []
+            for art in tool_context.staged_artifacts:
+                art_bytes = art.get("data_bytes", b"")
+                art_fname = art.get("filename", "artifact.zip")
+                b64_art = base64.b64encode(art_bytes).decode("utf-8") if art_bytes else ""
+                clean_art = {k: v for k, v in art.items() if k != "data_bytes"}
+                clean_art["data_b64"] = b64_art
+                sanitized_artifacts.append(clean_art)
 
-                sent_msg = stream_dispatcher.primary_message or (stream_dispatcher.sent_messages[0] if stream_dispatcher.sent_messages else None)
-                if sent_msg:
-                    parsed_initial_content = apply_message_parsers(full_content_accumulator, message.guild)
-                    initial_v_data = {
-                        "version_idx": 1,
-                        "content": parsed_initial_content,
-                        "duration_seconds": final_duration,
-                        "has_thoughts": has_reasoning,
-                        "thoughts": "".join(accumulated_thought_buffer),
-                        "tool_calls": tool_call_history,
-                        "attachments": stored_attachments,
-                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                    }
-                    branch_manager.save_generation(
-                        message_id=sent_msg.id,
-                        channel_id=message.channel.id,
-                        guild_id=message.guild.id if message.guild else None,
-                        author_id=message.author.id,
-                        prompt_text=clean_prompt,
-                        attachments=[],
-                        context_xml=context_xml,
-                        initial_version_data=initial_v_data
-                    )
+            sent_msg = stream_dispatcher.primary_message
+            target_id = sent_msg.id if sent_msg else "temp"
 
-                    final_persistent_view = build_version_switcher_view(
-                        message_id=sent_msg.id,
-                        active_idx=1,
-                        total_versions=1,
-                        thought_duration=final_duration,
-                        has_thoughts=has_reasoning,
-                        extra_action_view=action_view
-                    )
-                    if final_persistent_view is not None:
-                        try:
-                            await sent_msg.edit(view=final_persistent_view)
-                        except Exception as ex:
-                            logger.debug(f"Failed to attach permanent view to sent message: {ex}")
+            await stream_dispatcher.finalize(
+                staged_artifacts=tool_context.staged_artifacts,
+                staged_components=tool_context.staged_components,
+                modals_map=modals_map,
+                interaction_dispatcher=handle_interaction_event,
+                thought_duration=final_duration,
+                has_thoughts=has_reasoning,
+                active_version=1,
+                total_versions=1,
+                message_id=target_id
+            )
+
+            sent_msg = stream_dispatcher.primary_message
+            if sent_msg:
+                final_text = stream_dispatcher.get_accumulated_text()
+                parsed_initial_content = apply_message_parsers(final_text, message.guild)
+
+                sanitized_timeline: list[dict[str, Any]] = []
+                for b in stream_dispatcher.timeline:
+                    b_copy = dict(b)
+                    if b_copy.get("type") == "artifact" and "artifact" in b_copy:
+                        art_copy = dict(b_copy["artifact"])
+                        art_copy.pop("data_bytes", None)
+                        b_copy["artifact"] = art_copy
+                    sanitized_timeline.append(b_copy)
+
+                initial_v_data = {
+                    "version_idx": 1,
+                    "content": parsed_initial_content,
+                    "timeline_blocks": sanitized_timeline,
+                    "duration_seconds": final_duration,
+                    "has_thoughts": has_reasoning,
+                    "thoughts": "".join(accumulated_thought_buffer),
+                    "tool_calls": tool_call_history,
+                    "attachments": stored_attachments,
+                    "staged_components": tool_context.staged_components,
+                    "staged_artifacts": sanitized_artifacts,
+                    "staged_modals": tool_context.staged_modals,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                }
+                branch_manager.save_generation(
+                    message_id=sent_msg.id,
+                    channel_id=message.channel.id,
+                    guild_id=message.guild.id if message.guild else None,
+                    author_id=message.author.id,
+                    prompt_text=clean_prompt,
+                    attachments=[],
+                    context_xml=context_xml,
+                    initial_version_data=initial_v_data
+                )
 
         except Exception as e:
             logger.exception(f"Unhandled exception in chat loop: {e}")
-            if response_msg:
-                try:
-                    await response_msg.delete()
-                except Exception:
-                    pass
         finally:
             stop_loop.set()
             if placeholder_task:

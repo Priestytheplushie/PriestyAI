@@ -16,27 +16,28 @@ def parse_mentions(text: str, guild: discord.Guild | None) -> str:
         if re.search(pattern, text, flags=re.IGNORECASE):
             text = re.sub(pattern, f"<@&{role.id}>", text, flags=re.IGNORECASE)
 
-    sorted_members = sorted(
-        guild.members,
-        key=lambda m: len(m.global_name or m.display_name or m.name),
-        reverse=True
-    )
+    if hasattr(guild, "members") and guild.members:
+        sorted_members = sorted(
+            guild.members,
+            key=lambda m: len(m.global_name or m.display_name or m.name),
+            reverse=True
+        )
 
-    for member in sorted_members:
-        names_to_check = {
-            member.name,
-            member.display_name,
-            getattr(member, 'global_name', None),
-            getattr(member, 'nick', None)
-        }
-        names_to_check = {n for n in names_to_check if n}
+        for member in sorted_members:
+            names_to_check = {
+                member.name,
+                member.display_name,
+                getattr(member, 'global_name', None),
+                getattr(member, 'nick', None)
+            }
+            names_to_check = {n for n in names_to_check if n}
 
-        for name in names_to_check:
-            escaped_name = re.escape(name)
-            pattern = rf'(?<!<)@{escaped_name}(?![a-zA-Z0-9_\|])'
-            if re.search(pattern, text, flags=re.IGNORECASE):
-                text = re.sub(pattern, f"<@{member.id}>", text, flags=re.IGNORECASE)
-                break
+            for name in names_to_check:
+                escaped_name = re.escape(name)
+                pattern = rf'(?<!<)@{escaped_name}(?![a-zA-Z0-9_\|])'
+                if re.search(pattern, text, flags=re.IGNORECASE):
+                    text = re.sub(pattern, f"<@{member.id}>", text, flags=re.IGNORECASE)
+                    break
 
     sorted_channels = sorted(
         guild.channels,

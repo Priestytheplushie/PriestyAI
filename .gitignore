@@ -12,7 +12,6 @@ temp_*.mp4
 archive/
 clean_project.py
 *.tmp
-
 .venv/
 venv/
 ENV/

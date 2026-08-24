@@ -66,6 +66,14 @@ class ConfigManager:
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_agreements (
+                    user_id TEXT PRIMARY KEY,
+                    agreed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    policy_version TEXT DEFAULT '1.0'
+                )
+            """)
+
             cursor.execute("PRAGMA table_info(server_configs)")
             columns = [row["name"] for row in cursor.fetchall()]
             if "server_bio" not in columns and "guild_id" in columns:
@@ -75,6 +83,25 @@ class ConfigManager:
 
             conn.commit()
         logger.info(f"Initialized configuration tables at absolute path: '{self.db_path}'")
+
+
+    def has_user_agreed(self, user_id: str | int) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM user_agreements WHERE user_id = ?", (str(user_id),))
+            return cursor.fetchone() is not None
+
+    def record_user_agreement(self, user_id: str | int, policy_version: str = "1.0"):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO user_agreements (user_id, agreed_at, policy_version)
+                VALUES (?, CURRENT_TIMESTAMP, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    agreed_at = CURRENT_TIMESTAMP,
+                    policy_version = excluded.policy_version
+            """, (str(user_id), policy_version))
+            conn.commit()
 
 
     def get_server_config(self, guild_id: str | int) -> dict[str, Any]:

@@ -192,10 +192,12 @@ def _detect_and_stage_artifacts(workspace_dir: str, context: ToolExecutionContex
 @tool_registry.register(
     name="execute_code",
     description=(
-        "Executes code securely inside an isolated Docker sandbox container. "
-        "Supports 'python', 'javascript', 'typescript', 'bash', 'cpp', 'c', 'rust', and 'go'. "
-        "Can specify 'packages' to install (e.g. ['numpy', 'matplotlib']). "
-        "Any generated plots (e.g. plt.savefig('plot.png')) will automatically be displayed."
+        "Executes code securely inside an isolated Docker sandbox container to test logic, verify regex, or compute results.\n"
+        "Supports 'python', 'javascript', 'typescript', 'bash', 'cpp', 'c', 'rust', and 'go'.\n"
+        "Can specify 'packages' to install (e.g. ['numpy', 'matplotlib']).\n"
+        "Generated plots (e.g. plt.savefig('plot.png')) will automatically be attached to chat.\n"
+        "IMPORTANT: This tool is strictly for running and testing code. It DOES NOT create downloadable files or scripts for the user. "
+        "To provide a script, program, or file for the user, you MUST use create_artifact instead."
     )
 )
 async def execute_code(

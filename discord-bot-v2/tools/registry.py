@@ -1,4 +1,5 @@
 import inspect
+import typing
 import logging
 from typing import Callable, Any, get_type_hints
 from dataclasses import dataclass, field
@@ -15,25 +16,39 @@ class ToolExecutionContext:
     bot: discord.Client | None = None
     staged_components: list[Any] = field(default_factory=list)
     staged_modals: list[Any] = field(default_factory=list)
+    staged_artifacts: list[Any] = field(default_factory=list)
     staged_image_bytes: bytes | None = None
     staged_image_filename: str = "generated_image.png"
     active_thread: Any | None = None
     clear_history_requested: bool = False
 
-def python_type_to_genai_type(py_type: Any) -> types.Type:
-    if py_type in (str, Any):
-        return types.Type.STRING
-    elif py_type == int:
-        return types.Type.INTEGER
-    elif py_type == float:
-        return types.Type.NUMBER
-    elif py_type == bool:
-        return types.Type.BOOLEAN
-    elif py_type in (list, list[str], list[int], list[Any]):
-        return types.Type.ARRAY
-    elif py_type in (dict, dict[str, Any]):
-        return types.Type.OBJECT
-    return types.Type.STRING
+def python_type_to_schema(py_type: Any, description: str = "") -> types.Schema:
+    origin = typing.get_origin(py_type)
+    args = typing.get_args(py_type)
+
+    if origin in (typing.Union, getattr(types, "UnionType", None)):
+        non_none = [a for a in args if a is not type(None)]
+        if non_none:
+            py_type = non_none[0]
+            origin = typing.get_origin(py_type)
+            args = typing.get_args(py_type)
+
+    if py_type in (int,):
+        return types.Schema(type=types.Type.INTEGER, description=description)
+    elif py_type in (float,):
+        return types.Schema(type=types.Type.NUMBER, description=description)
+    elif py_type in (bool,):
+        return types.Schema(type=types.Type.BOOLEAN, description=description)
+    elif py_type in (str, Any):
+        return types.Schema(type=types.Type.STRING, description=description)
+    elif py_type is list or origin is list:
+        item_type = args[0] if args else str
+        item_schema = python_type_to_schema(item_type)
+        return types.Schema(type=types.Type.ARRAY, items=item_schema, description=description)
+    elif py_type is dict or origin is dict:
+        return types.Schema(type=types.Type.OBJECT, description=description)
+
+    return types.Schema(type=types.Type.STRING, description=description)
 
 class ToolRegistry:
     def __init__(self):
@@ -54,12 +69,8 @@ class ToolRegistry:
                     continue
 
                 param_type = type_hints.get(param_name, str)
-                genai_type = python_type_to_genai_type(param_type)
-
-                properties[param_name] = types.Schema(
-                    type=genai_type,
-                    description=f"Parameter: {param_name}"
-                )
+                param_desc = f"Parameter: {param_name}"
+                properties[param_name] = python_type_to_schema(param_type, description=param_desc)
 
                 if param.default == inspect.Parameter.empty:
                     required_params.append(param_name)
@@ -84,10 +95,15 @@ class ToolRegistry:
 
         return decorator
 
-    def get_tool_declarations(self) -> list[types.Tool]:
-        if not self._declarations:
+    def get_tool_declarations(self, disabled_tools: list[str] | None = None) -> list[types.Tool]:
+        disabled_set = set(disabled_tools or [])
+        active_declarations = [
+            decl for decl in self._declarations
+            if decl.name not in disabled_set
+        ]
+        if not active_declarations:
             return []
-        return [types.Tool(function_declarations=self._declarations)]
+        return [types.Tool(function_declarations=active_declarations)]
 
     async def execute(self, tool_name: str, args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
         if tool_name not in self._tools:

@@ -10,9 +10,12 @@ from discord.ui import (
     Separator,
     ActionRow,
     Button,
-    View
+    View,
+    MediaGallery,
+    File as ComponentFile
 )
 from core.thought_stream import standardize_thoughts_text
+from ui.artifact_views import get_file_icon
 
 logger = logging.getLogger("PriestyAI.ThoughtUI")
 
@@ -24,9 +27,15 @@ TOOL_META_MAP = {
     "react": ("✨", "Message Reaction"),
     "execute_code": ("💻", "Code Sandbox"),
     "search_web": ("🔍", "Web Search"),
-    "read_link": ("📄", "Article Reader"),
+    "read_link": ("📄", "Article / Video"),
+    "fetch_github": ("🐙", "GitHub Repo"),
+    "create_poll": ("📊", "Created Poll"),
+    "calc": ("🔢", "Math Calculator"),
+    "fetch_image": ("🖼️", "Fetched Image"),
     "ask_expert": ("🧠", "Deep Reasoning"),
     "generate_image": ("🎨", "Image Generation"),
+    "create_artifact": ("📦", "Created Artifact"),
+    "update_artifact": ("🔄", "Updated Artifact"),
     "create_thread": ("🧵", "Thread Created"),
     "get_user_profile": ("👤", "User Profile"),
     "get_server_info": ("🏰", "Server Details"),
@@ -38,13 +47,52 @@ TOOL_META_MAP = {
     "clear_conversation": ("🧹", "Context Reset")
 }
 
+def format_truncated_block(code: str, lang: str, max_chars: int = 3000, label: str = "Code") -> str:
+    clean_code = code.strip()
+    if len(clean_code) <= max_chars:
+        return f"-# 🔍 {label}:\n```{lang}\n{clean_code}\n```"
+
+    split_idx = clean_code.rfind("\n", 0, max_chars)
+    if split_idx == -1:
+        split_idx = max_chars
+
+    truncated = clean_code[:split_idx].rstrip()
+    return (
+        f"-# 🔍 {label}:\n```{lang}\n{truncated}\n```\n"
+        f"-# ⚠️ *Preview truncated. Download the full file above to view all lines.*"
+    )
+
 def format_tool_display_text(tool_name: str, args: dict[str, Any], result: dict[str, Any], duration_ms: int) -> str:
     icon, name_clean = TOOL_META_MAP.get(tool_name, ("⚙️", tool_name.replace("_", " ").title()))
     time_tag = f"`{duration_ms}ms`" if duration_ms > 0 else ""
 
-    if tool_name in ["recall_memories", "search_memories"]:
+    if tool_name == "create_artifact":
+        fname = args.get("filename") or args.get("title", "Artifact")
+        file_icon = get_file_icon(fname)
+        return f"{file_icon} Created **{fname}** {time_tag}".strip()
+    elif tool_name == "update_artifact":
+        fname = args.get("filename") or "Artifact"
+        file_icon = get_file_icon(fname)
+        v_new = result.get("new_version", 2) if isinstance(result, dict) else 2
+        adds = result.get("additions", 0) if isinstance(result, dict) else 0
+        dels = result.get("deletions", 0) if isinstance(result, dict) else 0
+        diff_tag = f" (+{adds} -{dels})" if (adds > 0 or dels > 0) else ""
+        return f"{file_icon} Updated **{fname}** (`v{v_new}`{diff_tag}) {time_tag}".strip()
+    elif tool_name in ["recall_memories", "search_memories"]:
         count = args.get("count") or len(result.get("user_memories", []) + result.get("server_lore", []))
         return f"🧠 Recalled **{count}** memories".strip()
+    elif tool_name == "calc":
+        expr = args.get("expression", "")[:25]
+        return f"🔢 Calculated **`{expr}`** {time_tag}".strip()
+    elif tool_name == "fetch_image":
+        q = args.get("query", "")[:25]
+        return f"🖼️ Fetched **Image** (`{q}`) {time_tag}".strip()
+    elif tool_name == "fetch_github":
+        r = args.get("repo_url", "")[:25]
+        return f"🐙 Inspected **GitHub Repo** (`{r}`) {time_tag}".strip()
+    elif tool_name == "create_poll":
+        q = args.get("question", "")[:25]
+        return f"📊 Created **Poll** (`{q}`)".strip()
     elif tool_name == "remember":
         return f"💾 **PriestyAI will remember that.** {time_tag}".strip()
     elif tool_name == "forget":
@@ -60,12 +108,12 @@ def format_tool_display_text(tool_name: str, args: dict[str, Any], result: dict[
         return f"{icon} Searched **Web** (`{q}`) {time_tag}".strip()
     elif tool_name == "read_link":
         u = args.get("url", "")[:35]
-        return f"{icon} Read **Article** (`{u}`) {time_tag}".strip()
+        return f"{icon} Read **Link** (`{u}`) {time_tag}".strip()
     elif tool_name == "ask_expert":
         q = args.get("question", "")[:30]
         return f"{icon} Consulted **Expert** (`{q}`) {time_tag}".strip()
     elif tool_name == "generate_image":
-        return f"{icon} Generated **Image** {time_tag}".strip()
+        return f"{icon} Generated **Artwork** {time_tag}".strip()
     elif tool_name == "add_modal":
         t = args.get("title", "Form")[:25]
         return f"📋 Staged **Modal Form** (`{t}`)".strip()
@@ -105,9 +153,29 @@ class ToolInspectorView(LayoutView):
         icon, name_clean = TOOL_META_MAP.get(name, ("⚙️", name.replace("_", " ").title()))
         container = Container()
 
-        if name == "recall_memories":
+        if name == "create_artifact":
+            fname = args.get("filename", "artifact.zip")
+            file_icon = get_file_icon(fname)
+            header_line = f"{file_icon} **Created Artifact:** `{fname}`"
+        elif name == "update_artifact":
+            fname = args.get("filename", "artifact.zip")
+            file_icon = get_file_icon(fname)
+            v_new = result.get("new_version", 2) if isinstance(result, dict) else 2
+            adds = result.get("additions", 0) if isinstance(result, dict) else 0
+            dels = result.get("deletions", 0) if isinstance(result, dict) else 0
+            diff_stat = f" (+{adds} -{dels})" if (adds > 0 or dels > 0) else ""
+            header_line = f"{file_icon} **Updated Artifact:** `{fname}` (`v{v_new}`{diff_stat})"
+        elif name in ["recall_memories", "search_memories"]:
             count = args.get("count") or len(result.get("user_memories", []) + result.get("server_lore", []))
             header_line = f"🧠 **Recalled Memories** ({count} Active)"
+        elif name == "calc":
+            header_line = "🔢 **Math Calculation**"
+        elif name == "fetch_image":
+            header_line = "🖼️ **Fetched Image Search**"
+        elif name == "fetch_github":
+            header_line = "🐙 **GitHub Codebase Ingestion**"
+        elif name == "create_poll":
+            header_line = "📊 **Discord Native Poll**"
         elif name == "remember":
             header_line = "💾 **PriestyAI will remember that.**"
         elif name == "forget":
@@ -129,7 +197,102 @@ class ToolInspectorView(LayoutView):
         container.add_item(TextDisplay(header_line or "*No Header Details*"))
         container.add_item(Separator(visible=True))
 
-        if name in ["recall_memories", "search_memories"]:
+        if name == "calc":
+            expr = args.get("expression", "")
+            res = result.get("result", "")
+            container.add_item(TextDisplay(f"**Expression:**\n```python\n{expr}\n```\n**Evaluated Result:**\n`{res}`"))
+
+        elif name == "fetch_image":
+            query = args.get("query", "")
+            title = result.get("title", "")
+            src = result.get("source", "")
+            url = result.get("image_url", "")
+            container.add_item(TextDisplay(f"**Search Query:** `{query}`\n**Title:** {title}\n**Source:** {src}\n**URL:** [View Original]({url})"))
+
+        elif name == "generate_image":
+            prompt = args.get("prompt", "")
+            dims = result.get("dimensions", "1024x1024")
+            url = result.get("image_url", "")
+            container.add_item(TextDisplay(f"**Prompt:** *{prompt}*\n**Dimensions:** `{dims}`\n**URL:** [Direct Link]({url})"))
+
+        elif name == "fetch_github":
+            repo = result.get("repo", args.get("repo_url", ""))
+            sub = result.get("subpath", "root")
+            digest = result.get("digest", "")
+            container.add_item(TextDisplay(f"**Repository:** `{repo}`\n**Filter:** `{sub}`\n\n```text\n{digest[:2500]}\n```"))
+
+        elif name == "create_poll":
+            q = args.get("question", "")
+            opts = args.get("options", [])
+            dur = args.get("duration_hours", 24)
+            opts_str = "\n".join([f"• {o}" for o in opts])
+            container.add_item(TextDisplay(f"**Question:** {q}\n**Duration:** `{dur} hours`\n\n**Options:**\n{opts_str}"))
+
+        elif name == "update_artifact":
+            fname = args.get("filename", "artifact.zip")
+            summary = args.get("change_summary", "")
+            diff_text = result.get("diff", "") if isinstance(result, dict) else ""
+            v_old = result.get("old_version", 1) if isinstance(result, dict) else 1
+            v_new = result.get("new_version", 2) if isinstance(result, dict) else 2
+            adds = result.get("additions", 0) if isinstance(result, dict) else 0
+            dels = result.get("deletions", 0) if isinstance(result, dict) else 0
+            file_icon = get_file_icon(fname)
+
+            header_lines = [f"{file_icon} **Updated: `{fname}` (v{v_old} ➔ v{v_new})**"]
+            if summary:
+                header_lines.append(f"*{summary}*")
+            if adds > 0 or dels > 0:
+                header_lines.append(f"-# Lines Changed: `+{adds} additions` • `-{dels} deletions`")
+
+            container.add_item(TextDisplay("\n".join(header_lines)))
+            container.add_item(ComponentFile(f"attachment://{fname}"))
+            container.add_item(Separator(visible=True))
+
+            if diff_text:
+                container.add_item(TextDisplay(format_truncated_block(diff_text, lang="diff", max_chars=3000, label="Code Changes (Diff)")))
+            else:
+                raw_code = args.get("content", "")
+                ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+                container.add_item(TextDisplay(format_truncated_block(raw_code, lang=ext, max_chars=3000, label="Updated Source Code")))
+
+        elif name == "create_artifact":
+            fname = args.get("filename", "artifact.zip")
+            title = args.get("title", fname)
+            desc = args.get("description", "")
+            raw_content = args.get("content", "")
+            files = args.get("files", [])
+            file_icon = get_file_icon(fname)
+
+            header_lines = [f"{file_icon} **{title}**"]
+            if desc:
+                header_lines.append(f"*{desc}*")
+            container.add_item(TextDisplay("\n".join(header_lines)))
+            container.add_item(ComponentFile(f"attachment://{fname}"))
+            container.add_item(Separator(visible=True))
+
+            if files and isinstance(files, list) and len(files) > 1:
+                manifest_lines = ["**Included Files in Archive:**"]
+                for f in files[:8]:
+                    f_name = f.get("filename", "file")
+                    f_lines = len(f.get("content", "").splitlines())
+                    f_icon = get_file_icon(f_name)
+                    manifest_lines.append(f"• {f_icon} `{f_name}` — *{f_lines:,} lines*")
+                if len(files) > 8:
+                    manifest_lines.append(f"-# ... and {len(files) - 8} more files")
+
+                container.add_item(TextDisplay("\n".join(manifest_lines)))
+                first_f = files[0]
+                first_name = first_f.get("filename", "index.html")
+                first_code = first_f.get("content", "")
+                ext = first_name.rsplit(".", 1)[-1].lower() if "." in first_name else ""
+                container.add_item(TextDisplay(f"\n**Entry File (`{first_name}`):**\n" + format_truncated_block(first_code, lang=ext, max_chars=2200, label=first_name)))
+            else:
+                code = raw_content or (files[0].get("content", "") if files else "")
+                ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+                lines = len(code.splitlines())
+                container.add_item(TextDisplay(f"-# Source Code ({lines:,} lines):\n" + format_truncated_block(code, lang=ext, max_chars=3000, label=fname)))
+
+        elif name in ["recall_memories", "search_memories"]:
             u_mems = result.get("user_memories", [])
             s_mems = result.get("server_lore", [])
             content_blocks = []
@@ -141,7 +304,6 @@ class ToolInspectorView(LayoutView):
                 content_blocks.append("👤 **User Profile Facts:** *None found.*")
 
             content_blocks.append("")
-
             if s_mems:
                 content_blocks.append("🏰 **Server Lore:**")
                 for m in s_mems:
@@ -151,65 +313,20 @@ class ToolInspectorView(LayoutView):
 
             container.add_item(TextDisplay("\n".join(content_blocks) or "*No memory details available.*"))
 
-        elif name == "add_component":
-            c_type = args.get("component_type", "component")
-            c_id = args.get("custom_id", "*auto*")
-            placeholder = args.get("placeholder", "")
-            label = args.get("label", "")
-            min_v = args.get("min_values", 1)
-            max_v = args.get("max_values", 1)
-            modal_id = args.get("modal_id")
-            style = args.get("style", "secondary")
-
-            details = [
-                f"• **Component Type:** `{c_type}`",
-                f"• **Custom ID:** `{c_id}`"
-            ]
-            if label:
-                details.append(f"• **Label:** {label}")
-            if placeholder:
-                details.append(f"• **Placeholder:** {placeholder}")
-            if max_v > 1:
-                details.append(f"• **Multi-Select Limits:** `{min_v}` min, `{max_v}` max")
-            if style != "secondary":
-                details.append(f"• **Style:** `{style}`")
-            if modal_id:
-                details.append(f"• **Linked Modal Form:** `{modal_id}`")
-
-            container.add_item(TextDisplay("\n".join(details)))
-
-        elif name == "add_modal":
-            m_id = args.get("modal_id", "modal")
-            m_title = args.get("title", "Form")
-            fields = args.get("fields", [])
-            container.add_item(TextDisplay(f"• **Modal ID:** `{m_id}`\n• **Title:** {m_title}\n• **Total Fields:** `{len(fields)}`"))
-
-        elif name == "remember":
-            txt = args.get("memory_text", "").strip() or "*No text provided*"
-            container.add_item(TextDisplay(f"**Remembered Fact:**\n> {txt}"))
-
-        elif name == "forget":
-            deleted = result.get("deleted_text", "").strip() or "*No text deleted*"
-            container.add_item(TextDisplay(f"**Removed Fact:**\n> {deleted}"))
-
-        elif name == "react":
-            emoji = args.get("emoji") or (result.get("emoji") if isinstance(result, dict) else "🎲")
-            container.add_item(TextDisplay(f"**Reaction:** {emoji}"))
-
         elif name == "execute_code":
             lang = args.get("language", "python")
             pkgs = result.get("installed_packages", args.get("packages", []))
             code = args.get("code", "").strip() or "# No code snippet"
             pkg_str = f" • Packages: `{pkgs}`" if pkgs else ""
-            container.add_item(TextDisplay(f"**Runtime:** `{lang}`{pkg_str}\n\n```{lang}\n{code}\n```"))
+            container.add_item(TextDisplay(f"**Runtime:** `{lang}`{pkg_str}\n\n```{lang}\n{code[:2500]}\n```"))
 
             stdout = result.get("stdout", "").strip() if isinstance(result, dict) else ""
             stderr = result.get("stderr") if isinstance(result, dict) else None
 
             if stdout:
-                container.add_item(TextDisplay(f"**Output:**\n```text\n{stdout}\n```"))
+                container.add_item(TextDisplay(f"**Output:**\n```text\n{stdout[:1500]}\n```"))
             if stderr:
-                container.add_item(TextDisplay(f"**Alerts:**\n```text\n{stderr}\n```"))
+                container.add_item(TextDisplay(f"**Alerts:**\n```text\n{stderr[:1000]}\n```"))
 
         elif name == "search_web":
             query = args.get("query", "") or "*None*"
@@ -225,19 +342,19 @@ class ToolInspectorView(LayoutView):
 
         elif name == "read_link":
             url = args.get("url", "")
+            r_type = result.get("type", "webpage")
             content = result.get('content', '').strip() if isinstance(result, dict) else ""
-            content_display = f"\n\n```text\n{content}\n```" if content else ""
-            container.add_item(TextDisplay(f"**Source URL:** [Read Article]({url}){content_display}" if url else "**URL:** *Not provided*"))
+            
+            if r_type == "youtube_video_summary":
+                container.add_item(TextDisplay(f"📺 **YouTube Video:** [Watch Video]({url})\n\n{content[:2500]}"))
+            else:
+                content_display = f"\n\n```text\n{content[:2500]}\n```" if content else ""
+                container.add_item(TextDisplay(f"**Source URL:** [Read Article]({url}){content_display}" if url else "**URL:** *Not provided*"))
 
         elif name == "ask_expert":
             question = args.get("question", "") or "*None*"
             solution = (result.get("solution", "") if isinstance(result, dict) else str(result)).strip() or "*No solution output*"
-            container.add_item(TextDisplay(f"**Question:** *{question}*\n\n**Expert Solution:**\n{solution}"))
-
-        elif name == "generate_image":
-            prompt = args.get("prompt", "") or "*None*"
-            dims = result.get("dimensions", "1024x1024") if isinstance(result, dict) else "1024x1024"
-            container.add_item(TextDisplay(f"**Prompt:** *{prompt}*\n**Size:** `{dims}`"))
+            container.add_item(TextDisplay(f"**Question:** *{question}*\n\n**Expert Solution:**\n{solution[:2500]}"))
 
         else:
             arg_lines = "\n".join([f"- **{k}:** `{v}`" for k, v in args.items()]) or "- *(No parameters)*"
@@ -390,7 +507,8 @@ class ThoughtContainerView(LayoutView):
                 acc_btn = Button(
                     label="View ↗",
                     style=discord.ButtonStyle.secondary,
-                    custom_id=f"btn_inspect_tool_{g_idx}"
+                    custom_id=f"btn_inspect_tool_{g_idx}",
+                    disabled=self.is_thinking
                 )
                 acc_btn.callback = self._create_inspector_callback(tool_call)
 

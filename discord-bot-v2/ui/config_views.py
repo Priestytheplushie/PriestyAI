@@ -86,7 +86,7 @@ class ServerIdentityDashboardView(LayoutView):
         )
         container.add_item(header_section)
 
-        container.add_item(MediaGallery(discord.MediaGalleryItem(url=avatar_url)))
+        container.add_item(MediaGallery(discord.MediaGalleryItem(avatar_url)))
 
         info_text = (
             f"**Display Nickname:** `{nick}`\n"
@@ -296,6 +296,7 @@ SETTING_HELP_TEXTS = {
     "tool_permissions": (
         "### Tool Permissions\n"
         "Enable or disable specific tool capabilities per server or channel.\n\n"
+        "• **Code Artifacts:** Standalone script cards and zip project bundling (May not work as expected on mobile).\n"
         "• **Docker Code Execution:** Runs code in an isolated sandbox container.\n"
         "• **Web Search & Article Reader:** Real-time web querying and article reading.\n"
         "• **Image Generation:** AI artwork generation with inline attachments.\n"
@@ -652,6 +653,7 @@ def build_tool_permissions_modal(scope: str, disabled_tools: list[str], on_submi
     disabled_set = set(disabled_tools or [])
 
     tool_options = [
+        {"label": "Code Artifacts", "value": "create_artifact", "description": "Standalone script cards & zip project packaging (May not work as expected on mobile)", "default": "create_artifact" not in disabled_set},
         {"label": "Docker Code Execution", "value": "execute_code", "description": "Isolated sandbox execution for Python, JS, C++, Rust, Go", "default": "execute_code" not in disabled_set},
         {"label": "Web Search & Article Reader", "value": "search_web,read_link", "description": "Real-time web search and full webpage content extraction", "default": "search_web" not in disabled_set},
         {"label": "Image Generation", "value": "generate_image", "description": "AI image rendering and automatic inline attachments", "default": "generate_image" not in disabled_set},

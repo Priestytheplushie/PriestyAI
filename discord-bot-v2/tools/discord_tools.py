@@ -1,5 +1,8 @@
 import json
+import uuid
 import logging
+from datetime import timedelta
+import time
 from typing import Any
 import discord
 from discord.ui import (
@@ -12,6 +15,7 @@ from discord.ui import (
     Item
 )
 from tools.registry import tool_registry, ToolExecutionContext
+from core.poll_manager import poll_manager
 
 logger = logging.getLogger("PriestyAI.DiscordTools")
 
@@ -51,14 +55,18 @@ def normalize_component_type(component_type: str) -> str:
 @tool_registry.register(
     name="add_component",
     description=(
-        "Stages interactive Discord UI components to attach to your response.\n"
+        "Stages interactive Discord UI components (Buttons, Select Menus, or Section Accessories) to attach to your response.\n"
+        "Use this tool whenever you want to offer clickable actions, follow-up buttons, or dropdown menus.\n"
         "Supported component_type values:\n"
-        "- 'Button': Clickable action button (set label, style: 'primary'|'secondary'|'success'|'danger', or modal_id)\n"
-        "- 'StringSelect': Dropdown menu with custom text options (provide options: [{'label':'...','value':'...','description':'...'}])\n"
+        "- 'Button': Clickable button (set label, style: 'primary'|'secondary'|'success'|'danger', or modal_id)\n"
+        "- 'StringSelect': Dropdown menu with custom text options (options: [{'label':'...','value':'...','description':'...','modal_id':'...'}]). Options can optionally open distinct modals!\n"
         "- 'UserSelect': Native Discord user/member picker dropdown\n"
         "- 'RoleSelect': Native Discord server role picker dropdown\n"
         "- 'ChannelSelect': Native Discord channel picker dropdown (optional channel_types: ['text', 'voice'])\n"
-        "- 'MentionableSelect': Native Discord user OR role picker dropdown\n"
+        "- 'MentionableSelect': Native Discord user OR role picker dropdown\n\n"
+        "Placement options:\n"
+        "- 'action_row' (Default): Full-width row beneath or between text.\n"
+        "- 'section': Side-by-side layout (Text on left, Button on right). Set section_text for the text beside the button.\n"
         "Supports multi-select via min_values and max_values (1 to 25)."
     )
 )
@@ -68,6 +76,8 @@ async def add_component(
     modal_id: str | None = None,
     label: str = "",
     placeholder: str = "",
+    section_text: str = "",
+    placement: str = "action_row",
     options: Any = None,
     channel_types: list[str] | None = None,
     min_values: int = 1,
@@ -87,8 +97,9 @@ async def add_component(
             "error": f"Invalid component type '{component_type}'. Valid options: {', '.join(sorted(valid_types))}"
         }
 
-    comp_id = custom_id or f"comp_{c_type}_{id(context)}"
+    comp_id = custom_id.strip() if custom_id.strip() else f"comp_{c_type}_{uuid.uuid4().hex[:8]}"
     target_modal_id = modal_id or (comp_id if c_type == "button" else None)
+    clean_placement = "section" if (placement.lower().strip() == "section" or section_text.strip()) and c_type == "button" else "action_row"
 
     parsed_options = options
     if isinstance(parsed_options, str):
@@ -99,12 +110,22 @@ async def add_component(
     elif not isinstance(parsed_options, list):
         parsed_options = []
 
+    option_modals = {}
+    if c_type == "string_select" and isinstance(parsed_options, list):
+        for opt in parsed_options:
+            if isinstance(opt, dict) and opt.get("modal_id"):
+                val = opt.get("value", opt.get("label", ""))
+                option_modals[val] = opt["modal_id"]
+
     component_payload = {
         "type": c_type,
         "custom_id": comp_id,
         "modal_id": target_modal_id,
+        "option_modals": option_modals,
         "label": label,
         "placeholder": placeholder,
+        "section_text": section_text.strip(),
+        "placement": clean_placement,
         "min_values": max(0, int(min_values)),
         "max_values": max(1, min(25, int(max_values))),
         "style": style.lower().strip(),
@@ -119,16 +140,91 @@ async def add_component(
     if context:
         if not hasattr(context, "staged_components"):
             context.staged_components = []
-        context.staged_components.append(component_payload)
 
-    logger.info(f"[add_component] Staged '{c_type}' (ID: '{comp_id}', min: {min_values}, max: {max_values})")
+        existing_idx = None
+        for idx, existing_comp in enumerate(context.staged_components):
+            if existing_comp.get("custom_id") == comp_id:
+                existing_idx = idx
+                break
+
+        if existing_idx is not None:
+            context.staged_components[existing_idx] = component_payload
+            logger.info(f"[add_component] Updated existing '{c_type}' (ID: '{comp_id}')")
+        else:
+            context.staged_components.append(component_payload)
+            logger.info(f"[add_component] Staged '{c_type}' (ID: '{comp_id}', placement: '{clean_placement}')")
+
     return {
         "status": "staged",
         "component_type": c_type,
         "custom_id": comp_id,
         "modal_id": target_modal_id,
+        "placement": clean_placement,
         "details": component_payload
     }
+
+@tool_registry.register(
+    name="create_poll",
+    description=(
+        "Creates a native Discord Poll with interactive vote buttons.\n"
+        "- question: The poll topic or title (e.g. 'Which architecture pattern do you prefer?')\n"
+        "- options: List of choices (2 to 10 options, e.g. ['Option A', 'Option B'])\n"
+        "- duration_hours: Duration before poll concludes (1 to 168 hours, default 24)\n"
+        "Automatically tallies votes and announces the winner when the poll expires!"
+    )
+)
+async def create_poll(
+    question: str,
+    options: list[str],
+    duration_hours: int = 24,
+    context: ToolExecutionContext = None
+) -> dict[str, Any]:
+    if not context or not context.channel:
+        return {"error": "Channel context unavailable for poll creation."}
+
+    clean_options = [str(opt).strip() for opt in options if str(opt).strip()]
+    if len(clean_options) < 2:
+        return {"error": "Polls require at least 2 distinct options."}
+    if len(clean_options) > 10:
+        clean_options = clean_options[:10]
+
+    hours = max(1, min(int(duration_hours), 168))
+
+    try:
+        poll_obj = discord.Poll(
+            question=question.strip()[:300],
+            duration=timedelta(hours=hours),
+            multiple=False
+        )
+        for opt_text in clean_options:
+            poll_obj.add_answer(text=opt_text[:55])
+
+        poll_message = await context.channel.send(poll=poll_obj)
+        poll_id = f"poll_{int(time.time() * 1000)}"
+
+        poll_manager.register_poll(
+            poll_id=poll_id,
+            message_id=poll_message.id,
+            channel_id=context.channel.id,
+            guild_id=context.guild.id if context.guild else None,
+            question=question.strip(),
+            options=clean_options,
+            duration_hours=hours
+        )
+
+        logger.info(f"[create_poll] Created native poll #{poll_id} on message {poll_message.id}")
+        return {
+            "status": "created",
+            "poll_id": poll_id,
+            "message_id": str(poll_message.id),
+            "question": question,
+            "options_count": len(clean_options),
+            "duration_hours": hours
+        }
+
+    except Exception as e:
+        logger.error(f"[create_poll] Failed to create poll: {e}")
+        return {"error": f"Failed to create Discord poll: {str(e)}"}
 
 @tool_registry.register(
     name="react",

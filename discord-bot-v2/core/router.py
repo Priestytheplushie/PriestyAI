@@ -14,7 +14,7 @@ logger = logging.getLogger("PriestyAI.Router")
 
 class RouteDecision(BaseModel):
     target_model: str = Field(
-        description="Chosen model: 'gemini-3.7-flash', 'gemma-4-31b-it', or 'gemini-3.5-flash-lite'"
+        description="Chosen model: 'gemma-4-31b-it', 'gemini-3.5-flash-lite', or 'gemini-3.7-flash'"
     )
     thinking_level: str = Field(
         description="Reasoning level: 'MINIMAL', 'LOW', 'MEDIUM', or 'HIGH'"
@@ -26,26 +26,25 @@ class RouteDecision(BaseModel):
         description="Brief 1-sentence technical reason for this route decision"
     )
 
-ROUTER_SYSTEM_INSTRUCTION = """
-You are the routing and complexity classifier for PriestyAI.
-Analyze the user's message and context, then output a JSON object adhering strictly to the schema.
+ROUTER_SYSTEM_INSTRUCTION = """You are the intelligent traffic router and complexity classifier for PriestyAI.
+Analyze the user's message, attached media, and context to select the most optimal model and thinking level.
 
-CRITICAL MULTIMEDIA DIRECTIVE:
-- If media (images, audio, video files) is attached to the request, you MUST NEVER select 'gemma-4-31b-it' as it lacks multimodal audio/vision execution. You MUST select 'gemini-3.7-flash' or 'gemini-3.5-flash-lite'.
+ROUTING HIERARCHY & MODEL SPECIALIZATION:
 
-Routing Guidelines:
-1. CASUAL / MEMORY STORAGE / CHITCHAT / QUICK (Text-only greetings, saving preferences, simple Q&A):
-   - target_model: "gemma-4-31b-it" | thinking_level: "MINIMAL"
+1. WORKHORSE ROUTE -> target_model: "gemma-4-31b-it" | thinking_level: "HIGH"
+   - DEFAULT FOR MOST QUERIES: General knowledge, comparisons (e.g. brand history, tech comparisons), code explanations, math derivations, algorithm writing, theory, and multi-turn conversations.
+   - Use this to deliver deep, thorough reasoning while preserving API quotas.
+   - Constraint: If audio/video files are attached, do NOT use Gemma (use Gemini Flash).
 
-2. CONCEPTUAL / EXPLANATIONS / RESEARCH / MEDIA ANALYSIS (Visual, audio, or text video analysis):
-   - For Media Inputs: target_model: "gemini-3.5-flash-lite" or "gemini-3.7-flash" | thinking_level: "MEDIUM"
-   - For Text-Only: target_model: "gemma-4-31b-it" | thinking_level: "HIGH"
+2. INSTANT / UTILITY ROUTE -> target_model: "gemini-3.5-flash-lite" | thinking_level: "MINIMAL" or "LOW"
+   - Greetings, casual banter, quick single-turn questions, formatting tasks, or simple lookups.
+   - Delivers instant streaming response in <500ms with zero latency.
 
-3. HEAVY CODING / ARCHITECTURE / DEBUGGING / COMPLEX MATH (Programming in Docker sandbox, formal proofs):
-   - target_model: "gemini-3.7-flash" | thinking_level: "HIGH"
+3. FLAGSHIP SPECIALIST ROUTE -> target_model: "gemini-3.7-flash" | thinking_level: "HIGH"
+   - Complex full-scale multi-file software projects, deep GUI application scaffolding (e.g. Tkinter / Pygame / React apps), heavy multi-modal video/audio comprehension, or escalated mathematical verification.
 
 Witty Statuses:
-Generate exactly 5 to 7 dynamic, humorous, contextual 3-5 word phrases relevant to the query.
+Generate exactly 5 to 7 dynamic, humorous, query-specific 3-5 word phrases relevant to the topic.
 """
 
 class Router:
@@ -56,12 +55,15 @@ class Router:
 
         for router_model in [ROUTER_PRIMARY, ROUTER_FALLBACK]:
             client, key_idx, active_model = client_manager.get_client_for_model(router_model)
+            if not client:
+                continue
+
             try:
                 config = types.GenerateContentConfig(
                     system_instruction=ROUTER_SYSTEM_INSTRUCTION,
                     response_mime_type="application/json",
                     response_schema=RouteDecision,
-                    temperature=0.2
+                    temperature=0.1
                 )
                 
                 response = await asyncio.wait_for(
@@ -70,7 +72,7 @@ class Router:
                         contents=payload,
                         config=config
                     ),
-                    timeout=5
+                    timeout=4.0
                 )
 
                 if response.text:
@@ -78,8 +80,9 @@ class Router:
                     decision = RouteDecision(**decision_data)
                     
                     if has_media and decision.target_model == "gemma-4-31b-it":
-                        logger.warning("[Router Override] 'gemma-4-31b-it' selected for multimodal input. Redirecting to WORKHORSE_MODEL.")
-                        decision.target_model = WORKHORSE_MODEL
+                        logger.warning("[Router Override] 'gemma-4-31b-it' selected for multimodal input. Redirecting to 'gemini-3.5-flash'.")
+                        decision.target_model = "gemini-3.5-flash"
+                        decision.thinking_level = "MEDIUM"
 
                     logger.info(
                         f"[Route Success] Model: '{decision.target_model}' | "
@@ -87,15 +90,15 @@ class Router:
                     )
                     return decision
             except Exception as e:
-                err_desc = "Router timeout (>5.0s)" if isinstance(e, asyncio.TimeoutError) else str(e)
+                err_desc = "Router timeout (>4.0s)" if isinstance(e, asyncio.TimeoutError) else str(e)
                 client_manager.report_error(key_idx, active_model, Exception(err_desc))
                 logger.warning(f"Router attempt failed on {active_model} (Key #{key_idx}): {err_desc}")
 
-        fallback_model = WORKHORSE_MODEL if has_media else "gemma-4-31b-it"
-        logger.warning(f"Router fallback activated: Using safe route '{fallback_model}'.")
+        fallback_model = "gemini-3.5-flash-lite" if has_media else WORKHORSE_MODEL
+        logger.warning(f"Router fallback activated: Using safe workhorse route '{fallback_model}'.")
         return RouteDecision(
             target_model=fallback_model,
-            thinking_level="MINIMAL",
+            thinking_level="HIGH" if fallback_model == WORKHORSE_MODEL else "MINIMAL",
             witty_statuses=[
                 "Herding digital sheep",
                 "Warming up synaptic cores",

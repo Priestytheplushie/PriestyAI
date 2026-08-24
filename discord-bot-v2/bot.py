@@ -10,6 +10,7 @@ from core.client_manager import client_manager
 from core.branch_manager import branch_manager
 from core.config_manager import config_manager
 from core.poll_manager import poll_manager
+from core.searxng_client import searxng_client
 from handlers.chat_handler import ChatHandler
 from handlers.slash_handler import setup_slash_commands
 from handlers.stream_handler import build_v2_message_layout, apply_message_parsers
@@ -34,12 +35,17 @@ class PriestyBot(discord.Client):
         self.poll_watchdog_task: asyncio.Task | None = None
 
     async def setup_hook(self):
+        asyncio.create_task(searxng_client.ensure_running())
+
         setup_slash_commands(self.tree)
         try:
             synced = await self.tree.sync()
             logger.info(f"[CommandTree] Successfully synced {len(synced)} application command(s) & context menus globally!")
         except Exception as e:
             logger.error(f"[CommandTree] Failed to sync application commands: {e}")
+
+    async def close(self):
+        await super().close()
 
     async def on_ready(self):
         logger.info("=" * 60)
@@ -308,7 +314,7 @@ class PriestyBot(discord.Client):
                     if b64:
                         raw = base64.b64decode(b64)
                         fname = att.get("filename", "file.bin")
-                        if fname.endswith((".png", ".jpg", ".jpeg")):
+                        if fname.endswith((".png", ".jpg", ".jpeg", ".webp")):
                             img_name = fname
                         files.append(discord.File(io.BytesIO(raw), filename=fname))
 

@@ -16,11 +16,18 @@ from config.settings import LOADING_EMOJI
 from core.engine import ChatEngine
 from core.branch_manager import branch_manager
 from core.config_manager import config_manager
-from core.moderation import check_moderation, generate_friendly_refusal, log_moderation_violation
+from core.memory_manager import memory_manager
+from core.moderation import (
+    check_moderation,
+    generate_friendly_refusal,
+    log_moderation_violation,
+    is_user_banned,
+    ban_user
+)
 from handlers.stream_handler import DiscordStreamDispatcher, apply_message_parsers
 from tools.registry import ToolExecutionContext
 from ui.thought_container import PlaceholderLayoutView
-from ui.onboarding_views import WelcomeOnboardingCardView
+from ui.onboarding_views import WelcomeOnboardingCardView, BannedUserNoticeView
 
 logger = logging.getLogger("PriestyAI.ChatHandler")
 
@@ -31,9 +38,20 @@ async def extract_message_attachments_raw(message: discord.Message) -> tuple[lis
     raw_image_bytes: list[bytes] = []
 
     target_attachments = list(message.attachments)
-    if not target_attachments and message.reference and message.reference.resolved:
-        if isinstance(message.reference.resolved, discord.Message):
-            target_attachments = list(message.reference.resolved.attachments)
+
+    if not target_attachments and message.reference:
+        ref_msg = None
+        if message.reference.resolved and isinstance(message.reference.resolved, discord.Message):
+            ref_msg = message.reference.resolved
+        elif message.reference.message_id and message.channel:
+            try:
+                ref_msg = await message.channel.fetch_message(message.reference.message_id)
+            except Exception as e:
+                logger.debug(f"Failed to fetch parent replied message: {e}")
+
+        if ref_msg and ref_msg.attachments:
+            target_attachments = list(ref_msg.attachments)
+            logger.info(f"[Multimodal Reply] Ingesting {len(target_attachments)} attachment(s) from replied parent message {ref_msg.id}.")
 
     if not target_attachments:
         return parts, raw_image_bytes
@@ -52,7 +70,7 @@ async def extract_message_attachments_raw(message: discord.Message) -> tuple[lis
 
             try:
                 async with session.get(attachment.url) as resp:
-                    if resp.status == 200:
+                    if resp.status_code == 200:
                         raw_data = await resp.read()
                         part = types.Part.from_bytes(data=raw_data, mime_type=mime_type)
                         parts.append(part)
@@ -66,46 +84,49 @@ async def extract_message_attachments_raw(message: discord.Message) -> tuple[lis
 def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
     if tool_name in ["create_artifact", "update_artifact"]:
         t = args.get("title") or args.get("filename", "Artifact")
-        return f"-# 📦 Packaging artifact: **{t}**..."
+        return f"Packaging artifact: **{t}**..."
+    elif tool_name == "create_thread":
+        t = args.get("name", "Thread")[:25]
+        return f"Creating thread: **{t}**..."
     elif tool_name == "execute_code":
         lang = args.get("language", "Python").capitalize()
         pkgs = args.get("packages", "")
-        pkg_str = f" ({pkgs})" if pkg_str else ""
-        return f"-# 💻 Running {lang} sandbox{pkg_str}..."
+        pkg_str = f" ({pkgs})" if pkgs else ""
+        return f"Running {lang} sandbox{pkg_str}..."
     elif tool_name == "search_web":
         q = args.get("query", "")[:35]
-        return f'-# 🔍 Searching: "{q}"...'
+        return f'Searching: "{q}"...'
     elif tool_name == "read_link":
         url = args.get("url", "")
         domain = url.split("//")[-1].split("/")[0] if "//" in url else url[:30]
-        return f"-# 📄 Reading link from `{domain}`..."
-    elif tool_name == "fetch_image":
+        return f"Reading link from `{domain}`..."
+    elif tool_name == "search_image":
         q = args.get("query", "")[:30]
-        return f"-# 🖼️ Fetching image for '{q}'..."
+        return f"Finding image for '{q}'..."
     elif tool_name == "fetch_github":
         r = args.get("repo_url", "")[:30]
-        return f"-# 🐙 Inspecting GitHub repo `{r}`..."
+        return f"Inspecting GitHub repo `{r}`..."
     elif tool_name == "create_poll":
-        return "-# 📊 Creating Discord poll..."
+        return "Creating Discord poll..."
     elif tool_name == "calc":
-        return "-# 🔢 Computing math..."
+        return "Computing math..."
     elif tool_name == "generate_image":
-        return "-# 🎨 Rendering artwork..."
+        return "Rendering artwork..."
     elif tool_name == "ask_expert":
-        return "-# 🧠 Consulting deep reasoning expert..."
+        return "Consulting deep reasoning expert..."
     elif tool_name == "add_component":
         c_type = str(args.get("component_type", "component")).lower().replace(" ", "_")
         type_names = {
             "button": "Button", "string_select": "Dropdown", "user_select": "User Select",
             "role_select": "Role Select", "channel_select": "Channel Select", "mentionable_select": "Mentionable Select"
         }
-        return f"-# 🔘 Staging {type_names.get(c_type, 'Component')}..."
+        return f"Staging {type_names.get(c_type, 'Component')}..."
     return None
 
 def format_placeholder_content(witty_text: str, subtext: str | None = None) -> str:
     content = f"{LOADING_EMOJI} *{witty_text}...*"
     if subtext:
-        content += f"\n{subtext}"
+        content += f"\n-# ⚙️ {subtext}"
     return content
 
 async def update_placeholder_loop(
@@ -144,6 +165,30 @@ async def update_placeholder_loop(
             await placeholder_view.push_live_update()
         except discord.HTTPException:
             break
+        except Exception:
+            break
+
+async def stream_live_heartbeat_loop(
+    dispatcher: DiscordStreamDispatcher,
+    get_active_subtext_func,
+    start_time: float,
+    stop_event: asyncio.Event,
+    interval: float = 1.5
+):
+    while not stop_event.is_set():
+        try:
+            await asyncio.sleep(interval)
+            if stop_event.is_set():
+                break
+
+            elapsed = int(time.time() - start_time)
+            subtext = get_active_subtext_func()
+            if subtext:
+                status_line = f"{subtext} ({elapsed}s)"
+            else:
+                status_line = f"Synthesizing response... ({elapsed}s)"
+
+            await dispatcher.flush(live_status_text=status_line)
         except Exception:
             break
 
@@ -244,6 +289,11 @@ class ChatHandler:
         if not (force_respond or is_dm or is_mentioned or is_reply_to_bot):
             return
 
+        if is_user_banned(message.author.id):
+            ban_view = BannedUserNoticeView(author=message.author)
+            await message.reply(view=ban_view, mention_author=False)
+            return
+
         if not config_manager.has_user_agreed(message.author.id):
             async def on_user_agreed_in_card(interaction: discord.Interaction, card_msg: discord.Message):
                 await interaction.response.defer()
@@ -272,12 +322,30 @@ class ChatHandler:
         if not clean_prompt:
             clean_prompt = "Please analyze the attached content." if attachment_parts else "Hello!"
 
-        is_flagged, flagged_cats, score = await check_moderation(clean_prompt, raw_image_bytes)
+        is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(clean_prompt, raw_image_bytes)
         if is_flagged:
             log_moderation_violation(message.author.id, message.guild.id if message.guild else None, flagged_cats, score)
+
+            if is_zero_tolerance:
+                ban_user(message.author.id, reason=f"Zero-tolerance policy violation: {', '.join(flagged_cats)}")
+                ban_view = BannedUserNoticeView(author=message.author)
+                await message.reply(view=ban_view, mention_author=False)
+                return
+
             friendly_refusal = await generate_friendly_refusal(flagged_cats)
             await message.reply(content=friendly_refusal, mention_author=False)
             return
+
+        cfg = config_manager.resolve_effective_config(message.guild.id if message.guild else None, message.channel.id, message.author.id)
+        asyncio.create_task(
+            memory_manager.auto_extract_and_store_async(
+                user_id=message.author.id,
+                guild_id=message.guild.id if message.guild else None,
+                prompt_text=clean_prompt,
+                user_memory_policy=cfg.get("user_memory_policy", "read_write"),
+                server_lore_policy=cfg.get("server_lore_policy", "read_write")
+            )
+        )
 
         logger.info(f"Incoming message from {message.author} ({message.author.id}): {clean_prompt[:60]}")
 
@@ -286,7 +354,14 @@ class ChatHandler:
             multimodal_prompt.extend(attachment_parts)
         multimodal_prompt.append(clean_prompt)
 
-        tool_context = ToolExecutionContext(channel=message.channel, guild=message.guild, author=message.author, bot=bot)
+        tool_context = ToolExecutionContext(
+            channel=message.channel,
+            guild=message.guild,
+            author=message.author,
+            bot=bot
+        )
+        tool_context.message = message
+
         context_xml = await cls.build_context_xml(channel=message.channel, current_user_id=message.author.id, guild=message.guild, author=message.author)
 
         response_msg: discord.Message | None = None
@@ -298,12 +373,14 @@ class ChatHandler:
 
         thinking_start_time: float = time.time()
         answer_now_event = asyncio.Event()
-        stop_loop = asyncio.Event()
+        stop_placeholder_loop = asyncio.Event()
+        stop_stream_ticker = asyncio.Event()
 
         active_witty_statuses = ["Thinking", "Consulting neural cores", "Formulating response"]
         active_tool_subtext: str | None = None
         placeholder_view: PlaceholderLayoutView | None = None
         placeholder_task: asyncio.Task | None = None
+        stream_ticker_task: asyncio.Task | None = None
         first_content_received = False
 
         def get_current_msg():
@@ -315,7 +392,7 @@ class ChatHandler:
         async def on_answer_now_clicked(inter: discord.Interaction):
             logger.info(f"[Answer Now Triggered] User {inter.user} requested instant response.")
             answer_now_event.set()
-            stop_loop.set()
+            stop_placeholder_loop.set()
             if placeholder_task:
                 placeholder_task.cancel()
 
@@ -338,7 +415,7 @@ class ChatHandler:
                 stream_dispatcher.bind_response_message(response_msg)
                 placeholder_task = asyncio.create_task(
                     update_placeholder_loop(
-                        get_current_msg, placeholder_view, active_witty_statuses, get_active_subtext, thinking_start_time, stop_loop
+                        get_current_msg, placeholder_view, active_witty_statuses, get_active_subtext, thinking_start_time, stop_placeholder_loop
                     )
                 )
             except Exception as ex:
@@ -392,6 +469,11 @@ class ChatHandler:
                         if tool_name in ["create_artifact", "update_artifact"]:
                             stream_dispatcher.add_artifact_placeholder(tool_name, args)
 
+                        if first_content_received:
+                            cur_elapsed = int(time.time() - thinking_start_time)
+                            st_line = f"{active_tool_subtext} ({cur_elapsed}s)" if active_tool_subtext else None
+                            await stream_dispatcher.flush(live_status_text=st_line)
+
                     elif event_type == "TOOL_END":
                         await ensure_placeholder_spawned()
                         tool_name = payload.get("name", "Tool")
@@ -413,7 +495,7 @@ class ChatHandler:
                             if art_bytes:
                                 stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
 
-                        elif tool_name in ["generate_image", "fetch_image", "execute_code"] and tool_context.staged_image_bytes:
+                        elif tool_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
                             img_fname = tool_context.staged_image_filename
                             img_bytes = tool_context.staged_image_bytes
                             stream_dispatcher.add_media_block(img_fname, img_bytes)
@@ -423,6 +505,10 @@ class ChatHandler:
                             placeholder_view.enable_thinking()
                             placeholder_view.thought_data["tool_calls"] = tool_call_history
                             await placeholder_view.push_live_update()
+
+                        if first_content_received:
+                            cur_elapsed = int(time.time() - thinking_start_time)
+                            await stream_dispatcher.flush(live_status_text=f"Synthesizing response... ({cur_elapsed}s)")
 
                     elif event_type == "CASCADE_RESET":
                         active_tool_start_times.clear()
@@ -435,24 +521,40 @@ class ChatHandler:
                     elif event_type == "CONTENT":
                         if not first_content_received:
                             first_content_received = True
-                            stop_loop.set()
+                            stop_placeholder_loop.set()
                             if placeholder_task:
                                 placeholder_task.cancel()
 
                             if response_msg:
                                 stream_dispatcher.bind_response_message(response_msg)
 
+                            if not stream_ticker_task or stream_ticker_task.done():
+                                stream_ticker_task = asyncio.create_task(
+                                    stream_live_heartbeat_loop(
+                                        dispatcher=stream_dispatcher,
+                                        get_active_subtext_func=get_active_subtext,
+                                        start_time=thinking_start_time,
+                                        stop_event=stop_stream_ticker
+                                    )
+                                )
+
                         await stream_dispatcher.append_text(payload)
 
                     elif event_type == "ERROR":
-                        stop_loop.set()
+                        stop_placeholder_loop.set()
+                        stop_stream_ticker.set()
                         if placeholder_task:
                             placeholder_task.cancel()
+                        if stream_ticker_task:
+                            stream_ticker_task.cancel()
                         await stream_dispatcher.append_text(f"\n\n⚠️ {payload}")
 
-            stop_loop.set()
+            stop_placeholder_loop.set()
+            stop_stream_ticker.set()
             if placeholder_task:
                 placeholder_task.cancel()
+            if stream_ticker_task:
+                stream_ticker_task.cancel()
 
             final_duration = max(1, int(time.time() - thinking_start_time))
             active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
@@ -552,6 +654,9 @@ class ChatHandler:
         except Exception as e:
             logger.exception(f"Unhandled exception in chat loop: {e}")
         finally:
-            stop_loop.set()
+            stop_placeholder_loop.set()
+            stop_stream_ticker.set()
             if placeholder_task:
                 placeholder_task.cancel()
+            if stream_ticker_task:
+                stream_ticker_task.cancel()

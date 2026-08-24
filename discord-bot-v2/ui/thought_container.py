@@ -31,7 +31,7 @@ TOOL_META_MAP = {
     "fetch_github": ("🐙", "GitHub Repo"),
     "create_poll": ("📊", "Created Poll"),
     "calc": ("🔢", "Math Calculator"),
-    "fetch_image": ("🖼️", "Fetched Image"),
+    "search_image": ("🖼️", "Image Search"),
     "ask_expert": ("🧠", "Deep Reasoning"),
     "generate_image": ("🎨", "Image Generation"),
     "create_artifact": ("📦", "Created Artifact"),
@@ -84,9 +84,11 @@ def format_tool_display_text(tool_name: str, args: dict[str, Any], result: dict[
     elif tool_name == "calc":
         expr = args.get("expression", "")[:25]
         return f"🔢 Calculated **`{expr}`** {time_tag}".strip()
-    elif tool_name == "fetch_image":
-        q = args.get("query", "")[:25]
-        return f"🖼️ Fetched **Image** (`{q}`) {time_tag}".strip()
+    elif tool_name == "search_image":
+        q = args.get("query", "")[:30]
+        t = result.get("title") if isinstance(result, dict) else None
+        label_text = f"**{t[:28]}**" if t else f"`{q}`"
+        return f"🖼️ Found **Image** ({label_text}) {time_tag}".strip()
     elif tool_name == "fetch_github":
         r = args.get("repo_url", "")[:25]
         return f"🐙 Inspected **GitHub Repo** (`{r}`) {time_tag}".strip()
@@ -168,10 +170,10 @@ class ToolInspectorView(LayoutView):
         elif name in ["recall_memories", "search_memories"]:
             count = args.get("count") or len(result.get("user_memories", []) + result.get("server_lore", []))
             header_line = f"🧠 **Recalled Memories** ({count} Active)"
+        elif name == "search_image":
+            header_line = "🖼️ **Visual Image Search & Attachment**"
         elif name == "calc":
             header_line = "🔢 **Math Calculation**"
-        elif name == "fetch_image":
-            header_line = "🖼️ **Fetched Image Search**"
         elif name == "fetch_github":
             header_line = "🐙 **GitHub Codebase Ingestion**"
         elif name == "create_poll":
@@ -197,17 +199,28 @@ class ToolInspectorView(LayoutView):
         container.add_item(TextDisplay(header_line or "*No Header Details*"))
         container.add_item(Separator(visible=True))
 
-        if name == "calc":
+        if name == "search_image":
+            query = args.get("query", "")
+            title = result.get("title") or args.get("caption") or "Image Asset"
+            source = result.get("source", "Web")
+            img_url = result.get("image_url", "#")
+            size_b = result.get("size_bytes", 0)
+
+            lines = [
+                f"**Search Query:** `{query}`",
+                f"**Selected Asset:** `{title}`",
+                f"**Host Source:** `{source}`",
+                f"**Direct Link:** [🔗 Open Original Asset]({img_url})"
+            ]
+            if size_b:
+                lines.append(f"**Attached Size:** `{size_b / 1024:.1f} KB`")
+
+            container.add_item(TextDisplay("\n".join(lines)))
+
+        elif name == "calc":
             expr = args.get("expression", "")
             res = result.get("result", "")
             container.add_item(TextDisplay(f"**Expression:**\n```python\n{expr}\n```\n**Evaluated Result:**\n`{res}`"))
-
-        elif name == "fetch_image":
-            query = args.get("query", "")
-            title = result.get("title", "")
-            src = result.get("source", "")
-            url = result.get("image_url", "")
-            container.add_item(TextDisplay(f"**Search Query:** `{query}`\n**Title:** {title}\n**Source:** {src}\n**URL:** [View Original]({url})"))
 
         elif name == "generate_image":
             prompt = args.get("prompt", "")
@@ -685,6 +698,11 @@ class PlaceholderLayoutView(LayoutView):
                 logger.debug(f"Live container update error: {e}")
 
     async def _on_answer_now_clicked(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+
         if self.on_answer_now_callback:
             await self.on_answer_now_callback(interaction)
 

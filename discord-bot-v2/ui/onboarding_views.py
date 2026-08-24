@@ -11,6 +11,7 @@ from discord.ui import (
     Button
 )
 from core.config_manager import config_manager
+from core.memory_manager import memory_manager
 from ui.modals import DynamicModalV2
 
 logger = logging.getLogger("PriestyAI.Onboarding")
@@ -84,6 +85,26 @@ def build_welcome_terms_modal(on_agree_callback: Callable[[discord.Interaction],
         custom_id="modal_onboarding_terms",
         fields_schema=fields,
         on_submit_callback=on_submit
+    )
+
+def build_terms_review_modal() -> DynamicModalV2:
+    review_content = f"{TERMS_DOCUMENT_TEXT}\n\n-# ℹ️ You agreed to these terms and are bound by them while interacting with PriestyAI."
+    fields = [
+        {
+            "type": "text_display",
+            "content": review_content
+        }
+    ]
+
+    async def on_review_submit(interaction: discord.Interaction, data: dict[str, Any]):
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
+    return DynamicModalV2(
+        title="PriestyAI Terms of Service",
+        custom_id="modal_terms_review",
+        fields_schema=fields,
+        on_submit_callback=on_review_submit
     )
 
 class WelcomeOnboardingCardView(LayoutView):
@@ -182,3 +203,58 @@ class WelcomeOnboardingCardView(LayoutView):
                 await self.message.delete()
         except Exception:
             pass
+
+
+class BannedUserNoticeView(LayoutView):
+    def __init__(self, author: discord.User | discord.Member):
+        super().__init__(timeout=600)
+        self.author = author
+        self._build_card()
+
+    def _build_card(self):
+        self.clear_items()
+        container = Container()
+
+        notice_text = (
+            f"### Account Access Suspended\n"
+            f"{self.author.mention}, your access to PriestyAI has been permanently revoked "
+            f"due to severe violations of our Safety Guidelines and Terms of Service.\n\n"
+            f"Under our Privacy Policy and GDPR right-to-erasure guidelines, you may permanently "
+            f"delete all personal memories and data stored about your account below.\n\n"
+            f"-# ⚠️ Deleting stored data will not lift account suspension."
+        )
+        container.add_item(TextDisplay(notice_text))
+
+        purge_btn = Button(
+            label="Delete My Stored Data",
+            style=discord.ButtonStyle.danger,
+            custom_id="btn_ban_purge_data"
+        )
+        purge_btn.callback = self._on_purge_clicked
+
+        container.add_item(ActionRow(purge_btn))
+        self.add_item(container)
+
+    async def _on_purge_clicked(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(
+                content="❌ You cannot manage data for this account.",
+                ephemeral=True
+            )
+            return
+
+        res = memory_manager.purge_entire_user_data(self.author.id)
+        logger.info(f"[GDPR Wipe on Ban] Purged data for banned user {self.author.id}: {res}")
+
+        confirmation_text = (
+            f"### Account Access Suspended\n"
+            f"✅ **All personal data, memories, configurations, and chat sessions associated with your account "
+            f"have been permanently erased from our database.**\n\n"
+            f"-# Account suspension remains in effect."
+        )
+        container = Container()
+        container.add_item(TextDisplay(confirmation_text))
+        self.clear_items()
+        self.add_item(container)
+
+        await interaction.response.edit_message(view=self)

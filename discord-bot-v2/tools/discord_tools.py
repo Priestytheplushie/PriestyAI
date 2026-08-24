@@ -16,6 +16,7 @@ from discord.ui import (
 )
 from tools.registry import tool_registry, ToolExecutionContext
 from core.poll_manager import poll_manager
+from core.branch_manager import branch_manager
 
 logger = logging.getLogger("PriestyAI.DiscordTools")
 
@@ -311,29 +312,82 @@ async def search_channel_history(query: str, limit: int = 25, channel_id: str = 
 
 @tool_registry.register(
     name="create_thread",
-    description="Creates a public or private thread in the current channel and routes conversation into it."
+    description=(
+        "Creates a dedicated Discord thread to host an extended discussion, complex project build, "
+        "or deep debugging session without cluttering the main channel.\n"
+        "STRICT USAGE GUIDELINES:\n"
+        "- DO invoke this for large multi-turn coding projects, in-depth debugging sessions, or when requested.\n"
+        "- DO NOT invoke this for simple single-turn questions, greetings, quick lookups, or if already in a thread/DM.\n"
+        "- Maximum 1 thread per turn."
+    )
 )
 async def create_thread(name: str, private: bool = False, message_id: str = "", context: ToolExecutionContext = None) -> dict[str, Any]:
-    if not context or not isinstance(context.channel, discord.TextChannel):
+    if not context or not context.channel:
+        return {"error": "Channel context unavailable."}
+
+    if getattr(context, "active_thread", None) is not None:
+        return {
+            "status": "already_created",
+            "thread_id": str(context.active_thread.id),
+            "thread_name": context.active_thread.name,
+            "message": "A thread has already been created for this turn."
+        }
+
+    if isinstance(context.channel, discord.Thread):
+        return {"error": "Already inside a thread. Do not create nested threads."}
+
+    if isinstance(context.channel, discord.DMChannel):
+        return {"error": "Threads cannot be created in direct messages."}
+
+    if not isinstance(context.channel, discord.TextChannel):
         return {"error": "Threads can only be created inside standard server text channels."}
 
     try:
+        target_msg = None
         clean_msg_id = "".join([c for c in str(message_id) if c.isdigit()])
         if clean_msg_id:
-            msg = await context.channel.fetch_message(int(clean_msg_id))
-            thread = await msg.create_thread(name=name[:100])
+            try:
+                target_msg = await context.channel.fetch_message(int(clean_msg_id))
+            except Exception:
+                pass
+
+        if not target_msg and getattr(context, "message", None):
+            target_msg = context.message
+
+        if target_msg:
+            thread = await target_msg.create_thread(name=name[:100])
         else:
             thread_type = discord.ChannelType.private_thread if private else discord.ChannelType.public_thread
             thread = await context.channel.create_thread(name=name[:100], type=thread_type)
 
+        if context.author and hasattr(thread, "add_user"):
+            try:
+                await thread.add_user(context.author)
+            except Exception as ex:
+                logger.debug(f"Failed to add author to thread: {ex}")
+
+        branch_id = str(uuid.uuid4())[:8]
+        branch_manager.create_branch(
+            branch_id=branch_id,
+            thread_id=thread.id,
+            channel_id=context.channel.id,
+            guild_id=context.guild.id if context.guild else None,
+            creator_id=context.author.id if context.author else "0",
+            title=name[:60],
+            root_message_id=str(target_msg.id) if target_msg else "0",
+            messages=[]
+        )
+
         context.active_thread = thread
-        logger.info(f"[create_thread] Created thread '{thread.name}' (ID: {thread.id})")
+        logger.info(f"[create_thread] Created and registered thread '{thread.name}' (ID: {thread.id})")
         return {
             "status": "created",
             "thread_id": str(thread.id),
-            "thread_name": thread.name
+            "thread_name": thread.name,
+            "jump_url": thread.jump_url
         }
     except Exception as e:
+        logger.error(f"[create_thread] Failed to create thread: {e}")
         return {"error": f"Failed to create thread: {str(e)}"}
 
 @tool_registry.register(

@@ -29,19 +29,21 @@ class RouteDecision(BaseModel):
 ROUTER_SYSTEM_INSTRUCTION = """You are the intelligent traffic router and complexity classifier for PriestyAI.
 Analyze the user's message, attached media, and context to select the most optimal model and thinking level.
 
-ROUTING HIERARCHY & MODEL SPECIALIZATION:
+ROUTING HIERARCHY & COMPLEXITY PRINCIPLES:
 
-1. WORKHORSE ROUTE -> target_model: "gemma-4-31b-it" | thinking_level: "HIGH"
-   - DEFAULT FOR MOST QUERIES: General knowledge, comparisons (e.g. brand history, tech comparisons), code explanations, math derivations, algorithm writing, theory, and multi-turn conversations.
-   - Use this to deliver deep, thorough reasoning while preserving API quotas.
-   - Constraint: If audio/video files are attached, do NOT use Gemma (use Gemini Flash).
+1. INSTANT / UTILITY / VISUAL ROUTE -> target_model: "gemini-3.5-flash-lite" | thinking_level: "MINIMAL" or "LOW"
+   - Image lookups, picture searches, and visual requests ("show me a picture of...", "what does X look like?").
+   - Direct image generation requests ("draw me a...", "generate an artwork of...").
+   - Short conversational banter, greetings, simple trivia, translations, or quick utility questions.
+   - Goal: Instant execution without wasting time or API tokens on unnecessary deep reasoning.
 
-2. INSTANT / UTILITY ROUTE -> target_model: "gemini-3.5-flash-lite" | thinking_level: "MINIMAL" or "LOW"
-   - Greetings, casual banter, quick single-turn questions, formatting tasks, or simple lookups.
-   - Delivers instant streaming response in <500ms with zero latency.
+2. WORKHORSE ROUTE -> target_model: "gemma-4-31b-it" | thinking_level: "MEDIUM" or "HIGH"
+   - Standard coding scripts, single-file game builds, math derivations, algorithm writing, conceptual explanations, and multi-turn technical discussions.
+   - Use "MEDIUM" for standard coding and single-turn questions; use "HIGH" for complex proofs or multi-step algorithms.
+   - Constraint: If audio/video files are attached, do NOT use Gemma (route to Gemini Flash).
 
 3. FLAGSHIP SPECIALIST ROUTE -> target_model: "gemini-3.7-flash" | thinking_level: "HIGH"
-   - Complex full-scale multi-file software projects, deep GUI application scaffolding (e.g. Tkinter / Pygame / React apps), heavy multi-modal video/audio comprehension, or escalated mathematical verification.
+   - Complex full-scale multi-file software projects, deep architectural system design, heavy video/audio analysis, or advanced escalated verification.
 
 Witty Statuses:
 Generate exactly 5 to 7 dynamic, humorous, query-specific 3-5 word phrases relevant to the topic.
@@ -95,10 +97,10 @@ class Router:
                 logger.warning(f"Router attempt failed on {active_model} (Key #{key_idx}): {err_desc}")
 
         fallback_model = "gemini-3.5-flash-lite" if has_media else WORKHORSE_MODEL
-        logger.warning(f"Router fallback activated: Using safe workhorse route '{fallback_model}'.")
+        logger.warning(f"Router fallback activated: Using safe route '{fallback_model}'.")
         return RouteDecision(
             target_model=fallback_model,
-            thinking_level="HIGH" if fallback_model == WORKHORSE_MODEL else "MINIMAL",
+            thinking_level="MEDIUM" if fallback_model == WORKHORSE_MODEL else "MINIMAL",
             witty_statuses=[
                 "Herding digital sheep",
                 "Warming up synaptic cores",

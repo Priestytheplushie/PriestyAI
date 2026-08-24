@@ -1,0 +1,58 @@
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "PriestyAI Search"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en-US"
+  formats:
+    - html
+    - json
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "priestyai_local_searxng_ultra_secure_secret_key_change_me"
+  limiter: false
+  image_proxy: false
+
+engines:
+  # --- Disable generic stock photo engines ---
+  - name: unsplash
+    engine: unsplash
+    disabled: true
+  - name: openverse
+    engine: openverse
+    disabled: true
+  - name: flickr
+    engine: flickr
+    disabled: true
+  - name: pixabay
+    engine: pixabay
+    disabled: true
+
+  # --- Enable top-tier web image indexers ---
+  - name: bing images
+    engine: bing_images
+    shortcut: bi
+    disabled: false
+  - name: google images
+    engine: google_images
+    shortcut: gi
+    disabled: false
+  - name: duckduckgo images
+    engine: duckduckgo_images
+    shortcut: ddi
+    disabled: false
+  - name: brave.images
+    engine: brave
+    categories: images
+    shortcut: bri
+    disabled: false
+  - name: qwant images
+    engine: qwant_images
+    shortcut: qwi
+    disabled: false

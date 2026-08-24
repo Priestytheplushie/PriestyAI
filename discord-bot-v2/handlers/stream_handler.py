@@ -22,7 +22,7 @@ from discord.ui import (
     MentionableSelect,
     File as ComponentFile
 )
-from config.settings import STREAM_DEBOUNCE_INTERVAL
+from config.settings import STREAM_DEBOUNCE_INTERVAL, LOADING_EMOJI
 from parsers.mention_parser import parse_mentions
 from parsers.timestamp_parser import parse_timestamps
 from parsers.emoji_parser import parse_emojis
@@ -155,7 +155,8 @@ def build_v2_message_layout(
     active_version: int = 1,
     total_versions: int = 1,
     message_id: str | int | None = None,
-    is_live_stream: bool = False
+    is_live_stream: bool = False,
+    live_status_text: str | None = None
 ) -> ChatMessageLayoutView:
     view = ChatMessageLayoutView(timeout=900)
     target_mid = message_id or "temp"
@@ -406,6 +407,10 @@ def build_v2_message_layout(
         if staged_buttons:
             elements.append(ActionRow(*staged_buttons))
 
+    if is_live_stream and len(elements) < 39:
+        status_str = live_status_text or "Synthesizing response..."
+        elements.append(TextDisplay(f"-# {LOADING_EMOJI} *{status_str}*"))
+
     if not is_live_stream and message_id:
         if has_thoughts and len(elements) < 39:
             time_str = f"{thought_duration}s" if thought_duration > 0 else "<1s"
@@ -444,7 +449,7 @@ class DiscordStreamDispatcher:
         self.timeline: list[dict[str, Any]] = []
         self.raw_attachment_buffers: list[dict[str, Any]] = []
         self.last_edit_time = 0.0
-        self.is_flushing = False
+        self.flush_lock = asyncio.Lock()
 
     def bind_response_message(self, msg: discord.Message):
         self.primary_message = msg
@@ -540,76 +545,79 @@ class DiscordStreamDispatcher:
         active_version: int = 1,
         total_versions: int = 1,
         message_id: str | int | None = None,
-        is_final: bool = False
+        is_final: bool = False,
+        live_status_text: str | None = None
     ):
-        if self.is_flushing or (not self.timeline and not is_final):
+        if not self.timeline and not is_final:
             return
 
-        self.is_flushing = True
-        try:
-            message_slices = chunk_timeline(self.timeline, max_chars=MAX_V2_MESSAGE_TEXT_BUDGET)
-            target_msg_id = message_id or (self.primary_message.id if self.primary_message else None)
+        if not is_final and self.flush_lock.locked():
+            return
 
-            for i, slice_blocks in enumerate(message_slices):
-                is_last_slice = (i == len(message_slices) - 1)
-                chunk_comps = staged_components if (is_last_slice and is_final) else None
-                chunk_mod_map = modals_map if (is_last_slice and is_final) else None
-                chunk_dispatcher = interaction_dispatcher if (is_last_slice and is_final) else None
+        async with self.flush_lock:
+            try:
+                message_slices = chunk_timeline(self.timeline, max_chars=MAX_V2_MESSAGE_TEXT_BUDGET)
+                target_msg_id = message_id or (self.primary_message.id if self.primary_message else None)
 
-                layout_view = build_v2_message_layout(
-                    guild=self.guild,
-                    timeline_blocks=slice_blocks,
-                    staged_components=chunk_comps,
-                    staged_artifacts=staged_artifacts,
-                    modals_map=chunk_mod_map,
-                    interaction_dispatcher=chunk_dispatcher,
-                    thought_duration=thought_duration if is_last_slice else 0,
-                    has_thoughts=has_thoughts if is_last_slice else False,
-                    active_version=active_version,
-                    total_versions=total_versions,
-                    message_id=target_msg_id if is_last_slice else None,
-                    is_live_stream=not is_final
-                )
+                for i, slice_blocks in enumerate(message_slices):
+                    is_last_slice = (i == len(message_slices) - 1)
+                    chunk_comps = staged_components if (is_last_slice and is_final) else None
+                    chunk_mod_map = modals_map if (is_last_slice and is_final) else None
+                    chunk_dispatcher = interaction_dispatcher if (is_last_slice and is_final) else None
 
-                slice_files = self.get_slice_attachments(slice_blocks) if is_final else []
-                attachments_list = slice_files if slice_files else discord.utils.MISSING
+                    layout_view = build_v2_message_layout(
+                        guild=self.guild,
+                        timeline_blocks=slice_blocks,
+                        staged_components=chunk_comps,
+                        staged_artifacts=staged_artifacts,
+                        modals_map=chunk_mod_map,
+                        interaction_dispatcher=chunk_dispatcher,
+                        thought_duration=thought_duration if is_last_slice else 0,
+                        has_thoughts=has_thoughts if is_last_slice else False,
+                        active_version=active_version,
+                        total_versions=total_versions,
+                        message_id=target_msg_id if is_last_slice else None,
+                        is_live_stream=not is_final,
+                        live_status_text=live_status_text if (is_last_slice and not is_final) else None
+                    )
 
-                if self.interaction:
-                    if i == 0:
-                        if attachments_list is not discord.utils.MISSING:
-                            await self.interaction.edit_original_response(view=layout_view, attachments=attachments_list)
-                        else:
-                            await self.interaction.edit_original_response(view=layout_view)
-                    else:
-                        if i >= self.interaction_overflow_count:
+                    slice_files = self.get_slice_attachments(slice_blocks) if is_final else []
+                    attachments_list = slice_files if slice_files else discord.utils.MISSING
+
+                    if self.interaction:
+                        if i == 0:
                             if attachments_list is not discord.utils.MISSING:
-                                await self.interaction.followup.send(view=layout_view, files=slice_files, ephemeral=self.is_ephemeral)
+                                await self.interaction.edit_original_response(view=layout_view, attachments=attachments_list)
                             else:
-                                await self.interaction.followup.send(view=layout_view, ephemeral=self.is_ephemeral)
-                            self.interaction_overflow_count += 1
-                else:
-                    if i < len(self.sent_messages):
-                        msg = self.sent_messages[i]
-                        if attachments_list is not discord.utils.MISSING:
-                            await msg.edit(view=layout_view, attachments=attachments_list)
+                                await self.interaction.edit_original_response(view=layout_view)
                         else:
-                            await msg.edit(view=layout_view)
+                            if i >= self.interaction_overflow_count:
+                                if attachments_list is not discord.utils.MISSING:
+                                    await self.interaction.followup.send(view=layout_view, files=slice_files, ephemeral=self.is_ephemeral)
+                                else:
+                                    await self.interaction.followup.send(view=layout_view, ephemeral=self.is_ephemeral)
+                                self.interaction_overflow_count += 1
                     else:
-                        target_chan = self.origin_message.channel if self.origin_message else (self.primary_message.channel if self.primary_message else None)
-                        if target_chan:
+                        if i < len(self.sent_messages):
+                            msg = self.sent_messages[i]
                             if attachments_list is not discord.utils.MISSING:
-                                new_msg = await target_chan.send(view=layout_view, files=slice_files)
+                                await msg.edit(view=layout_view, attachments=attachments_list)
                             else:
-                                new_msg = await target_chan.send(view=layout_view)
-                            self.sent_messages.append(new_msg)
+                                await msg.edit(view=layout_view)
+                        else:
+                            target_chan = self.origin_message.channel if self.origin_message else (self.primary_message.channel if self.primary_message else None)
+                            if target_chan:
+                                if attachments_list is not discord.utils.MISSING:
+                                    new_msg = await target_chan.send(view=layout_view, files=slice_files)
+                                else:
+                                    new_msg = await target_chan.send(view=layout_view)
+                                self.sent_messages.append(new_msg)
 
-            self.last_edit_time = asyncio.get_event_loop().time()
-        except discord.DiscordServerError:
-            pass
-        except Exception as e:
-            logger.warning(f"Components V2 stream flush warning: {e}")
-        finally:
-            self.is_flushing = False
+                self.last_edit_time = asyncio.get_event_loop().time()
+            except discord.DiscordServerError:
+                pass
+            except Exception as e:
+                logger.warning(f"Components V2 stream flush warning: {e}")
 
     async def finalize(
         self,
@@ -633,5 +641,6 @@ class DiscordStreamDispatcher:
             active_version=active_version,
             total_versions=total_versions,
             message_id=message_id,
-            is_final=True
+            is_final=True,
+            live_status_text=None
         )

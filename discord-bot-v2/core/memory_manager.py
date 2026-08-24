@@ -7,6 +7,7 @@ import sqlite3
 import asyncio
 import logging
 from typing import Any
+from pydantic import BaseModel, Field
 from google.genai import types
 from core.client_manager import client_manager
 
@@ -17,6 +18,27 @@ DB_PATH = os.path.join(BASE_DIR, "priestyai.db")
 
 EMBEDDING_MODELS = ["gemini-embedding-001", "gemini-embedding-2"]
 OUTPUT_DIMENSIONALITY = 768
+
+class MemoryExtractionSchema(BaseModel):
+    has_memories: bool = Field(description="True if durable personal facts or server lore should be saved, False if query is generic")
+    user_facts: list[str] = Field(default_factory=list, description="Clear, concise personal facts about the user (e.g. 'User develops in Rust', 'User prefers dark mode', 'User builds bots with serenity-rs'). Empty if none.")
+    server_lore: list[str] = Field(default_factory=list, description="Durable server project facts or guild lore (e.g. 'Project Nebula is targeting a Q3 release'). Empty if none.")
+
+MEMORY_EXTRACTOR_INSTRUCTION = """You are the background long-term memory extractor for PriestyAI.
+Analyze the user's prompt and extract any durable, high-value facts worth remembering.
+
+WHAT TO SAVE:
+- User Identity / Background / Experience (e.g. "I'm a senior frontend dev", "My name is Sam")
+- Tech Stack / Languages / Preferences (e.g. "I use Arch Linux", "I write Rust and TypeScript", "I prefer concise code without comments")
+- Persistent Project Lore (e.g. "We are developing a 2D RPG called Aether", "Our server bot uses SQLite")
+
+WHAT TO IGNORE (DO NOT SAVE):
+- Fleeting questions ("what's the weather in Tokyo", "explain Dijkstra's algorithm")
+- One-off debugging requests ("why is this while-loop crashing")
+- Casual banter, greetings, or temporary hypothetical roleplay
+
+Output a strict JSON adhering to the schema.
+"""
 
 def pack_vector(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
@@ -163,6 +185,57 @@ class MemoryManager:
             "category": cat_clean,
             "message": f"Successfully remembered into {cat_clean} storage."
         }
+
+    async def auto_extract_and_store_async(
+        self,
+        user_id: int | str,
+        guild_id: int | str | None,
+        prompt_text: str,
+        user_memory_policy: str = "read_write",
+        server_lore_policy: str = "read_write"
+    ):
+        if user_memory_policy != "read_write" and server_lore_policy != "read_write":
+            return
+
+        if len(prompt_text.strip()) < 15:
+            return
+
+        client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite")
+        if not client:
+            return
+
+        try:
+            config = types.GenerateContentConfig(
+                system_instruction=MEMORY_EXTRACTOR_INSTRUCTION,
+                response_mime_type="application/json",
+                response_schema=MemoryExtractionSchema,
+                temperature=0.0
+            )
+
+            res = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=active_model,
+                    contents=f"User Query:\n{prompt_text.strip()[:2000]}",
+                    config=config
+                ),
+                timeout=2.5
+            )
+
+            if res.text:
+                data = json.loads(res.text)
+                extraction = MemoryExtractionSchema(**data)
+
+                if extraction.has_memories:
+                    if user_memory_policy == "read_write" and extraction.user_facts:
+                        for fact in extraction.user_facts:
+                            await self.remember(category="user", entity_id=str(user_id), memory_text=fact, importance=0.8)
+
+                    if server_lore_policy == "read_write" and guild_id and extraction.server_lore:
+                        for lore in extraction.server_lore:
+                            await self.remember(category="server", entity_id=str(guild_id), memory_text=lore, importance=0.7)
+
+        except Exception as e:
+            logger.debug(f"Background auto-memory extraction skipped: {e}")
 
     def get_memory_by_id(self, memory_id: int) -> dict[str, Any] | None:
         with self._get_connection() as conn:

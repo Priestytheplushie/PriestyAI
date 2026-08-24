@@ -1,171 +1,153 @@
 import re
 import time
-import httpx
 import urllib.parse
 import logging
+import httpx
 from typing import Any
-from bs4 import BeautifulSoup
 from tools.registry import tool_registry, ToolExecutionContext
+from core.searxng_client import searxng_client
 
 logger = logging.getLogger("PriestyAI.MediaTools")
 
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9"
+DOWNLOAD_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "image/avif,image/webp,image/apng,image/jpeg,image/png,*/*;q=0.8"
 }
 
-def clean_image_query(query: str) -> str:
-    cleaned = re.sub(r'(?i)\b(image of|photo of|picture of|screenshot of|high resolution|4k|hd|wallpaper|epic|ultra|vs|versus)\b', '', query)
-    return " ".join(cleaned.split()).strip()
+def detect_image_format(data: bytes) -> str | None:
+    if len(data) < 16:
+        return None
 
-async def _search_openverse(query: str) -> list[dict[str, Any]]:
-    url = f"https://api.openverse.org/v1/images/?q={urllib.parse.quote(query)}&page_size=6"
-    try:
-        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-            resp = await client.get(url, headers=BROWSER_HEADERS)
-            if resp.status_code == 200:
-                data = resp.json()
-                results = []
-                for item in data.get("results", []):
-                    img_url = item.get("url")
-                    if img_url and img_url.startswith("http"):
-                        results.append({
-                            "title": item.get("title") or query,
-                            "url": img_url,
-                            "source": "Openverse / CreativeCommons"
-                        })
-                return results
-    except Exception as e:
-        logger.debug(f"Openverse search error: {e}")
-    return []
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "webp"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "gif"
 
-async def _search_wikimedia(query: str) -> list[dict[str, Any]]:
-    url = (
-        f"https://commons.wikimedia.org/w/api.php?action=query&generator=search"
-        f"&gsrsearch={urllib.parse.quote(query)}&gsrnamespace=6&gsrlimit=6"
-        f"&prop=imageinfo&iiprop=url|mime&format=json"
-    )
-    try:
-        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-            resp = await client.get(url, headers=BROWSER_HEADERS)
-            if resp.status_code == 200:
-                data = resp.json()
-                pages = data.get("query", {}).get("pages", {})
-                results = []
-                for _, p in pages.items():
-                    infos = p.get("imageinfo", [])
-                    if infos:
-                        img_url = infos[0].get("url")
-                        mime = infos[0].get("mime", "")
-                        if img_url and ("image" in mime or img_url.endswith((".png", ".jpg", ".jpeg", ".webp"))):
-                            results.append({
-                                "title": p.get("title", query).replace("File:", ""),
-                                "url": img_url,
-                                "source": "Wikimedia Commons"
-                            })
-                return results
-    except Exception as e:
-        logger.debug(f"Wikimedia search error: {e}")
-    return []
+    return None
 
-async def _search_bing_images(query: str) -> list[dict[str, Any]]:
-    url = f"https://www.bing.com/images/search?q={urllib.parse.quote(query)}&form=HDRSC2&first=1"
-    try:
-        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
-            resp = await client.get(url, headers=BROWSER_HEADERS)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                results = []
-                for link in soup.find_all("a", class_="iusc"):
-                    m_attr = link.get("m")
-                    if m_attr and '"murl":"' in m_attr:
-                        match = re.search(r'"murl":"(https?://[^"]+)"', m_attr)
-                        if match:
-                            murl = match.group(1).replace("\\/", "/")
-                            results.append({
-                                "title": query,
-                                "url": murl,
-                                "source": "Bing Web Images"
-                            })
-                            if len(results) >= 5:
-                                break
-                return results
-    except Exception as e:
-        logger.debug(f"Bing images fallback error: {e}")
-    return []
+def is_relevant_candidate(query: str, title: str, image_url: str) -> bool:
+    stopwords = {"official", "key", "art", "render", "image", "photo", "picture", "png", "jpg", "the", "a", "of", "in", "for", "with", "character"}
+    query_words = [w.lower() for w in re.findall(r'[a-zA-Z0-9]+', query) if len(w) >= 3 and w.lower() not in stopwords]
+    
+    if not query_words:
+        return True
+
+    target_text = f"{title} {image_url}".lower()
+
+    matches = [qw for qw in query_words if qw in target_text]
+
+    if len(query_words) >= 3:
+        return len(matches) >= 2
+    
+    return len(matches) >= 1
 
 @tool_registry.register(
-    name="fetch_image",
+    name="search_image",
     description=(
-        "Searches the web for real-world photos, screenshots, product designs, or official logos.\n"
-        "Automatically attaches the retrieved image directly into your response in an in-stream MediaGallery.\n"
-        "Use this whenever explaining visual concepts, comparisons (e.g. games, devices, cars), landmarks, or brands."
+        "MANDATORY tool to find, look up, and attach real-world pictures, character renders, "
+        "game art, screenshots, mob renders, items, hardware, or photos to your response in a single step.\n"
+        "Parameters:\n"
+        "- query: The exact entity name and context (e.g. 'Luna mo.co character official art', 'Minecraft Warden render png', 'PlayStation 5 Pro console photo').\n"
+        "- caption: Optional short title or caption describing the asset."
     )
 )
-async def fetch_image(
+async def search_image(
     query: str,
+    caption: str = "",
     context: ToolExecutionContext = None
 ) -> dict[str, Any]:
-    clean_q = clean_image_query(query)
-    logger.info(f"[fetch_image] Search: '{clean_q}' (Raw: '{query}')")
+    if not query or not query.strip():
+        return {"error": "Search query cannot be empty."}
 
-    results = await _search_openverse(clean_q)
+    if context and context.staged_image_bytes:
+        return {
+            "status": "already_attached",
+            "message": "An image is already attached for this turn.",
+            "filename": context.staged_image_filename
+        }
 
-    if not results:
-        results = await _search_wikimedia(clean_q)
+    logger.info(f"[search_image] Starting visual image search via SearXNG for: '{query}'")
 
-    if not results:
-        logger.info(f"[fetch_image] Openverse/Wiki empty. Running Bing search for '{clean_q}'...")
-        results = await _search_bing_images(clean_q)
+    candidates = await searxng_client.search_images(query=query, limit=10)
+    if not candidates:
+        logger.warning(f"[search_image] No candidate images returned for '{query}'.")
+        return {
+            "status": "no_results",
+            "query": query,
+            "message": f"No high-resolution images found for '{query}'. Do not loop queries. Explain naturally to the user."
+        }
 
-    if not results and len(clean_q.split()) > 1:
-        core_word = clean_q.split()[0]
-        logger.info(f"[fetch_image] Retrying with core subject: '{core_word}'...")
-        results = await _search_bing_images(core_word) or await _search_openverse(core_word)
+    async with httpx.AsyncClient(timeout=7.0, follow_redirects=True) as client:
+        for cand in candidates:
+            img_url = cand.get("image_url", "")
+            title = cand.get("title") or caption or query
+            source = cand.get("source", "Web")
 
-    if not results:
-        return {"status": "not_found", "query": query, "message": "No images found for this query."}
+            if not img_url.startswith("http"):
+                continue
 
-    downloaded = False
-    for candidate in results[:4]:
-        img_url = candidate.get("url")
-        if not img_url:
-            continue
+            if not is_relevant_candidate(query, title, img_url):
+                logger.debug(f"[search_image] Skipping non-matching candidate '{title}' for query '{query}'")
+                continue
 
-        try:
-            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-                resp = await client.get(img_url, headers=BROWSER_HEADERS)
-                if resp.status_code == 200 and len(resp.content) > 2048:
-                    content_type = resp.headers.get("content-type", "").lower()
-                    if "image" in content_type or img_url.endswith((".png", ".jpg", ".jpeg", ".webp")):
-                        ext = "png"
-                        if "jpeg" in content_type or "jpg" in content_type or ".jpg" in img_url:
-                            ext = "jpg"
-                        elif "webp" in content_type or ".webp" in img_url:
-                            ext = "webp"
+            try:
+                resp = await client.get(img_url, headers=DOWNLOAD_HEADERS)
+                content_type = resp.headers.get("content-type", "").lower()
+                size_bytes = len(resp.content)
 
-                        if context:
-                            context.staged_image_bytes = resp.content
-                            context.staged_image_filename = f"fetch_{int(time.time()*1000)}.{ext}"
-                            downloaded = True
-                            logger.info(f"[fetch_image] Successfully downloaded {len(resp.content)} bytes from '{candidate['source']}'.")
-                            return {
-                                "status": "fetched",
-                                "title": candidate.get("title", clean_q),
-                                "source": candidate.get("source", "Web"),
-                                "image_url": img_url,
-                                "filename": context.staged_image_filename
-                            }
-        except Exception as e:
-            logger.debug(f"[fetch_image] Candidate download failed for {img_url}: {e}")
+                if "svg" in content_type or "text/" in content_type or "html" in content_type:
+                    logger.debug(f"[search_image] Skipping non-raster format ({content_type}) from {source}")
+                    continue
 
-    return {"status": "not_found", "query": query, "message": "Failed to download image from available candidates."}
+                if size_bytes < 15000:
+                    logger.debug(f"[search_image] Skipping undersized asset ({size_bytes:,} bytes) from {source}")
+                    continue
+
+                detected_ext = detect_image_format(resp.content)
+                if not detected_ext:
+                    logger.debug(f"[search_image] Header magic bytes verification failed for {img_url[:60]}")
+                    continue
+
+                filename = f"search_{int(time.time() * 1000)}.{detected_ext}"
+
+                if context:
+                    context.staged_image_bytes = resp.content
+                    context.staged_image_filename = filename
+
+                logger.info(f"[search_image] Validated and attached '{title}' ({size_bytes:,} bytes, {detected_ext.upper()}) from {source}")
+                return {
+                    "status": "attached",
+                    "title": title,
+                    "caption": caption,
+                    "query": query,
+                    "source": source,
+                    "image_url": img_url,
+                    "size_bytes": size_bytes,
+                    "filename": filename
+                }
+
+            except Exception as e:
+                logger.debug(f"[search_image] Candidate download error from {source}: {e}")
+
+    return {
+        "status": "download_failed",
+        "query": query,
+        "message": f"Candidate images for '{query}' were protected or corrupted. Do not retry in a loop."
+    }
 
 @tool_registry.register(
     name="generate_image",
     description=(
         "Generates an AI artwork or custom illustration from a detailed text prompt. "
+        "Use ONLY when the user explicitly asks to generate, draw, or paint artificial artwork or fantasy concepts.\n"
         "Automatically displays the generated artwork in-stream with your response."
     )
 )
@@ -190,8 +172,8 @@ async def generate_image(
             resp = await client.get(image_url)
             if resp.status_code == 200 and context:
                 context.staged_image_bytes = resp.content
-                context.staged_image_filename = f"gen_{int(time.time()*1000)}.png"
-                logger.info(f"[generate_image] Downloaded {len(resp.content)} bytes.")
+                context.staged_image_filename = f"gen_{int(time.time() * 1000)}.png"
+                logger.info(f"[generate_image] Downloaded {len(resp.content):,} bytes.")
             else:
                 logger.warning(f"[generate_image] Download failed with status {resp.status_code}")
     except Exception as e:

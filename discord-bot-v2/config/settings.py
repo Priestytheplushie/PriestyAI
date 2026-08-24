@@ -39,14 +39,16 @@ FLAGSHIP_MODELS = [
 ]
 
 LITE_MODELS = [
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash-lite"
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite"
 ]
 
 WORKHORSE_MODEL = "gemma-4-31b-it"
 
-ROUTER_PRIMARY = "gemini-3.1-flash-lite"
+ROUTER_PRIMARY = "gemini-3.5-flash-lite"
 ROUTER_FALLBACK = "gemini-3.5-flash-lite"
+
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080")
 
 LOADING_EMOJI = "<a:loading:1540750535093919906>"
 THINKING_EMOJI = "<:thinking:1540750574851723385>"

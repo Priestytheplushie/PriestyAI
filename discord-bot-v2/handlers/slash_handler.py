@@ -17,12 +17,18 @@ from core.client_manager import client_manager
 from core.memory_manager import memory_manager
 from core.config_manager import config_manager
 from core.branch_manager import branch_manager
-from core.moderation import check_moderation, generate_friendly_refusal, log_moderation_violation
+from core.moderation import (
+    check_moderation,
+    generate_friendly_refusal,
+    log_moderation_violation,
+    is_user_banned,
+    ban_user
+)
 from handlers.stream_handler import DiscordStreamDispatcher, build_v2_message_layout, apply_message_parsers
 from tools.registry import ToolExecutionContext
 from ui.thought_container import ThoughtContainerView, PlaceholderLayoutView
 from ui.context_views import BranchHeaderView, BranchTranscriptView
-from ui.onboarding_views import build_welcome_terms_modal
+from ui.onboarding_views import build_welcome_terms_modal, build_terms_review_modal, BannedUserNoticeView
 from ui.config_views import (
     ServerIdentityDashboardView,
     ConfigHelpView,
@@ -55,33 +61,36 @@ SETTINGS_SCOPE_MAP = {
 def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
     if tool_name in ["create_artifact", "update_artifact"]:
         t = args.get("title") or args.get("filename", "Artifact")
-        return f"-# 📦 Packaging artifact: **{t}**..."
+        return f"Packaging artifact: **{t}**..."
+    elif tool_name == "create_thread":
+        t = args.get("name", "Thread")[:25]
+        return f"Creating thread: **{t}**..."
     elif tool_name == "execute_code":
         lang = args.get("language", "Python").capitalize()
         pkgs = args.get("packages", "")
-        pkg_str = f" ({pkgs})" if pkg_str else ""
-        return f"-# 💻 Running {lang} sandbox{pkg_str}..."
+        pkg_str = f" ({pkgs})" if pkgs else ""
+        return f"Running {lang} sandbox{pkg_str}..."
     elif tool_name == "search_web":
         q = args.get("query", "")[:35]
-        return f'-# 🔍 Searching: "{q}"...'
+        return f'Searching: "{q}"...'
     elif tool_name == "read_link":
         url = args.get("url", "")
         domain = url.split("//")[-1].split("/")[0] if "//" in url else url[:30]
-        return f"-# 📄 Reading link from `{domain}`..."
-    elif tool_name == "fetch_image":
+        return f"Reading link from `{domain}`..."
+    elif tool_name == "search_image":
         q = args.get("query", "")[:30]
-        return f"-# 🖼️ Fetching image for '{q}'..."
+        return f"Finding image for '{q}'..."
     elif tool_name == "fetch_github":
         r = args.get("repo_url", "")[:30]
-        return f"-# 🐙 Inspecting GitHub repo `{r}`..."
+        return f"Inspecting GitHub repo `{r}`..."
     elif tool_name == "create_poll":
-        return "-# 📊 Creating Discord poll..."
+        return "Creating Discord poll..."
     elif tool_name == "calc":
-        return "-# 🔢 Computing math..."
+        return "Computing math..."
     elif tool_name == "generate_image":
-        return "-# 🎨 Rendering artwork..."
+        return "Rendering artwork..."
     elif tool_name == "ask_expert":
-        return "-# 🧠 Consulting deep reasoning expert..."
+        return "Consulting deep reasoning expert..."
     return None
 
 def format_placeholder_content(witty_text: str, subtext: str | None = None) -> str:
@@ -171,6 +180,24 @@ async def scope_autocomplete(interaction: discord.Interaction, current: str) -> 
 
 def setup_slash_commands(tree: app_commands.CommandTree):
 
+    @tree.command(name="terms", description="Review PriestyAI's Terms of Service, Safety Guidelines, and Moderation Policies")
+    @app_commands.allowed_installs(guilds=True, users=True)
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    async def terms_command(interaction: discord.Interaction):
+        if not config_manager.has_user_agreed(interaction.user.id):
+            async def on_terms_agreed(sub_inter: discord.Interaction):
+                await sub_inter.response.send_message(
+                    content="✅ **Terms Accepted:** Thank you for agreeing to the Terms of Service & Safety Guidelines! You can now use all PriestyAI features.",
+                    ephemeral=True
+                )
+
+            modal = build_welcome_terms_modal(on_agree_callback=on_terms_agreed)
+            await interaction.response.send_modal(modal)
+            return
+
+        modal = build_terms_review_modal()
+        await interaction.response.send_modal(modal)
+
     @tree.command(name="ask", description="Ask PriestyAI a quick question anywhere on Discord")
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -180,6 +207,11 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         app_commands.Choice(name="Ephemeral", value="private")
     ])
     async def ask_command(interaction: discord.Interaction, query: str, visibility: str = "public"):
+        if is_user_banned(interaction.user.id):
+            ban_view = BannedUserNoticeView(author=interaction.user)
+            await interaction.response.send_message(view=ban_view, ephemeral=True)
+            return
+
         if not config_manager.has_user_agreed(interaction.user.id):
             async def on_agreed(sub_inter: discord.Interaction):
                 await sub_inter.response.defer(ephemeral=(visibility == "private"))
@@ -194,12 +226,30 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         await _execute_ask(interaction, query, is_ephemeral=is_ephemeral)
 
     async def _execute_ask(interaction: discord.Interaction, query: str, is_ephemeral: bool):
-        is_flagged, flagged_cats, score = await check_moderation(query)
+        is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(query)
         if is_flagged:
             log_moderation_violation(interaction.user.id, interaction.guild_id, flagged_cats, score)
+
+            if is_zero_tolerance:
+                ban_user(interaction.user.id, reason=f"Zero-tolerance violation: {', '.join(flagged_cats)}")
+                ban_view = BannedUserNoticeView(author=interaction.user)
+                await interaction.followup.send(view=ban_view, ephemeral=True)
+                return
+
             refusal_text = await generate_friendly_refusal(flagged_cats)
             await interaction.followup.send(content=refusal_text, ephemeral=is_ephemeral)
             return
+
+        cfg = config_manager.resolve_effective_config(interaction.guild_id, getattr(interaction.channel, "id", None), interaction.user.id)
+        asyncio.create_task(
+            memory_manager.auto_extract_and_store_async(
+                user_id=interaction.user.id,
+                guild_id=interaction.guild_id,
+                prompt_text=query,
+                user_memory_policy=cfg.get("user_memory_policy", "read_write"),
+                server_lore_policy=cfg.get("server_lore_policy", "read_write")
+            )
+        )
 
         thinking_start_time = time.time()
         stream_dispatcher = DiscordStreamDispatcher(interaction=interaction, is_ephemeral=is_ephemeral, guild=interaction.guild)
@@ -245,7 +295,7 @@ def setup_slash_commands(tree: app_commands.CommandTree):
                         if art_bytes:
                             stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
 
-                    elif t_name in ["generate_image", "fetch_image", "execute_code"] and tool_context.staged_image_bytes:
+                    elif t_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
                         img_fname = tool_context.staged_image_filename
                         img_bytes = tool_context.staged_image_bytes
                         stream_dispatcher.add_media_block(img_fname, img_bytes)
@@ -289,6 +339,11 @@ def setup_slash_commands(tree: app_commands.CommandTree):
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def chat_command(interaction: discord.Interaction):
+        if is_user_banned(interaction.user.id):
+            ban_view = BannedUserNoticeView(author=interaction.user)
+            await interaction.response.send_message(view=ban_view, ephemeral=True)
+            return
+
         if not config_manager.has_user_agreed(interaction.user.id):
             async def on_agreed_chat(sub_inter: discord.Interaction):
                 await _open_chat_modal(sub_inter)
@@ -322,9 +377,16 @@ def setup_slash_commands(tree: app_commands.CommandTree):
                 await sub_inter.response.send_message(content="Please provide a message to begin.", ephemeral=True)
                 return
 
-            is_flagged, flagged_cats, score = await check_moderation(user_text)
+            is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(user_text)
             if is_flagged:
                 log_moderation_violation(sub_inter.user.id, sub_inter.guild_id, flagged_cats, score)
+
+                if is_zero_tolerance:
+                    ban_user(sub_inter.user.id, reason=f"Zero-tolerance violation: {', '.join(flagged_cats)}")
+                    ban_view = BannedUserNoticeView(author=sub_inter.user)
+                    await sub_inter.response.send_message(view=ban_view, ephemeral=True)
+                    return
+
                 refusal_text = await generate_friendly_refusal(flagged_cats)
                 await sub_inter.response.send_message(content=refusal_text, ephemeral=True)
                 return
@@ -537,7 +599,7 @@ def setup_slash_commands(tree: app_commands.CommandTree):
                 allowed_bundles = data.get("allowed_tools", [])
                 all_tools = {
                     "create_artifact", "execute_code", "search_web", "read_link", "generate_image",
-                    "fetch_image", "calc", "fetch_github", "create_poll",
+                    "search_image", "calc", "fetch_github", "create_poll",
                     "react", "add_component", "add_modal", "remember", "forget",
                     "read_message_history", "search_channel_history", "ask_expert",
                     "get_user_profile", "get_server_info", "create_thread"
@@ -597,7 +659,10 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         except Exception:
             pass
 
-        thread = await interaction.channel.create_thread(name=title, type=discord.ChannelType.public_thread)
+        try:
+            thread = await message.create_thread(name=title)
+        except Exception:
+            thread = await interaction.channel.create_thread(name=title, type=discord.ChannelType.public_thread)
 
         try:
             await thread.add_user(interaction.user)
@@ -624,15 +689,6 @@ def setup_slash_commands(tree: app_commands.CommandTree):
             messages=history_msgs
         )
 
-        header_card_text = (
-            f"# Branch: {title}\n"
-            f"Created from message: {message.jump_url}\n\n"
-            f"**Notes:**\n"
-            f"- Message context is preserved through deletion.\n"
-            f"- PriestyAI will automatically respond in this thread without @mentions."
-        )
-        header_view = BranchHeaderView(branch_id=branch_id)
-        await thread.send(content=header_card_text, view=header_view)
         await interaction.followup.send(content=f"🧵 **Branch Created:** Joined thread <#{thread.id}>.", ephemeral=True)
 
     @tree.context_menu(name="Retry")
@@ -789,7 +845,7 @@ def setup_slash_commands(tree: app_commands.CommandTree):
                         if art_bytes:
                             stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
 
-                    elif tool_name in ["generate_image", "fetch_image", "execute_code"] and tool_context.staged_image_bytes:
+                    elif tool_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
                         img_fname = tool_context.staged_image_filename
                         img_bytes = tool_context.staged_image_bytes
                         stream_dispatcher.add_media_block(img_fname, img_bytes)
@@ -976,4 +1032,4 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         )
         await interaction.response.send_modal(modal)
 
-    logger.info("Registered Slash Commands & Context Menus: /ask, /chat, /data, /config, Branch, Retry, View Prompt, Edit.")
+    logger.info("Registered Slash Commands & Context Menus: /terms, /ask, /chat, /data, /config, Branch, Retry, View Prompt, Edit.")

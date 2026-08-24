@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any
 import discord
@@ -28,61 +29,57 @@ async def _resolve_channel(channel_id: str | None, context: ToolExecutionContext
 
     return context.channel
 
-def create_ui_component(comp_data: dict[str, Any]) -> Item:
-    c_type = comp_data.get("type", "").lower()
-    c_id = comp_data.get("custom_id")
-    placeholder = comp_data.get("placeholder") or None
-    min_v = comp_data.get("min_values", 1)
-    max_v = comp_data.get("max_values", 1)
-    disabled = comp_data.get("disabled", False)
-
-    if c_type == "user_select":
-        return UserSelect(custom_id=c_id, placeholder=placeholder, min_values=min_v, max_values=max_v, disabled=disabled)
-    elif c_type == "role_select":
-        return RoleSelect(custom_id=c_id, placeholder=placeholder, min_values=min_v, max_values=max_v, disabled=disabled)
-    elif c_type == "channel_select":
-        ch_types = []
-        if "channel_types" in comp_data and isinstance(comp_data["channel_types"], list):
-            for ct in comp_data["channel_types"]:
-                if hasattr(discord.ChannelType, ct.lower()):
-                    ch_types.append(getattr(discord.ChannelType, ct.lower()))
-        return ChannelSelect(
-            custom_id=c_id,
-            placeholder=placeholder,
-            min_values=min_v,
-            max_values=max_v,
-            disabled=disabled,
-            channel_types=ch_types or None
-        )
-    elif c_type == "mentionable_select":
-        return MentionableSelect(custom_id=c_id, placeholder=placeholder, min_values=min_v, max_values=max_v, disabled=disabled)
-    elif c_type in ["select", "string_select"]:
-        opts = [discord.SelectOption(**opt) for opt in comp_data.get("options", [])]
-        return Select(custom_id=c_id, placeholder=placeholder, options=opts, min_values=min_v, max_values=max_v, disabled=disabled)
-    else:
-        style_val = getattr(discord.ButtonStyle, comp_data.get("style", "secondary").lower(), discord.ButtonStyle.secondary)
-        return Button(label=comp_data.get("label", "Button"), custom_id=c_id, style=style_val, disabled=disabled)
+def normalize_component_type(component_type: str) -> str:
+    cleaned = component_type.lower().strip().replace(" ", "_")
+    mapping = {
+        "button": "button",
+        "btn": "button",
+        "select": "string_select",
+        "string_select": "string_select",
+        "stringselect": "string_select",
+        "user_select": "user_select",
+        "userselect": "user_select",
+        "role_select": "role_select",
+        "roleselect": "role_select",
+        "channel_select": "channel_select",
+        "channelselect": "channel_select",
+        "mentionable_select": "mentionable_select",
+        "mentionableselect": "mentionable_select"
+    }
+    return mapping.get(cleaned, cleaned)
 
 @tool_registry.register(
     name="add_component",
-    description="Stages interactive Discord UI components (UserSelect, RoleSelect, ChannelSelect, MentionableSelect, StringSelect, or Button)."
+    description=(
+        "Stages interactive Discord UI components to attach to your response.\n"
+        "Supported component_type values:\n"
+        "- 'Button': Clickable action button (set label, style: 'primary'|'secondary'|'success'|'danger', or modal_id)\n"
+        "- 'StringSelect': Dropdown menu with custom text options (provide options: [{'label':'...','value':'...','description':'...'}])\n"
+        "- 'UserSelect': Native Discord user/member picker dropdown\n"
+        "- 'RoleSelect': Native Discord server role picker dropdown\n"
+        "- 'ChannelSelect': Native Discord channel picker dropdown (optional channel_types: ['text', 'voice'])\n"
+        "- 'MentionableSelect': Native Discord user OR role picker dropdown\n"
+        "Supports multi-select via min_values and max_values (1 to 25)."
+    )
 )
 async def add_component(
     component_type: str,
     custom_id: str = "",
+    modal_id: str | None = None,
     label: str = "",
     placeholder: str = "",
-    options: list[dict[str, Any]] | None = None,
+    options: Any = None,
     channel_types: list[str] | None = None,
     min_values: int = 1,
     max_values: int = 1,
+    style: str = "secondary",
     disabled: bool = False,
     context: ToolExecutionContext = None
 ) -> dict[str, Any]:
-    c_type = component_type.lower().strip()
+    c_type = normalize_component_type(component_type)
     valid_types = {
-        "button", "select", "string_select",
-        "user_select", "role_select", "channel_select", "mentionable_select"
+        "button", "string_select", "user_select",
+        "role_select", "channel_select", "mentionable_select"
     }
 
     if c_type not in valid_types:
@@ -91,19 +88,31 @@ async def add_component(
         }
 
     comp_id = custom_id or f"comp_{c_type}_{id(context)}"
+    target_modal_id = modal_id or (comp_id if c_type == "button" else None)
+
+    parsed_options = options
+    if isinstance(parsed_options, str):
+        try:
+            parsed_options = json.loads(parsed_options)
+        except Exception:
+            parsed_options = []
+    elif not isinstance(parsed_options, list):
+        parsed_options = []
 
     component_payload = {
         "type": c_type,
         "custom_id": comp_id,
+        "modal_id": target_modal_id,
         "label": label,
         "placeholder": placeholder,
-        "min_values": min_values,
-        "max_values": max_values,
+        "min_values": max(0, int(min_values)),
+        "max_values": max(1, min(25, int(max_values))),
+        "style": style.lower().strip(),
         "disabled": disabled
     }
 
-    if c_type in ["select", "string_select"]:
-        component_payload["options"] = options or []
+    if c_type == "string_select":
+        component_payload["options"] = parsed_options
     elif c_type == "channel_select" and channel_types:
         component_payload["channel_types"] = channel_types
 
@@ -112,32 +121,14 @@ async def add_component(
             context.staged_components = []
         context.staged_components.append(component_payload)
 
+    logger.info(f"[add_component] Staged '{c_type}' (ID: '{comp_id}', min: {min_values}, max: {max_values})")
     return {
         "status": "staged",
         "component_type": c_type,
         "custom_id": comp_id,
+        "modal_id": target_modal_id,
         "details": component_payload
     }
-
-@tool_registry.register(
-    name="send_message",
-    description="Sends a text message to a specific channel or the current channel."
-)
-async def send_message(content: str, channel_id: str = "", context: ToolExecutionContext = None) -> dict[str, Any]:
-    target_channel = await _resolve_channel(channel_id, context)
-    if not target_channel:
-        return {"error": "Target channel could not be resolved."}
-
-    try:
-        msg = await target_channel.send(content=content)
-        return {
-            "status": "sent",
-            "message_id": str(msg.id),
-            "channel": getattr(target_channel, "name", "DM"),
-            "content": content[:100]
-        }
-    except Exception as e:
-        return {"error": f"Failed to send message: {str(e)}"}
 
 @tool_registry.register(
     name="react",

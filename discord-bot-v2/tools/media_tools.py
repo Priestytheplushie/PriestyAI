@@ -10,8 +10,8 @@ logger = logging.getLogger("PriestyAI.MediaTools")
 @tool_registry.register(
     name="generate_image",
     description=(
-        "Generates a high-quality AI image from a text prompt via Pollinations AI. "
-        "Automatically downloads and attaches the artwork directly to your response message."
+        "Generates an AI image from a text prompt. "
+        "Automatically displays the generated artwork with your response."
     )
 )
 async def generate_image(
@@ -36,7 +36,7 @@ async def generate_image(
             if resp.status_code == 200 and context:
                 context.staged_image_bytes = resp.content
                 context.staged_image_filename = f"image_{int(time.time())}.png"
-                logger.info(f"[generate_image] Downloaded {len(resp.content)} bytes for native attachment.")
+                logger.info(f"[generate_image] Downloaded {len(resp.content)} bytes.")
             else:
                 logger.warning(f"[generate_image] Download failed with status {resp.status_code}")
     except Exception as e:
@@ -46,6 +46,5 @@ async def generate_image(
         "status": "generated",
         "image_url": image_url,
         "prompt": prompt,
-        "dimensions": f"{width}x{height}",
-        "message": "Image rendered and attached directly to the message."
+        "dimensions": f"{width}x{height}"
     }

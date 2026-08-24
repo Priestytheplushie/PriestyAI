@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any, Callable
 import discord
@@ -25,12 +26,12 @@ TOOL_META_MAP = {
     "search_web": ("🔍", "Web Search"),
     "read_link": ("📄", "Article Reader"),
     "ask_expert": ("🧠", "Deep Reasoning"),
-    "generate_image": ("🎨", "Image Studio"),
+    "generate_image": ("🎨", "Image Generation"),
     "create_thread": ("🧵", "Thread Created"),
     "get_user_profile": ("👤", "User Profile"),
     "get_server_info": ("🏰", "Server Details"),
     "add_modal": ("📋", "Interactive Form"),
-    "add_component": ("🔘", "Interactive Button"),
+    "add_component": ("🔘", "Interactive Component"),
     "send_message": ("💬", "Sent Message"),
     "read_message_history": ("📜", "Chat History"),
     "search_channel_history": ("🔎", "Channel Search"),
@@ -67,7 +68,23 @@ def format_tool_display_text(tool_name: str, args: dict[str, Any], result: dict[
         return f"{icon} Generated **Image** {time_tag}".strip()
     elif tool_name == "add_modal":
         t = args.get("title", "Form")[:25]
-        return f"{icon} Staged **Form** (`{t}`)".strip()
+        return f"📋 Staged **Modal Form** (`{t}`)".strip()
+    elif tool_name == "add_component":
+        raw_type = str(args.get("component_type", "component")).lower().strip().replace(" ", "_")
+        type_names = {
+            "button": ("🔘", "Button"),
+            "btn": ("🔘", "Button"),
+            "string_select": ("📋", "Select Menu"),
+            "select": ("📋", "Select Menu"),
+            "user_select": ("👥", "User Select"),
+            "role_select": ("🛡️", "Role Select"),
+            "channel_select": ("📢", "Channel Select"),
+            "mentionable_select": ("🎯", "Mentionable Select")
+        }
+        c_icon, c_name = type_names.get(raw_type, ("🔘", "Component"))
+        lbl = args.get("label") or args.get("placeholder") or args.get("custom_id", "")
+        label_part = f" (`{lbl[:25]}`)" if lbl else ""
+        return f"{c_icon} Staged **{c_name}**{label_part}".strip()
 
     return f"{icon} Used **{name_clean}** {time_tag}".strip()
 
@@ -95,6 +112,14 @@ class ToolInspectorView(LayoutView):
             header_line = "💾 **PriestyAI will remember that.**"
         elif name == "forget":
             header_line = "🧹 **PriestyAI will forget that.**"
+        elif name == "add_component":
+            raw_type = str(args.get("component_type", "component")).lower().strip().replace(" ", "_")
+            type_icons = {
+                "button": "🔘", "string_select": "📋", "user_select": "👥",
+                "role_select": "🛡️", "channel_select": "📢", "mentionable_select": "🎯"
+            }
+            c_icon = type_icons.get(raw_type, "🔘")
+            header_line = f"{c_icon} **Interactive Component:** `{raw_type.replace('_', ' ').title()}`"
         else:
             header_line = f"{icon} **{name_clean}**"
 
@@ -109,53 +134,82 @@ class ToolInspectorView(LayoutView):
             s_mems = result.get("server_lore", [])
             content_blocks = []
             if u_mems:
-                content_blocks.append("👤 **User Memories (Personal Profile):**")
+                content_blocks.append("👤 **User Profile Facts:**")
                 for m in u_mems:
-                    content_blocks.append(f"• `#{m['id']}` {m['text']} *-# ({int(m['similarity'] * 100)}% match)*")
+                    content_blocks.append(f"• {m['text']}")
             else:
-                content_blocks.append("👤 **User Memories:** *No specific user profile facts matched.*")
+                content_blocks.append("👤 **User Profile Facts:** *None found.*")
 
             content_blocks.append("")
 
             if s_mems:
-                content_blocks.append("🏰 **Server Lore (Guild Context):**")
+                content_blocks.append("🏰 **Server Lore:**")
                 for m in s_mems:
-                    content_blocks.append(f"• `#{m['id']}` {m['text']} *-# ({int(m['similarity'] * 100)}% match)*")
+                    content_blocks.append(f"• {m['text']}")
             else:
-                content_blocks.append("🏰 **Server Lore:** *No local server lore matched.*")
+                content_blocks.append("🏰 **Server Lore:** *None found.*")
 
             container.add_item(TextDisplay("\n".join(content_blocks) or "*No memory details available.*"))
 
+        elif name == "add_component":
+            c_type = args.get("component_type", "component")
+            c_id = args.get("custom_id", "*auto*")
+            placeholder = args.get("placeholder", "")
+            label = args.get("label", "")
+            min_v = args.get("min_values", 1)
+            max_v = args.get("max_values", 1)
+            modal_id = args.get("modal_id")
+            style = args.get("style", "secondary")
+
+            details = [
+                f"• **Component Type:** `{c_type}`",
+                f"• **Custom ID:** `{c_id}`"
+            ]
+            if label:
+                details.append(f"• **Label:** {label}")
+            if placeholder:
+                details.append(f"• **Placeholder:** {placeholder}")
+            if max_v > 1:
+                details.append(f"• **Multi-Select Limits:** `{min_v}` min, `{max_v}` max")
+            if style != "secondary":
+                details.append(f"• **Style:** `{style}`")
+            if modal_id:
+                details.append(f"• **Linked Modal Form:** `{modal_id}`")
+
+            container.add_item(TextDisplay("\n".join(details)))
+
+        elif name == "add_modal":
+            m_id = args.get("modal_id", "modal")
+            m_title = args.get("title", "Form")
+            fields = args.get("fields", [])
+            container.add_item(TextDisplay(f"• **Modal ID:** `{m_id}`\n• **Title:** {m_title}\n• **Total Fields:** `{len(fields)}`"))
+
         elif name == "remember":
-            cat = args.get("category", "user")
             txt = args.get("memory_text", "").strip() or "*No text provided*"
-            m_id = result.get("memory_id", "")
-            status = result.get("status", "saved")
-            container.add_item(TextDisplay(f"**Storage Scope:** `{cat.capitalize()} Memory` • `#{m_id}` ({status.capitalize()})\n\n**Stored Fact:**\n> *{txt}*"))
+            container.add_item(TextDisplay(f"**Remembered Fact:**\n> {txt}"))
 
         elif name == "forget":
-            m_id = args.get("memory_id", "")
             deleted = result.get("deleted_text", "").strip() or "*No text deleted*"
-            container.add_item(TextDisplay(f"**Forgotten Memory ID:** `#{m_id}`\n\n**Removed Statement:**\n> *{deleted}*"))
+            container.add_item(TextDisplay(f"**Removed Fact:**\n> {deleted}"))
 
         elif name == "react":
             emoji = args.get("emoji") or (result.get("emoji") if isinstance(result, dict) else "🎲")
-            container.add_item(TextDisplay(f"**Reaction Added:** {emoji}\n**Status:** Successfully added to message."))
+            container.add_item(TextDisplay(f"**Reaction:** {emoji}"))
 
         elif name == "execute_code":
             lang = args.get("language", "python")
             pkgs = result.get("installed_packages", args.get("packages", []))
             code = args.get("code", "").strip() or "# No code snippet"
             pkg_str = f" • Packages: `{pkgs}`" if pkgs else ""
-            container.add_item(TextDisplay(f"**Runtime:** `{lang}`{pkg_str}\n\n**Executed Code:**\n```{lang}\n{code}\n```"))
+            container.add_item(TextDisplay(f"**Runtime:** `{lang}`{pkg_str}\n\n```{lang}\n{code}\n```"))
 
             stdout = result.get("stdout", "").strip() if isinstance(result, dict) else ""
             stderr = result.get("stderr") if isinstance(result, dict) else None
 
             if stdout:
-                container.add_item(TextDisplay(f"**Console Output:**\n```text\n{stdout}\n```"))
+                container.add_item(TextDisplay(f"**Output:**\n```text\n{stdout}\n```"))
             if stderr:
-                container.add_item(TextDisplay(f"**Console Alerts / Stderr:**\n```text\n{stderr}\n```"))
+                container.add_item(TextDisplay(f"**Alerts:**\n```text\n{stderr}\n```"))
 
         elif name == "search_web":
             query = args.get("query", "") or "*None*"
@@ -172,18 +226,18 @@ class ToolInspectorView(LayoutView):
         elif name == "read_link":
             url = args.get("url", "")
             content = result.get('content', '').strip() if isinstance(result, dict) else ""
-            content_display = f"\n\n**Extracted Content:**\n```text\n{content}\n```" if content else ""
+            content_display = f"\n\n```text\n{content}\n```" if content else ""
             container.add_item(TextDisplay(f"**Source URL:** [Read Article]({url}){content_display}" if url else "**URL:** *Not provided*"))
 
         elif name == "ask_expert":
             question = args.get("question", "") or "*None*"
             solution = (result.get("solution", "") if isinstance(result, dict) else str(result)).strip() or "*No solution output*"
-            container.add_item(TextDisplay(f"**Consultation Question:** *{question}*\n\n**Expert Reasoning Solution:**\n```text\n{solution}\n```"))
+            container.add_item(TextDisplay(f"**Question:** *{question}*\n\n**Expert Solution:**\n{solution}"))
 
         elif name == "generate_image":
             prompt = args.get("prompt", "") or "*None*"
             dims = result.get("dimensions", "1024x1024") if isinstance(result, dict) else "1024x1024"
-            container.add_item(TextDisplay(f"**Artwork Prompt:** *{prompt}*\n**Resolution:** `{dims}`\n**Status:** Delivered as native file attachment."))
+            container.add_item(TextDisplay(f"**Prompt:** *{prompt}*\n**Size:** `{dims}`"))
 
         else:
             arg_lines = "\n".join([f"- **{k}:** `{v}`" for k, v in args.items()]) or "- *(No parameters)*"
@@ -191,7 +245,11 @@ class ToolInspectorView(LayoutView):
 
         container.add_item(Separator(visible=True))
 
-        back_btn = Button(label="◀ Back to Thoughts", style=discord.ButtonStyle.secondary)
+        back_btn = Button(
+            label="◀ Back to Thoughts",
+            style=discord.ButtonStyle.secondary,
+            custom_id="btn_back_thoughts"
+        )
         back_btn.callback = self.back_callback
         container.add_item(ActionRow(back_btn))
 
@@ -220,21 +278,24 @@ class ThoughtContainerView(LayoutView):
         self._refresh_content(raw_thoughts, tool_calls, duration_seconds, is_thinking)
 
     def _refresh_content(self, raw_thoughts: str, tool_calls: list[dict[str, Any]], duration_seconds: int, is_thinking: bool):
-        self.raw_thoughts = raw_thoughts
-        self.tool_calls = tool_calls
-        self.duration_seconds = duration_seconds
+        if raw_thoughts.strip():
+            self.raw_thoughts = raw_thoughts
+        if tool_calls:
+            self.tool_calls = tool_calls
+
+        self.duration_seconds = max(self.duration_seconds, duration_seconds)
         self.is_thinking = is_thinking
 
-        if not raw_thoughts.strip() and tool_calls:
+        if not self.raw_thoughts.strip() and self.tool_calls:
             self.thought_blocks = [
-                "**Orchestrating Tool Actions**\nExecuting requested tools and analyzing parameters to formulate response."
+                "**Orchestrating Actions**\nExecuting requested tools and analyzing context."
             ]
-        elif not raw_thoughts.strip():
+        elif not self.raw_thoughts.strip():
             self.thought_blocks = [
-                "**Initializing Reasoning Loop**\nAnalyzing input query and preparing initial thought context."
+                "**Analyzing Request**\nProcessing input query and preparing context."
             ]
         else:
-            std_text = standardize_thoughts_text(raw_thoughts)
+            std_text = standardize_thoughts_text(self.raw_thoughts)
             self.thought_blocks = [b.strip() for b in std_text.split("\n\n") if b.strip()]
 
         self.pages = self._build_pages()
@@ -255,9 +316,14 @@ class ThoughtContainerView(LayoutView):
         num_tools = len(self.tool_calls)
 
         for i, tool_call in enumerate(self.tool_calls):
-            order = tool_call.get("order") or tool_call.get("index") or tool_call.get("step") or tool_call.get("thought_index")
-            if order is None:
-                order = (i + 1) * (num_thoughts / (num_tools + 1)) - 0.1 if num_thoughts > 0 else float(i)
+            tool_name = tool_call.get("name", "")
+            
+            if tool_name in ["recall_memories", "search_memories"] or tool_call.get("order") == -1.0:
+                order = -1.0 + (i * 0.001)
+            else:
+                order = tool_call.get("order") or tool_call.get("index") or tool_call.get("step") or tool_call.get("thought_index")
+                if order is None:
+                    order = (i + 1) * (num_thoughts / (num_tools + 1)) - 0.1 if num_thoughts > 0 else float(i)
 
             timeline.append({
                 "type": "tool",
@@ -323,7 +389,8 @@ class ThoughtContainerView(LayoutView):
 
                 acc_btn = Button(
                     label="View ↗",
-                    style=discord.ButtonStyle.secondary
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=f"btn_inspect_tool_{g_idx}"
                 )
                 acc_btn.callback = self._create_inspector_callback(tool_call)
 
@@ -337,20 +404,23 @@ class ThoughtContainerView(LayoutView):
             prev_btn = Button(
                 label="◀",
                 style=discord.ButtonStyle.primary,
-                disabled=(self.current_page == 0)
+                disabled=(self.current_page == 0),
+                custom_id="btn_prev_page"
             )
             prev_btn.callback = self._on_prev_page
 
             indicator_btn = Button(
                 label=f"Page {self.current_page + 1} / {total_pages}",
                 style=discord.ButtonStyle.secondary,
-                disabled=True
+                disabled=True,
+                custom_id="btn_page_indicator"
             )
 
             next_btn = Button(
                 label="▶",
                 style=discord.ButtonStyle.primary,
-                disabled=(self.current_page == total_pages - 1)
+                disabled=(self.current_page == total_pages - 1),
+                custom_id="btn_next_page"
             )
             next_btn.callback = self._on_next_page
 
@@ -370,10 +440,16 @@ class ThoughtContainerView(LayoutView):
                     self.parent_view.is_inspecting = False
                     self.parent_view.active_interaction = back_interaction
                 self._render_page()
-                await back_interaction.response.edit_message(view=self)
+                try:
+                    await back_interaction.response.edit_message(view=self)
+                except Exception as ex:
+                    logger.debug(f"Back button edit exception: {ex}")
 
             inspector = ToolInspectorView(tool_call, back_callback=back_to_container)
-            await interaction.response.edit_message(view=inspector)
+            try:
+                await interaction.response.edit_message(view=inspector)
+            except Exception as ex:
+                logger.debug(f"Inspect button edit exception: {ex}")
 
         return callback
 
@@ -384,8 +460,12 @@ class ThoughtContainerView(LayoutView):
             if self.parent_view:
                 self.parent_view.active_interaction = interaction
             self._render_page()
-            await interaction.response.edit_message(view=self)
-            self.is_paginating = False
+            try:
+                await interaction.response.edit_message(view=self)
+            except Exception as ex:
+                logger.debug(f"Prev page edit exception: {ex}")
+            finally:
+                self.is_paginating = False
 
     async def _on_next_page(self, interaction: discord.Interaction):
         if self.current_page < len(self.pages) - 1:
@@ -394,50 +474,83 @@ class ThoughtContainerView(LayoutView):
             if self.parent_view:
                 self.parent_view.active_interaction = interaction
             self._render_page()
-            await interaction.response.edit_message(view=self)
-            self.is_paginating = False
+            try:
+                await interaction.response.edit_message(view=self)
+            except Exception as ex:
+                logger.debug(f"Next page edit exception: {ex}")
+            finally:
+                self.is_paginating = False
 
 
-class ThinkingButtonView(View):
+class PlaceholderLayoutView(LayoutView):
     def __init__(
         self,
+        loading_text: str,
         duration_seconds: int = 0,
-        is_thinking: bool = True,
+        is_enabled: bool = False,
+        on_answer_now_callback: Callable | None = None,
         thought_data: dict[str, Any] | None = None
     ):
         super().__init__(timeout=900)
+        self.loading_text = loading_text
         self.duration_seconds = duration_seconds
-        self.is_thinking = is_thinking
+        self.is_enabled = is_enabled
+        self.on_answer_now_callback = on_answer_now_callback
         self.thought_data = thought_data or {"thoughts": "", "tool_calls": []}
-        
+
         self.active_container: ThoughtContainerView | None = None
         self.active_interaction: discord.Interaction | None = None
         self.is_inspecting: bool = False
+        self.update_lock = asyncio.Lock()
 
-        self.button = Button(
+        self.text_display = TextDisplay(self.loading_text)
+        self.answer_now_btn = Button(
+            label="Answer Now",
             style=discord.ButtonStyle.secondary,
-            custom_id="priesty_thought_btn"
+            custom_id="btn_answer_now"
         )
-        self.update_label(duration_seconds, is_thinking)
-        self.button.callback = self._on_button_click
-        self.add_item(self.button)
+        self.answer_now_btn.callback = self._on_answer_now_clicked
 
-    def update_label(self, seconds: int, is_thinking: bool):
-        self.duration_seconds = seconds
-        self.is_thinking = is_thinking
-        if is_thinking:
-            self.button.label = f"🧠 Thinking for {seconds}s" if seconds > 0 else "🧠 Thinking..."
-            self.button.disabled = False
-        else:
-            time_str = f"{seconds}s" if seconds > 0 else "<1s"
-            self.button.label = f"🧠 Thought for {time_str}"
-            self.button.disabled = False
+        self.section = Section(
+            self.text_display,
+            accessory=self.answer_now_btn
+        )
+
+        time_label = f"🧠 Thinking for {self.duration_seconds}s..."
+        self.thinking_btn = Button(
+            label=time_label,
+            style=discord.ButtonStyle.secondary,
+            disabled=not self.is_enabled,
+            custom_id="priesty_placeholder_thought_btn"
+        )
+        self.thinking_btn.callback = self._on_thought_button_clicked
+        self.action_row = ActionRow(self.thinking_btn)
+
+        self.add_item(self.section)
+        self.add_item(self.action_row)
+
+    def enable_thinking(self):
+        self.is_enabled = True
+        self.thinking_btn.disabled = False
+
+    def update_state(self, loading_text: str, duration_seconds: int):
+        self.loading_text = loading_text
+        self.duration_seconds = duration_seconds
+        self.text_display.content = self.loading_text
+        self.thinking_btn.label = f"🧠 Thinking for {self.duration_seconds}s..."
+        self.thinking_btn.disabled = not self.is_enabled
 
     async def push_live_update(self):
-        if self.active_container and self.active_interaction:
-            if self.is_inspecting or self.active_container.is_inspecting_tool or self.active_container.is_paginating:
-                return
+        if not self.active_container or not self.active_interaction:
+            return
 
+        if self.is_inspecting or self.active_container.is_inspecting_tool or self.active_container.is_paginating:
+            return
+
+        if self.update_lock.locked():
+            return
+
+        async with self.update_lock:
             try:
                 raw_thoughts = self.thought_data.get("thoughts", "")
                 tool_calls = self.thought_data.get("tool_calls", [])
@@ -445,13 +558,79 @@ class ThinkingButtonView(View):
                     raw_thoughts=raw_thoughts,
                     tool_calls=tool_calls,
                     duration_seconds=self.duration_seconds,
-                    is_thinking=self.is_thinking
+                    is_thinking=True
                 )
                 await self.active_interaction.edit_original_response(view=self.active_container)
             except (discord.HTTPException, discord.NotFound):
                 pass
             except Exception as e:
                 logger.debug(f"Live container update error: {e}")
+
+    async def _on_answer_now_clicked(self, interaction: discord.Interaction):
+        if self.on_answer_now_callback:
+            await self.on_answer_now_callback(interaction)
+
+    async def _on_thought_button_clicked(self, interaction: discord.Interaction):
+        if not self.is_enabled:
+            return
+
+        raw_thoughts = self.thought_data.get("thoughts", "")
+        tool_calls = self.thought_data.get("tool_calls", [])
+
+        self.active_container = ThoughtContainerView(
+            raw_thoughts=raw_thoughts,
+            tool_calls=tool_calls,
+            duration_seconds=self.duration_seconds,
+            is_thinking=True,
+            parent_view=self
+        )
+        self.active_interaction = interaction
+        self.is_inspecting = False
+
+        try:
+            await interaction.response.send_message(
+                view=self.active_container,
+                ephemeral=True
+            )
+        except Exception as ex:
+            logger.debug(f"Placeholder thought click error: {ex}")
+
+
+class ThinkingButtonView(View):
+    def __init__(
+        self,
+        duration_seconds: int = 0,
+        is_thinking: bool = False,
+        is_enabled: bool = True,
+        thought_data: dict[str, Any] | None = None
+    ):
+        super().__init__(timeout=900)
+        self.duration_seconds = duration_seconds
+        self.is_thinking = is_thinking
+        self.is_enabled = is_enabled
+        self.thought_data = thought_data or {"thoughts": "", "tool_calls": []}
+        
+        self.active_container: ThoughtContainerView | None = None
+        self.active_interaction: discord.Interaction | None = None
+        self.is_inspecting: bool = False
+        self.update_lock = asyncio.Lock()
+
+        time_str = f"{duration_seconds}s" if duration_seconds > 0 else "<1s"
+        self.button = Button(
+            label=f"🧠 Thought for {time_str}",
+            style=discord.ButtonStyle.secondary,
+            custom_id="priesty_final_thought_btn",
+            disabled=not self.is_enabled
+        )
+        self.button.callback = self._on_button_click
+        self.add_item(self.button)
+
+    def update_label(self, seconds: int, is_thinking: bool = False):
+        self.duration_seconds = seconds
+        self.is_thinking = is_thinking
+        time_str = f"{seconds}s" if seconds > 0 else "<1s"
+        self.button.label = f"🧠 Thought for {time_str}"
+        self.button.disabled = False
 
     async def _on_button_click(self, interaction: discord.Interaction):
         raw_thoughts = self.thought_data.get("thoughts", "")
@@ -467,7 +646,10 @@ class ThinkingButtonView(View):
         self.active_interaction = interaction
         self.is_inspecting = False
 
-        await interaction.response.send_message(
-            view=self.active_container,
-            ephemeral=True
-        )
+        try:
+            await interaction.response.send_message(
+                view=self.active_container,
+                ephemeral=True
+            )
+        except Exception as ex:
+            logger.debug(f"Final thinking button click error: {ex}")

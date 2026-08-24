@@ -69,7 +69,7 @@ async def _fetch_ddg_lite(query: str, max_results: int) -> list[dict[str, str]]:
         "DO NOT guess or assume something does not exist without searching."
     )
 )
-async def search_web(query: str, max_results: int = 5) -> dict[str, Any]:
+async def search_web(query: str, max_results: int = 3) -> dict[str, Any]:
     clean_q = sanitize_query(query)
     logger.info(f"[search_web] Query: '{clean_q}' (max: {max_results})")
 

@@ -1,6 +1,7 @@
 import re
 import time
 import logging
+from typing import Optional
 from google import genai
 from config.settings import (
     GEMINI_API_KEYS,
@@ -42,18 +43,28 @@ class KeyModelManager:
                     return False
         return True
 
-    def get_client_for_model(self, model_name: str) -> tuple[genai.Client, int, str]:
+    def get_client_for_model(
+        self, 
+        model_name: str, 
+        exclude_keys: Optional[set[int]] = None
+    ) -> tuple[Optional[genai.Client], Optional[int], str]:
+        exclude_keys = exclude_keys or set()
         cascade = self._get_cascade_list(model_name)
+        
         for cand_model in cascade:
             start_idx = self.current_key_indices.get(cand_model, 0)
             for offset in range(self.key_count):
                 idx = (start_idx + offset) % self.key_count
+                
+                if idx in exclude_keys:
+                    continue
+                    
                 if self.is_available(idx, cand_model):
                     self.current_key_indices[cand_model] = (idx + 1) % self.key_count
                     return self.clients[idx], idx, cand_model
 
-        logger.warning(f"All keys busy across cascade. Defaulting to workhorse '{WORKHORSE_MODEL}' on Key #0.")
-        return self.clients[0], 0, WORKHORSE_MODEL
+        logger.warning(f"All keys busy or excluded across cascade for '{model_name}'.")
+        return None, None, model_name
 
     def _get_cascade_list(self, model_name: str) -> list[str]:
         if model_name in FLAGSHIP_MODELS:

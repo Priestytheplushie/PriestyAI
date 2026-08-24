@@ -30,12 +30,16 @@ ROUTER_SYSTEM_INSTRUCTION = """
 You are the routing and complexity classifier for PriestyAI.
 Analyze the user's message and context, then output a JSON object adhering strictly to the schema.
 
+CRITICAL MULTIMEDIA DIRECTIVE:
+- If media (images, audio, video files) is attached to the request, you MUST NEVER select 'gemma-4-31b-it' as it lacks multimodal audio/vision execution. You MUST select 'gemini-3.7-flash' or 'gemini-3.5-flash-lite'.
+
 Routing Guidelines:
-1. CASUAL / MEMORY STORAGE / CHITCHAT / QUICK (Greetings, saving preferences, simple Q&A):
+1. CASUAL / MEMORY STORAGE / CHITCHAT / QUICK (Text-only greetings, saving preferences, simple Q&A):
    - target_model: "gemma-4-31b-it" | thinking_level: "MINIMAL"
 
-2. CONCEPTUAL / EXPLANATIONS / RESEARCH (e.g. 'explain X', search questions, multi-source synthesis):
-   - target_model: "gemma-4-31b-it" | thinking_level: "HIGH"  (or "gemini-3.5-flash-lite" | "MEDIUM")
+2. CONCEPTUAL / EXPLANATIONS / RESEARCH / MEDIA ANALYSIS (Visual, audio, or text video analysis):
+   - For Media Inputs: target_model: "gemini-3.5-flash-lite" or "gemini-3.7-flash" | thinking_level: "MEDIUM"
+   - For Text-Only: target_model: "gemma-4-31b-it" | thinking_level: "HIGH"
 
 3. HEAVY CODING / ARCHITECTURE / DEBUGGING / COMPLEX MATH (Programming in Docker sandbox, formal proofs):
    - target_model: "gemini-3.7-flash" | thinking_level: "HIGH"
@@ -46,8 +50,9 @@ Generate exactly 5 to 7 dynamic, humorous, contextual 3-5 word phrases relevant 
 
 class Router:
     @staticmethod
-    async def route(user_prompt: str, context_summary: str = "") -> RouteDecision:
-        payload = f"Context:\n{context_summary}\n\nUser Query:\n{user_prompt}"
+    async def route(user_prompt: str, context_summary: str = "", has_media: bool = False) -> RouteDecision:
+        media_context = f"\n[MEDIA ATTACHMENTS PRESENT: {has_media}]" if has_media else ""
+        payload = f"Context:\n{context_summary}{media_context}\n\nUser Query:\n{user_prompt}"
 
         for router_model in [ROUTER_PRIMARY, ROUTER_FALLBACK]:
             client, key_idx, active_model = client_manager.get_client_for_model(router_model)
@@ -71,6 +76,11 @@ class Router:
                 if response.text:
                     decision_data = json.loads(response.text)
                     decision = RouteDecision(**decision_data)
+                    
+                    if has_media and decision.target_model == "gemma-4-31b-it":
+                        logger.warning("[Router Override] 'gemma-4-31b-it' selected for multimodal input. Redirecting to WORKHORSE_MODEL.")
+                        decision.target_model = WORKHORSE_MODEL
+
                     logger.info(
                         f"[Route Success] Model: '{decision.target_model}' | "
                         f"Thinking: '{decision.thinking_level}' | Key: #{key_idx}"
@@ -81,9 +91,10 @@ class Router:
                 client_manager.report_error(key_idx, active_model, Exception(err_desc))
                 logger.warning(f"Router attempt failed on {active_model} (Key #{key_idx}): {err_desc}")
 
-        logger.warning("Router fallback activated: Using default route.")
+        fallback_model = WORKHORSE_MODEL if has_media else "gemma-4-31b-it"
+        logger.warning(f"Router fallback activated: Using safe route '{fallback_model}'.")
         return RouteDecision(
-            target_model="gemma-4-31b-it",
+            target_model=fallback_model,
             thinking_level="MINIMAL",
             witty_statuses=[
                 "Herding digital sheep",

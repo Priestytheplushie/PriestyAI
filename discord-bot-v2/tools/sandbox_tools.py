@@ -133,7 +133,7 @@ async def _run_in_docker(
         return {
             "success": proc.returncode == 0,
             "exit_code": proc.returncode,
-            "stdout": stdout or "(No stdout produced)",
+            "stdout": stdout or "(No output produced)",
             "stderr": stderr or None,
             "execution_time_ms": duration_ms,
             "installed_packages": packages
@@ -182,7 +182,7 @@ def _detect_and_stage_artifacts(workspace_dir: str, context: ToolExecutionContex
                     context.staged_image_bytes = f.read()
                     context.staged_image_filename = os.path.basename(filepath)
                     found_artifacts.append(os.path.basename(filepath))
-                    logger.info(f"[Sandbox] Auto-staged generated image artifact: '{os.path.basename(filepath)}' ({len(context.staged_image_bytes)} bytes)")
+                    logger.info(f"[Sandbox] Found plot artifact: '{os.path.basename(filepath)}'")
                     break
             except Exception as e:
                 logger.warning(f"Failed to read image artifact: {e}")
@@ -192,10 +192,10 @@ def _detect_and_stage_artifacts(workspace_dir: str, context: ToolExecutionContex
 @tool_registry.register(
     name="execute_code",
     description=(
-        "Executes arbitrary code securely inside an isolated Docker sandbox container. "
+        "Executes code securely inside an isolated Docker sandbox container. "
         "Supports 'python', 'javascript', 'typescript', 'bash', 'cpp', 'c', 'rust', and 'go'. "
         "Can specify 'packages' to install (e.g. ['numpy', 'matplotlib']). "
-        "Any generated plots (e.g. plt.savefig('plot.png')) will automatically be attached to Discord."
+        "Any generated plots (e.g. plt.savefig('plot.png')) will automatically be displayed."
     )
 )
 async def execute_code(
@@ -212,7 +212,7 @@ async def execute_code(
         }
 
     pkgs = normalize_packages(packages)
-    logger.info(f"[execute_code] Running {lang_clean} code ({len(code)} chars, normalized packages: {pkgs})")
+    logger.info(f"[execute_code] Running {lang_clean} code ({len(code)} chars, packages: {pkgs})")
 
     workspace = tempfile.mkdtemp(prefix="priesty_exec_")
 
@@ -228,7 +228,6 @@ async def execute_code(
         artifacts = _detect_and_stage_artifacts(workspace, context)
         if artifacts:
             result["generated_artifacts"] = artifacts
-            result["artifact_note"] = "Image artifact detected and staged for native Discord attachment."
 
         return result
 

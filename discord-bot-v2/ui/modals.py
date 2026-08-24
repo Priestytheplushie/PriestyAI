@@ -26,11 +26,16 @@ class DynamicModalV2(ui.Modal):
 
         self.on_submit_callback = on_submit_callback
 
-    def _build_child_component_dict(self, field: dict[str, Any]) -> dict[str, Any]:
-        field_type = str(field.get("type", "text_input")).lower()
-        field_id = field.get("custom_id", field.get("id", f"field_{id(field)}"))
+    def _build_child_component_dict(self, field: dict[str, Any], idx: int) -> dict[str, Any]:
+        field_type = str(field.get("type", "text_input")).lower().strip().replace(" ", "_")
+        
+        label_slug = field.get("label", "").lower().strip().replace(" ", "_")
+        label_slug = "".join(c for c in label_slug if c.isalnum() or c == "_")
+        field_id = field.get("custom_id") or field.get("id") or label_slug or f"field_{idx}"
+        
         placeholder = field.get("placeholder", "")
         required = field.get("required", True)
+        default_val = field.get("value") if field.get("value") is not None else field.get("default")
 
         if field_type in ["text", "textinput", "text_input", "paragraph"]:
             style_str = str(field.get("style", "short")).lower()
@@ -43,6 +48,8 @@ class DynamicModalV2(ui.Modal):
             }
             if placeholder:
                 payload["placeholder"] = placeholder[:100]
+            if default_val:
+                payload["value"] = str(default_val)[:4000]
             if field.get("max_length"):
                 payload["max_length"] = min(int(field["max_length"]), 4000)
             if field.get("min_length"):
@@ -62,6 +69,7 @@ class DynamicModalV2(ui.Modal):
                     "label": opt.get("label", "Option")[:100],
                     "value": opt.get("value", opt.get("label", ""))[:100],
                     **({"description": opt["description"][:100]} if opt.get("description") else {}),
+                    **({"default": True} if opt.get("default") or (default_val and str(opt.get("value")) == str(default_val)) else {}),
                     **({"emoji": {"name": opt["emoji"]}} if opt.get("emoji") else {})
                 }
                 for opt in raw_options if isinstance(opt, dict)
@@ -73,21 +81,52 @@ class DynamicModalV2(ui.Modal):
                 "type": 3,
                 "custom_id": field_id,
                 "options": options[:25],
-                "min_values": 1 if required else 0,
-                "max_values": min(field.get("max_values", 1), len(options))
+                "min_values": int(field.get("min_values", 1 if required else 0)),
+                "max_values": min(int(field.get("max_values", 1)), len(options))
             }
             if placeholder:
                 payload["placeholder"] = placeholder[:100]
             return payload
 
-        elif field_type in ["userselect", "user_select"]:
-            return {"type": 5, "custom_id": field_id, "placeholder": placeholder[:100]}
-        elif field_type in ["roleselect", "role_select"]:
-            return {"type": 6, "custom_id": field_id, "placeholder": placeholder[:100]}
-        elif field_type in ["mentionableselect", "mentionable_select"]:
-            return {"type": 7, "custom_id": field_id, "placeholder": placeholder[:100]}
-        elif field_type in ["channelselect", "channel_select"]:
-            return {"type": 8, "custom_id": field_id, "placeholder": placeholder[:100]}
+        elif field_type in ["userselect", "user_select", "roleselect", "role_select", "mentionableselect", "mentionable_select", "channelselect", "channel_select"]:
+            type_map = {
+                "userselect": (5, "user"), "user_select": (5, "user"),
+                "roleselect": (6, "role"), "role_select": (6, "role"),
+                "mentionableselect": (7, None), "mentionable_select": (7, None),
+                "channelselect": (8, "channel"), "channel_select": (8, "channel")
+            }
+            comp_type_num, default_type_name = type_map.get(field_type, (8, "channel"))
+            payload = {
+                "type": comp_type_num,
+                "custom_id": field_id,
+                "placeholder": placeholder[:100],
+                "required": required,
+                "min_values": int(field.get("min_values", 1 if required else 0)),
+                "max_values": int(field.get("max_values", 1))
+            }
+
+            if field.get("default_values"):
+                raw_defs = field["default_values"]
+                if isinstance(raw_defs, list):
+                    formatted_defs = []
+                    for d in raw_defs:
+                        if isinstance(d, dict):
+                            formatted_defs.append(d)
+                        else:
+                            dtype = default_type_name or "user"
+                            formatted_defs.append({"id": str(d), "type": dtype})
+                    if formatted_defs:
+                        payload["default_values"] = formatted_defs
+            elif default_val and default_type_name:
+                if isinstance(default_val, list):
+                    payload["default_values"] = [{"id": str(v), "type": default_type_name} for v in default_val]
+                else:
+                    payload["default_values"] = [{"id": str(default_val), "type": default_type_name}]
+
+            if field.get("channel_types"):
+                payload["channel_types"] = [getattr(ct, "value", ct) for ct in field["channel_types"]]
+
+            return payload
 
         elif field_type in ["fileupload", "file_upload"]:
             return {
@@ -111,7 +150,8 @@ class DynamicModalV2(ui.Modal):
                 {
                     "label": opt.get("label", "Option")[:100],
                     "value": opt.get("value", opt.get("label", ""))[:100],
-                    **({"description": opt["description"][:100]} if opt.get("description") else {})
+                    **({"description": opt["description"][:100]} if opt.get("description") else {}),
+                    **({"default": True} if opt.get("default") or (default_val and str(opt.get("value")) == str(default_val)) else {})
                 }
                 for opt in raw_options if isinstance(opt, dict)
             ]
@@ -133,7 +173,7 @@ class DynamicModalV2(ui.Modal):
     def to_dict(self) -> dict[str, Any]:
         components_payload = []
 
-        for field in self.fields_schema:
+        for idx, field in enumerate(self.fields_schema):
             if isinstance(field, str):
                 continue
 
@@ -146,7 +186,7 @@ class DynamicModalV2(ui.Modal):
                     "content": content[:4000]
                 })
             else:
-                child_payload = self._build_child_component_dict(field)
+                child_payload = self._build_child_component_dict(field, idx)
                 label_payload = {
                     "type": 18,
                     "label": field.get("label", "Field")[:45],
@@ -173,25 +213,25 @@ class DynamicModalV2(ui.Modal):
             if comp_type == 18 and "component" in comp:
                 inner = comp["component"]
                 cid = inner.get("custom_id", f"field_{len(collected_data)}")
-                if "value" in inner:
-                    collected_data[cid] = inner["value"]
-                elif "values" in inner:
+                if "values" in inner:
                     collected_data[cid] = inner["values"]
+                elif "value" in inner:
+                    collected_data[cid] = inner["value"]
             
             elif comp_type == 1 and "components" in comp:
                 for sub in comp["components"]:
                     cid = sub.get("custom_id", f"field_{len(collected_data)}")
-                    if "value" in sub:
-                        collected_data[cid] = sub["value"]
-                    elif "values" in sub:
+                    if "values" in sub:
                         collected_data[cid] = sub["values"]
+                    elif "value" in sub:
+                        collected_data[cid] = sub["value"]
             
             else:
                 cid = comp.get("custom_id", f"field_{len(collected_data)}")
-                if "value" in comp:
-                    collected_data[cid] = comp["value"]
-                elif "values" in comp:
+                if "values" in comp:
                     collected_data[cid] = comp["values"]
+                elif "value" in comp:
+                    collected_data[cid] = comp["value"]
 
         logger.info(f"Modal '{self.title}' submitted by {interaction.user}: {collected_data}")
         await self.on_submit_callback(interaction, collected_data)
@@ -204,7 +244,7 @@ class DynamicActionView(ui.View):
         modals_map: dict[str, dict[str, Any]],
         interaction_dispatcher: Callable[[discord.Interaction, str, Any], Any]
     ):
-        super().__init__(timeout=600)
+        super().__init__(timeout=900)
         self.components_schema = components_schema
         self.modals_map = modals_map
         self.interaction_dispatcher = interaction_dispatcher
@@ -212,14 +252,20 @@ class DynamicActionView(ui.View):
         self._build_view()
 
     def _build_view(self):
+        current_row = 0
+        buttons_in_row = 0
+
         for comp in self.components_schema:
-            ctype = comp.get("type", "button").lower()
+            raw_type = str(comp.get("type", "button")).lower().strip().replace(" ", "_")
             label = comp.get("label", "Action")
             cid = comp.get("custom_id", f"btn_{len(self.children)}")
-            style_str = comp.get("style", "primary").lower()
-            modal_id = comp.get("modal_id", None)
+            placeholder = comp.get("placeholder") or "Select an option..."
+            modal_id = comp.get("modal_id") or cid
+            disabled = comp.get("disabled", False)
+            min_v = max(0, int(comp.get("min_values", 1)))
+            max_v = max(1, min(25, int(comp.get("max_values", 1))))
 
-            if ctype in ["button", "btn"]:
+            if raw_type in ["button", "btn"]:
                 style_map = {
                     "primary": discord.ButtonStyle.primary,
                     "secondary": discord.ButtonStyle.secondary,
@@ -227,23 +273,38 @@ class DynamicActionView(ui.View):
                     "danger": discord.ButtonStyle.danger,
                     "link": discord.ButtonStyle.link
                 }
-                style = style_map.get(style_str, discord.ButtonStyle.primary)
-                btn = ui.Button(label=label[:80], style=style, custom_id=cid, emoji=comp.get("emoji"))
-                
+                style_str = comp.get("style", "secondary").lower()
+                style = style_map.get(style_str, discord.ButtonStyle.secondary)
+
+                if buttons_in_row >= 5:
+                    current_row = min(4, current_row + 1)
+                    buttons_in_row = 0
+
+                btn = ui.Button(
+                    label=label[:80],
+                    style=style,
+                    custom_id=cid,
+                    emoji=comp.get("emoji"),
+                    disabled=disabled,
+                    row=min(4, current_row)
+                )
+
                 async def button_callback(interaction: discord.Interaction, m_id=modal_id, c_id=cid, b_lbl=label):
-                    if m_id and m_id in self.modals_map:
-                        modal_spec = self.modals_map[m_id]
+                    target_modal_key = m_id if m_id in self.modals_map else (c_id if c_id in self.modals_map else None)
+
+                    if target_modal_key:
+                        modal_spec = self.modals_map[target_modal_key]
                         
                         async def handle_modal_submit(sub_interaction: discord.Interaction, data: dict[str, Any]):
                             await self.interaction_dispatcher(sub_interaction, "modal_submit", {
-                                "modal_id": m_id,
+                                "modal_id": target_modal_key,
                                 "title": modal_spec.get("title", "Form"),
                                 "values": data
                             })
 
                         modal_obj = DynamicModalV2(
                             title=modal_spec.get("title", "Form"),
-                            custom_id=m_id,
+                            custom_id=target_modal_key,
                             fields_schema=modal_spec.get("fields", []),
                             on_submit_callback=handle_modal_submit
                         )
@@ -256,8 +317,13 @@ class DynamicActionView(ui.View):
 
                 btn.callback = button_callback
                 self.add_item(btn)
+                buttons_in_row += 1
 
-            elif ctype in ["select", "stringselect", "string_select"]:
+            elif raw_type in ["select", "stringselect", "string_select"]:
+                if buttons_in_row > 0:
+                    current_row = min(4, current_row + 1)
+                    buttons_in_row = 0
+
                 raw_options = comp.get("options", [])
                 if isinstance(raw_options, str):
                     try:
@@ -275,20 +341,142 @@ class DynamicActionView(ui.View):
                     for opt in raw_options if isinstance(opt, dict)
                 ]
                 if not options:
-                    options = [discord.SelectOption(label="Default Option", value="default")]
+                    options = [discord.SelectOption(label="Option", value="default")]
 
                 sel = ui.Select(
                     custom_id=cid,
-                    placeholder=comp.get("placeholder", "Select an option...")[:100],
-                    options=options[:25]
+                    placeholder=placeholder[:100],
+                    options=options[:25],
+                    min_values=min(min_v, len(options)),
+                    max_values=min(max_v, len(options)),
+                    disabled=disabled,
+                    row=min(4, current_row)
                 )
 
-                async def select_callback(interaction: discord.Interaction, c_id=cid):
-                    selected_values = sel.values
+                async def select_callback(interaction: discord.Interaction, c_id=cid, s_comp=sel):
                     await self.interaction_dispatcher(interaction, "select_option", {
                         "custom_id": c_id,
-                        "selected": selected_values
+                        "component_type": "string_select",
+                        "selected": s_comp.values
                     })
 
                 sel.callback = select_callback
                 self.add_item(sel)
+                current_row = min(4, current_row + 1)
+
+            elif raw_type in ["userselect", "user_select"]:
+                if buttons_in_row > 0:
+                    current_row = min(4, current_row + 1)
+                    buttons_in_row = 0
+
+                u_sel = ui.UserSelect(
+                    custom_id=cid,
+                    placeholder=placeholder[:100],
+                    min_values=min_v,
+                    max_values=max_v,
+                    disabled=disabled,
+                    row=min(4, current_row)
+                )
+
+                async def user_select_callback(interaction: discord.Interaction, c_id=cid, s_comp=u_sel):
+                    selected_ids = [str(u.id) for u in s_comp.values]
+                    await self.interaction_dispatcher(interaction, "select_option", {
+                        "custom_id": c_id,
+                        "component_type": "user_select",
+                        "selected": selected_ids
+                    })
+
+                u_sel.callback = user_select_callback
+                self.add_item(u_sel)
+                current_row = min(4, current_row + 1)
+
+            elif raw_type in ["roleselect", "role_select"]:
+                if buttons_in_row > 0:
+                    current_row = min(4, current_row + 1)
+                    buttons_in_row = 0
+
+                r_sel = ui.RoleSelect(
+                    custom_id=cid,
+                    placeholder=placeholder[:100],
+                    min_values=min_v,
+                    max_values=max_v,
+                    disabled=disabled,
+                    row=min(4, current_row)
+                )
+
+                async def role_select_callback(interaction: discord.Interaction, c_id=cid, s_comp=r_sel):
+                    selected_ids = [str(r.id) for r in s_comp.values]
+                    await self.interaction_dispatcher(interaction, "select_option", {
+                        "custom_id": c_id,
+                        "component_type": "role_select",
+                        "selected": selected_ids
+                    })
+
+                r_sel.callback = role_select_callback
+                self.add_item(r_sel)
+                current_row = min(4, current_row + 1)
+
+            elif raw_type in ["channelselect", "channel_select"]:
+                if buttons_in_row > 0:
+                    current_row = min(4, current_row + 1)
+                    buttons_in_row = 0
+
+                ch_types = []
+                if comp.get("channel_types") and isinstance(comp["channel_types"], list):
+                    for ct in comp["channel_types"]:
+                        if isinstance(ct, str) and hasattr(discord.ChannelType, ct.lower()):
+                            ch_types.append(getattr(discord.ChannelType, ct.lower()))
+                        elif isinstance(ct, discord.ChannelType):
+                            ch_types.append(ct)
+
+                c_sel = ui.ChannelSelect(
+                    custom_id=cid,
+                    placeholder=placeholder[:100],
+                    min_values=min_v,
+                    max_values=max_v,
+                    disabled=disabled,
+                    channel_types=ch_types or None,
+                    row=min(4, current_row)
+                )
+
+                async def channel_select_callback(interaction: discord.Interaction, c_id=cid, s_comp=c_sel):
+                    selected_ids = [str(ch.id) for ch in s_comp.values]
+                    await self.interaction_dispatcher(interaction, "select_option", {
+                        "custom_id": c_id,
+                        "component_type": "channel_select",
+                        "selected": selected_ids
+                    })
+
+                c_sel.callback = channel_select_callback
+                self.add_item(c_sel)
+                current_row = min(4, current_row + 1)
+
+            elif raw_type in ["mentionableselect", "mentionable_select"]:
+                if buttons_in_row > 0:
+                    current_row = min(4, current_row + 1)
+                    buttons_in_row = 0
+
+                m_sel = ui.MentionableSelect(
+                    custom_id=cid,
+                    placeholder=placeholder[:100],
+                    min_values=min_v,
+                    max_values=max_v,
+                    disabled=disabled,
+                    row=min(4, current_row)
+                )
+
+                async def mentionable_select_callback(interaction: discord.Interaction, c_id=cid, s_comp=m_sel):
+                    selected_ids = [str(m.id) for m in s_comp.values]
+                    await self.interaction_dispatcher(interaction, "select_option", {
+                        "custom_id": c_id,
+                        "component_type": "mentionable_select",
+                        "selected": selected_ids
+                    })
+
+                m_sel.callback = mentionable_select_callback
+                self.add_item(m_sel)
+                current_row = min(4, current_row + 1)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True

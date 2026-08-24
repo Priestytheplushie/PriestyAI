@@ -12,7 +12,9 @@ from core.client_manager import client_manager
 
 logger = logging.getLogger("PriestyAI.Memory")
 
-DB_PATH = "priestyai.db"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(BASE_DIR, "priestyai.db")
+
 EMBEDDING_MODELS = ["gemini-embedding-001", "gemini-embedding-2"]
 OUTPUT_DIMENSIONALITY = 768
 
@@ -62,14 +64,6 @@ class MemoryManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_entity ON memories(category, entity_id)")
 
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS guild_configs (
-                    guild_id TEXT PRIMARY KEY,
-                    config_json TEXT NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_sessions (
                     session_id TEXT PRIMARY KEY,
                     channel_id TEXT NOT NULL,
@@ -83,7 +77,7 @@ class MemoryManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_channel ON chat_sessions(channel_id)")
 
             conn.commit()
-        logger.info(f"Initialized SQLite Memory, Config, & Session Database at '{self.db_path}'.")
+        logger.info(f"Initialized SQLite Memory & Session Database at '{self.db_path}'.")
 
     async def generate_embedding(self, text: str) -> list[float] | None:
         clean_text = text.strip()[:1000]
@@ -170,6 +164,45 @@ class MemoryManager:
             "message": f"Successfully remembered into {cat_clean} storage."
         }
 
+    def get_memory_by_id(self, memory_id: int) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        return None
+
+    def get_all_memories_for_entity(self, category: str, entity_id: str | int) -> list[dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM memories WHERE category = ? AND entity_id = ? ORDER BY created_at DESC",
+                (category.lower().strip(), str(entity_id))
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    async def update_memory_text(self, memory_id: int, new_text: str) -> bool:
+        clean_text = new_text.strip()
+        if not clean_text:
+            return False
+
+        vec = await self.generate_embedding(clean_text)
+        if not vec:
+            return False
+
+        packed_vec = pack_vector(vec)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE memories
+                SET memory_text = ?, embedding = ?, last_accessed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (clean_text, packed_vec, memory_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
     async def forget(self, memory_id: int, reason: str = "") -> dict[str, Any]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -189,6 +222,41 @@ class MemoryManager:
             "deleted_text": deleted_text,
             "message": f"Memory #{memory_id} was removed from memory banks."
         }
+
+    def delete_all_user_memories(self, user_id: str | int) -> int:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM memories WHERE category = 'user' AND entity_id = ?", (str(user_id),))
+            conn.commit()
+            return cursor.rowcount
+
+    def delete_all_server_lore(self, guild_id: str | int) -> int:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM memories WHERE category = 'server' AND entity_id = ?", (str(guild_id),))
+            conn.commit()
+            return cursor.rowcount
+
+    def purge_entire_user_data(self, user_id: str | int) -> dict[str, int]:
+        uid_str = str(user_id)
+        counts = {}
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM memories WHERE category = 'user' AND entity_id = ?", (uid_str,))
+            counts["memories"] = cursor.rowcount
+
+            cursor.execute("DELETE FROM chat_sessions WHERE creator_user_id = ?", (uid_str,))
+            counts["chat_sessions"] = cursor.rowcount
+
+            cursor.execute("DELETE FROM user_configs WHERE user_id = ?", (uid_str,))
+            counts["user_configs"] = cursor.rowcount
+
+            cursor.execute("DELETE FROM message_generations WHERE author_id = ?", (uid_str,))
+            counts["message_generations"] = cursor.rowcount
+
+            conn.commit()
+        logger.info(f"[Complete User Data Purge] User ID {user_id}: {counts}")
+        return counts
 
     async def recall_relevant_memories(
         self,

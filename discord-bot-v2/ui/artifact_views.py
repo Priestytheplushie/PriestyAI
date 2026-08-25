@@ -582,7 +582,7 @@ def build_artifact_components_for_message(
 
         display_text = (
             f"{icon} **{fn}**\n"
-            f"-# {LOADING_EMOJI} Creating your file... ({elapsed}s)"
+            f"-# {LOADING_EMOJI} Creating your Artifact... ({elapsed}s)"
         )
 
         open_btn = Button(
@@ -621,7 +621,7 @@ def build_artifact_components_for_message(
     ts = (
         target_v_data.get("timestamp")
         if target_v_data
-        else None
+        else artifact.get("timestamp")
     )
 
     ts_str = (
@@ -633,18 +633,21 @@ def build_artifact_components_for_message(
     container = Container()
 
     if is_multi_file:
+        file_list = target_v_data.get("files", files) if target_v_data else files
         file_count = (
-            len(files)
-            if files
-            else artifact.get(
-                "file_count",
-                1
-            )
+            len(file_list)
+            if file_list
+            else artifact.get("file_count", 1)
+        )
+
+        total_size = sum(
+            f.get("size_bytes", len(f.get("content", "").encode("utf-8")))
+            for f in file_list
         )
 
         display_text = (
             f"{icon} **{filename}**\n"
-            f"-# {file_count} files • v{active_v}{ts_str}"
+            f"-# {file_count} files • {format_size(total_size)}{ts_str}"
         )
 
         open_btn = Button(
@@ -686,39 +689,23 @@ def build_artifact_components_for_message(
             else len(content.splitlines())
         )
 
-        adds = (
+        size_b = (
             target_v_data.get(
-                "additions",
-                artifact.get("additions", 0)
+                "size_bytes",
+                len(content.encode("utf-8"))
             )
             if target_v_data
-            else 0
+            else len(content.encode("utf-8"))
         )
 
-        dels = (
-            target_v_data.get(
-                "deletions",
-                artifact.get("deletions", 0)
-            )
-            if target_v_data
-            else 0
-        )
-
-        diff_tag = (
-            f" (+{adds} -{dels})"
-            if adds > 0 or dels > 0
-            else ""
+        display_text = (
+            f"{icon} **{filename}**\n"
+            f"-# {lines:,} lines • {format_size(size_b)}{ts_str}"
         )
 
         is_large = len(content) > 3800
 
         if is_large:
-            display_text = (
-                f"{icon} **{filename}**\n"
-                f"-# {lines:,} lines • Large file • "
-                f"v{active_v}{diff_tag}{ts_str}"
-            )
-
             btn = Button(
                 label="Open",
                 style=discord.ButtonStyle.secondary,
@@ -732,18 +719,6 @@ def build_artifact_components_for_message(
             )
 
         else:
-            if total_versions >= 2:
-                display_text = (
-                    f"{icon} **{filename}**\n"
-                    f"-# {lines:,} lines • "
-                    f"v{active_v}{diff_tag}{ts_str}"
-                )
-            else:
-                display_text = (
-                    f"{icon} **{filename}**\n"
-                    f"-# {lines:,} lines{ts_str}"
-                )
-
             btn = Button(
                 label="Preview",
                 style=discord.ButtonStyle.secondary,

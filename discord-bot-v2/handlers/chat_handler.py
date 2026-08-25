@@ -13,6 +13,11 @@ import discord
 from google.genai import types
 
 from config.settings import LOADING_EMOJI
+from parsers.mention_parser import parse_mentions
+from parsers.timestamp_parser import parse_timestamps
+from parsers.emoji_parser import parse_emojis
+from parsers.math_parser import sanitize_latex
+from parsers.artifact_parser import ArtifactStreamParser
 from core.engine import ChatEngine
 from core.branch_manager import branch_manager
 from core.config_manager import config_manager
@@ -165,30 +170,6 @@ async def update_placeholder_loop(
             await placeholder_view.push_live_update()
         except discord.HTTPException:
             break
-        except Exception:
-            break
-
-async def stream_live_heartbeat_loop(
-    dispatcher: DiscordStreamDispatcher,
-    get_active_subtext_func,
-    start_time: float,
-    stop_event: asyncio.Event,
-    interval: float = 1.5
-):
-    while not stop_event.is_set():
-        try:
-            await asyncio.sleep(interval)
-            if stop_event.is_set():
-                break
-
-            elapsed = int(time.time() - start_time)
-            subtext = get_active_subtext_func()
-            if subtext:
-                status_line = f"{subtext} ({elapsed}s)"
-            else:
-                status_line = f"Synthesizing response... ({elapsed}s)"
-
-            await dispatcher.flush(live_status_text=status_line)
         except Exception:
             break
 
@@ -366,6 +347,7 @@ class ChatHandler:
 
         response_msg: discord.Message | None = None
         stream_dispatcher = DiscordStreamDispatcher(origin_message=message, guild=message.guild)
+        artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=message.channel.id)
 
         accumulated_thought_buffer: list[str] = []
         tool_call_history: list[dict[str, Any]] = []
@@ -374,13 +356,11 @@ class ChatHandler:
         thinking_start_time: float = time.time()
         answer_now_event = asyncio.Event()
         stop_placeholder_loop = asyncio.Event()
-        stop_stream_ticker = asyncio.Event()
 
         active_witty_statuses = ["Thinking", "Consulting neural cores", "Formulating response"]
         active_tool_subtext: str | None = None
         placeholder_view: PlaceholderLayoutView | None = None
         placeholder_task: asyncio.Task | None = None
-        stream_ticker_task: asyncio.Task | None = None
         first_content_received = False
 
         def get_current_msg():
@@ -458,24 +438,23 @@ class ChatHandler:
                             await placeholder_view.push_live_update()
 
                     elif event_type == "TOOL_START":
-                        await ensure_placeholder_spawned()
+                        if not first_content_received:
+                            await ensure_placeholder_spawned()
+                        
                         tool_name = payload.get("name", "Tool")
                         args = payload.get("args", {})
                         active_tool_start_times[tool_name] = time.perf_counter()
                         active_tool_subtext = get_tool_subtext(tool_name, args)
+                        
                         if placeholder_view:
                             placeholder_view.enable_thinking()
 
                         if tool_name in ["create_artifact", "update_artifact"]:
                             stream_dispatcher.add_artifact_placeholder(tool_name, args)
-
-                        if first_content_received:
-                            cur_elapsed = int(time.time() - thinking_start_time)
-                            st_line = f"{active_tool_subtext} ({cur_elapsed}s)" if active_tool_subtext else None
-                            await stream_dispatcher.flush(live_status_text=st_line)
+                            await stream_dispatcher.flush(is_final=False, force=True)
+                            await asyncio.sleep(1.5)
 
                     elif event_type == "TOOL_END":
-                        await ensure_placeholder_spawned()
                         tool_name = payload.get("name", "Tool")
                         start_t = active_tool_start_times.pop(tool_name, time.perf_counter())
                         duration_ms = int((time.perf_counter() - start_t) * 1000)
@@ -494,21 +473,19 @@ class ChatHandler:
                             art_fname = last_art.get("filename", "artifact.zip")
                             if art_bytes:
                                 stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
+                            await stream_dispatcher.flush(is_final=False)
 
                         elif tool_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
                             img_fname = tool_context.staged_image_filename
                             img_bytes = tool_context.staged_image_bytes
                             stream_dispatcher.add_media_block(img_fname, img_bytes)
                             tool_context.staged_image_bytes = None
+                            await stream_dispatcher.flush(is_final=False)
 
                         if placeholder_view:
                             placeholder_view.enable_thinking()
                             placeholder_view.thought_data["tool_calls"] = tool_call_history
                             await placeholder_view.push_live_update()
-
-                        if first_content_received:
-                            cur_elapsed = int(time.time() - thinking_start_time)
-                            await stream_dispatcher.flush(live_status_text=f"Synthesizing response... ({cur_elapsed}s)")
 
                     elif event_type == "CASCADE_RESET":
                         active_tool_start_times.clear()
@@ -528,33 +505,18 @@ class ChatHandler:
                             if response_msg:
                                 stream_dispatcher.bind_response_message(response_msg)
 
-                            if not stream_ticker_task or stream_ticker_task.done():
-                                stream_ticker_task = asyncio.create_task(
-                                    stream_live_heartbeat_loop(
-                                        dispatcher=stream_dispatcher,
-                                        get_active_subtext_func=get_active_subtext,
-                                        start_time=thinking_start_time,
-                                        stop_event=stop_stream_ticker
-                                    )
-                                )
-
-                        await stream_dispatcher.append_text(payload)
+                        await artifact_parser.feed(payload)
 
                     elif event_type == "ERROR":
                         stop_placeholder_loop.set()
-                        stop_stream_ticker.set()
                         if placeholder_task:
                             placeholder_task.cancel()
-                        if stream_ticker_task:
-                            stream_ticker_task.cancel()
                         await stream_dispatcher.append_text(f"\n\n⚠️ {payload}")
 
+            await artifact_parser.finish()
             stop_placeholder_loop.set()
-            stop_stream_ticker.set()
             if placeholder_task:
                 placeholder_task.cancel()
-            if stream_ticker_task:
-                stream_ticker_task.cancel()
 
             final_duration = max(1, int(time.time() - thinking_start_time))
             active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
@@ -655,8 +617,5 @@ class ChatHandler:
             logger.exception(f"Unhandled exception in chat loop: {e}")
         finally:
             stop_placeholder_loop.set()
-            stop_stream_ticker.set()
             if placeholder_task:
                 placeholder_task.cancel()
-            if stream_ticker_task:
-                stream_ticker_task.cancel()

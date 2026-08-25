@@ -197,7 +197,7 @@ def _detect_and_stage_artifacts(workspace_dir: str, context: ToolExecutionContex
         "Can specify 'packages' to install (e.g. ['numpy', 'matplotlib']).\n"
         "Generated plots (e.g. plt.savefig('plot.png')) will automatically be attached to chat.\n"
         "IMPORTANT: This tool is strictly for running and testing code. It DOES NOT create downloadable files or scripts for the user. "
-        "To provide a script, program, or file for the user, you MUST use create_artifact instead."
+        "To provide a script, program, or file for the user, you MUST use <artifact> XML tags instead."
     )
 )
 async def execute_code(

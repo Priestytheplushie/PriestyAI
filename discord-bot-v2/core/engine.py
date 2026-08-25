@@ -38,13 +38,18 @@ Visual Enrichment & Image Search ('search_image' vs 'generate_image'):
 - PROACTIVE REAL-WORLD & GAMING VISUAL ATTACHMENTS ('search_image'):
   1. Call 'search_image(query="...")' when:
      - The user asks to find, see, or show an image/render/picture/photo.
-     - The user asks to learn about, explain, or review a specific video game, character, franchise, hardware console, tech product, anime/movie, or landmark (e.g. "tell me about Marvel Rivals", "who is Luna in mo.co?", "what is the PS5 Pro?"). Proactively attaching an official key art or character render makes your answer engaging and visually complete!
-  2. Resolve all pronouns ('he', 'his skin', 'that game') using <chat_history> so the query is 100% self-contained (e.g. query='Marvel Rivals official key art', query='Luna mo.co character official art', query='Minecraft Warden render png').
+     - The user asks to learn about, explain, or review a specific video game, character, franchise, hardware console, tech product, anime/movie, or landmark. Proactively attaching key art or character renders makes your answer engaging and visually complete!
+  2. Resolve all pronouns ('he', 'his skin', 'that game') using <chat_history> so the query is 100% self-contained.
   3. 'search_image' automatically finds, verifies, and attaches the image directly to your response in 1 step.
   4. DO NOT search images for pure code debugging, math equations, or abstract non-visual explanations.
-  5. HARD LIMIT: Maximum 1 image attachment per turn.
-- AI ARTWORK GENERATION ('generate_image'):
-  * ONLY invoke 'generate_image' (Flux) when the user explicitly asks to 'generate', 'draw', 'paint', or 'render artificial artwork/fantasy concepts'. NEVER call 'generate_image' when the user is asking about real-world entities, existing games, or real people!
+  5. Maximum 1 image attachment per entity/turn.
+
+Interleaved Visual & Editorial Layouts:
+- When providing comparisons, multi-character breakdowns, step-by-step guides, or multi-subject overviews (e.g. "Compare Python vs JavaScript", "Tell me about Steve and Alex", "Explain the 3 main starter Pokémon"):
+  * Write the heading and introductory section for the first item -> call 'search_image' for that specific entity.
+  * Write the heading and section for the second item -> call 'search_image' for that second entity.
+  * Then provide your final synthesis/verdict.
+  This naturally anchors each visual asset directly underneath the section discussing it rather than clumping images at the top of the message.
 
 Thread Management & Workspace Scoping ('create_thread'):
 - WHEN TO CREATE A THREAD:
@@ -58,12 +63,25 @@ Thread Management & Workspace Scoping ('create_thread'):
 
 Code Deliverables vs. Inline Snippets ("Thing vs. Answer" Rule):
 1. Inline Markdown (```lang):
-   - Use for quick explanations, single-function demos, illustrative toy examples, bug fixes, or commands under ~25 lines that belong in the flow of your text.
-2. Code Artifacts (create_artifact):
-   - Use whenever you create a standalone program, complete script, full utility, application, or multi-file project (.zip).
-   - IMPORTANT: 'execute_code' is only a temporary sandbox to test logic. It does NOT deliver files to the user. To give the user a script or file, you MUST call 'create_artifact'.
-   - Lifecycle: Write a brief introductory sentence in chat, call 'create_artifact', then explain the usage/logic in chat below.
-   - Use 'update_artifact' when modifying an existing artifact from the conversation.
+   - Use ONLY for quick explanations, single-function demos, illustrative toy examples, bug fixes, or commands under ~20 lines that belong in the flow of your text.
+2. Standalone Code Artifacts (<artifact> XML tags):
+   - MANDATORY: Whenever creating a standalone program, complete script, full utility, application, or multi-file project, wrap the code in <artifact> XML tags directly in your text response stream! DO NOT put long scripts in standard chat codeblocks.
+   - Placement: Write a brief introductory sentence in chat, put the <artifact> tag right where you want the artifact container card to appear in your text, and then explain the usage/logic in chat below.
+   - Single-file artifact format:
+     <artifact identifier="filename.ext" title="Artifact Title">
+     ... complete code content ...
+     </artifact>
+   - Multi-file project artifact format:
+     <artifact identifier="project_name.zip" title="Project Title">
+     <file filename="index.html">
+     ...
+     </file>
+     <file filename="styles.css">
+     ...
+     </file>
+     </artifact>
+   - Updating Artifacts (update_artifact tool):
+     * To update, edit, or refactor an existing artifact created previously in this conversation, invoke the 'update_artifact' tool function.
 
 Visual & Interactive Enrichment:
 - Interactive Discord Components (add_component & add_modal):
@@ -384,6 +402,7 @@ class ChatEngine:
 
                         model_parts: list[types.Part] = []
                         tool_calls_to_execute = []
+                        emitted_early_tools: set[str] = set()
 
                         if first_chunk.candidates and first_chunk.candidates[0].content:
                             for part in first_chunk.candidates[0].content.parts:
@@ -394,6 +413,11 @@ class ChatEngine:
                                     yield ("CONTENT", part.text)
                                 elif part.function_call:
                                     tool_calls_to_execute.append(part.function_call)
+                                    fn_name = getattr(part.function_call, 'name', '')
+                                    if fn_name and fn_name not in emitted_early_tools:
+                                        emitted_early_tools.add(fn_name)
+                                        fn_args = dict(part.function_call.args) if getattr(part.function_call, 'args', None) else {}
+                                        yield ("TOOL_START", {"name": fn_name, "args": fn_args})
 
                         async for chunk in stream_iter:
                             if answer_now_event and answer_now_event.is_set():
@@ -416,6 +440,11 @@ class ChatEngine:
                                         yield ("CONTENT", part.text)
                                     elif part.function_call:
                                         tool_calls_to_execute.append(part.function_call)
+                                        fn_name = getattr(part.function_call, 'name', '')
+                                        if fn_name and fn_name not in emitted_early_tools:
+                                            emitted_early_tools.add(fn_name)
+                                            fn_args = dict(part.function_call.args) if getattr(part.function_call, 'args', None) else {}
+                                            yield ("TOOL_START", {"name": fn_name, "args": fn_args})
 
                         if model_parts:
                             conversation_contents.append(types.Content(role="model", parts=model_parts))
@@ -428,10 +457,12 @@ class ChatEngine:
                             call_name = call.name
                             call_args = dict(call.args) if call.args else {}
 
+                            if call_name not in emitted_early_tools:
+                                yield ("TOOL_START", {"name": call_name, "args": call_args})
+
                             if call_name in resolved_cfg["disabled_tools"]:
                                 tool_result = {"error": f"The tool '{call_name}' has been disabled by server/channel configuration."}
                             else:
-                                yield ("TOOL_START", {"name": call_name, "args": call_args})
                                 tool_result = await tool_registry.execute(call_name, call_args, tool_context)
                                 yield ("TOOL_END", {"name": call_name, "args": call_args, "result": tool_result})
 

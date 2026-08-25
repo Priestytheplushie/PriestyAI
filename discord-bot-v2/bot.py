@@ -4,6 +4,7 @@ import base64
 import asyncio
 import logging
 import discord
+from typing import Any
 from discord import app_commands
 from config.settings import DISCORD_TOKEN
 from core.client_manager import client_manager
@@ -16,7 +17,7 @@ from handlers.slash_handler import setup_slash_commands
 from handlers.stream_handler import build_v2_message_layout, apply_message_parsers
 from ui.thought_container import ThoughtContainerView
 from ui.context_views import BranchTranscriptView
-from ui.artifact_views import build_code_preview_modal
+from ui.artifact_views import build_code_preview_modal, build_artifact_open_modal, prepare_artifact_download_payload
 
 logger = logging.getLogger("PriestyAI.Main")
 
@@ -147,19 +148,51 @@ class PriestyBot(discord.Client):
         if not custom_id:
             return
 
+        async def resolve_attachment_url(filename: str, message_id_val: str | int) -> str | None:
+            target_msg = interaction.message
+            if not target_msg or not target_msg.attachments:
+                if interaction.channel and message_id_val and str(message_id_val) not in ("0", "temp"):
+                    try:
+                        target_msg = await interaction.channel.fetch_message(int(message_id_val))
+                    except Exception:
+                        target_msg = None
+
+            if target_msg and target_msg.attachments:
+                for att in target_msg.attachments:
+                    if att.filename == filename:
+                        return att.url
+                return target_msg.attachments[0].url
+            return None
+
         if custom_id.startswith("artprev:"):
             parts = custom_id.split(":")
             if len(parts) >= 4:
                 msg_id = parts[1]
                 art_id = parts[2]
                 target_v = int(parts[3]) if parts[3].isdigit() else 1
+                chan_id = interaction.channel_id or 0
 
                 art_db = branch_manager.get_artifact(art_id)
                 if art_db:
                     versions = art_db.get("versions", [])
                     if 1 <= target_v <= len(versions):
                         v_entry = versions[target_v - 1]
-                        modal = build_code_preview_modal(art_db.get("filename", "code.txt"), v_entry.get("content", ""))
+                        filename = art_db.get("filename", "code.txt")
+                        att_url = await resolve_attachment_url(filename, msg_id)
+
+                        async def preview_submit(inter: discord.Interaction, data: dict[str, Any]):
+                            msg_content, discord_files = prepare_artifact_download_payload(art_db, target_v)
+                            if not inter.response.is_done():
+                                await inter.response.send_message(content=msg_content, files=discord_files, ephemeral=True)
+
+                        modal = build_code_preview_modal(
+                            filename=filename,
+                            raw_code=v_entry.get("content", ""),
+                            channel_id=chan_id,
+                            message_id=msg_id,
+                            attachment_url=att_url,
+                            on_submit_callback=preview_submit
+                        )
                         await interaction.response.send_modal(modal)
                         return
 
@@ -172,18 +205,87 @@ class PriestyBot(discord.Client):
                         for art in v_data.get("staged_artifacts", []):
                             if art.get("artifact_id") == art_id:
                                 art_versions = art.get("versions", [])
+                                filename = art.get("filename", "code.txt")
+                                att_url = await resolve_attachment_url(filename, msg_id)
+
+                                target_art_obj = art
+                                async def gen_preview_submit(inter: discord.Interaction, data: dict[str, Any]):
+                                    msg_content, discord_files = prepare_artifact_download_payload(target_art_obj, target_v)
+                                    if not inter.response.is_done():
+                                        await inter.response.send_message(content=msg_content, files=discord_files, ephemeral=True)
+
                                 if art_versions and 1 <= target_v <= len(art_versions):
                                     v_entry = art_versions[target_v - 1]
-                                    modal = build_code_preview_modal(art.get("filename", "code.txt"), v_entry.get("content", ""))
+                                    modal = build_code_preview_modal(
+                                        filename=filename,
+                                        raw_code=v_entry.get("content", ""),
+                                        channel_id=chan_id,
+                                        message_id=msg_id,
+                                        attachment_url=att_url,
+                                        on_submit_callback=gen_preview_submit
+                                    )
                                     await interaction.response.send_modal(modal)
                                     return
                                 files = art.get("files", [])
                                 if files:
-                                    modal = build_code_preview_modal(files[0].get("filename", "code.txt"), files[0].get("content", ""))
+                                    f_name = files[0].get("filename", "code.txt")
+                                    att_url = await resolve_attachment_url(f_name, msg_id)
+                                    modal = build_code_preview_modal(
+                                        filename=f_name,
+                                        raw_code=files[0].get("content", ""),
+                                        channel_id=chan_id,
+                                        message_id=msg_id,
+                                        attachment_url=att_url,
+                                        on_submit_callback=gen_preview_submit
+                                    )
                                     await interaction.response.send_modal(modal)
                                     return
 
             await interaction.response.send_message(content="❌ File preview record expired.", ephemeral=True)
+            return
+
+        if custom_id.startswith("artopen:"):
+            parts = custom_id.split(":")
+            if len(parts) >= 4:
+                msg_id = parts[1]
+                art_id = parts[2]
+                target_v = int(parts[3]) if parts[3].isdigit() else 1
+                chan_id = interaction.channel_id or 0
+
+                target_art = branch_manager.get_artifact(art_id)
+                if not target_art:
+                    gen = branch_manager.get_generation(msg_id)
+                    if gen:
+                        active_v = gen.get("active_version", 1)
+                        versions = gen.get("versions", [])
+                        if 1 <= active_v <= len(versions):
+                            v_data = versions[active_v - 1]
+                            for art in v_data.get("staged_artifacts", []):
+                                if art.get("artifact_id") == art_id:
+                                    target_art = art
+                                    break
+
+                if target_art:
+                    filename = target_art.get("filename", "project.zip")
+                    att_url = await resolve_attachment_url(filename, msg_id)
+
+                    async def open_submit(inter: discord.Interaction, data: dict[str, Any]):
+                        msg_content, discord_files = prepare_artifact_download_payload(target_art, target_v)
+                        if not inter.response.is_done():
+                            await inter.response.send_message(content=msg_content, files=discord_files, ephemeral=True)
+
+                    modal = build_artifact_open_modal(
+                        artifact=target_art,
+                        target_version=target_v,
+                        channel_id=chan_id,
+                        message_id=msg_id,
+                        attachment_url=att_url,
+                        on_submit_callback=open_submit
+                    )
+                    await interaction.response.send_modal(modal)
+                    return
+
+            await interaction.response.send_message(content="❌ Project record expired.", ephemeral=True)
             return
 
         if custom_id.startswith("arthist:"):

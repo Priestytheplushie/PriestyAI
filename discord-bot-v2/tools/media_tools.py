@@ -1,4 +1,3 @@
-import re
 import time
 import urllib.parse
 import logging
@@ -15,7 +14,11 @@ DOWNLOAD_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/126.0.0.0 Safari/537.36"
     ),
-    "Accept": "image/avif,image/webp,image/apng,image/jpeg,image/png,*/*;q=0.8"
+    "Accept": "image/avif,image/webp,image/apng,image/jpeg,image/png,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "image",
+    "Sec-Fetch-Mode": "no-cors",
+    "Sec-Fetch-Site": "cross-site",
 }
 
 def detect_image_format(data: bytes) -> str | None:
@@ -34,20 +37,16 @@ def detect_image_format(data: bytes) -> str | None:
     return None
 
 def is_relevant_candidate(query: str, title: str, image_url: str) -> bool:
-    stopwords = {"official", "key", "art", "render", "image", "photo", "picture", "png", "jpg", "the", "a", "of", "in", "for", "with", "character"}
-    query_words = [w.lower() for w in re.findall(r'[a-zA-Z0-9]+', query) if len(w) >= 3 and w.lower() not in stopwords]
-    
+    target_text = f"{title} {image_url}".lower()
+    query_lower = query.lower()
+
+    stopwords = {"official", "image", "photo", "picture", "png", "jpg", "jpeg", "the", "a", "of", "in", "for", "with", "render"}
+    query_words = [w for w in query_lower.split() if w not in stopwords and len(w) >= 2]
+
     if not query_words:
         return True
 
-    target_text = f"{title} {image_url}".lower()
-
-    matches = [qw for qw in query_words if qw in target_text]
-
-    if len(query_words) >= 3:
-        return len(matches) >= 2
-    
-    return len(matches) >= 1
+    return any(word in target_text for word in query_words)
 
 @tool_registry.register(
     name="search_image",
@@ -55,7 +54,7 @@ def is_relevant_candidate(query: str, title: str, image_url: str) -> bool:
         "MANDATORY tool to find, look up, and attach real-world pictures, character renders, "
         "game art, screenshots, mob renders, items, hardware, or photos to your response in a single step.\n"
         "Parameters:\n"
-        "- query: The exact entity name and context (e.g. 'Luna mo.co character official art', 'Minecraft Warden render png', 'PlayStation 5 Pro console photo').\n"
+        "- query: The exact entity name and context (e.g. 'Fortnite Chapter 7 Season 4 official key art render', 'Minecraft Warden render png').\n"
         "- caption: Optional short title or caption describing the asset."
     )
 )
@@ -95,7 +94,7 @@ async def search_image(
                 continue
 
             if not is_relevant_candidate(query, title, img_url):
-                logger.debug(f"[search_image] Skipping non-matching candidate '{title}' for query '{query}'")
+                logger.debug(f"[search_image] Skipping candidate '{title}' for query '{query}'")
                 continue
 
             try:

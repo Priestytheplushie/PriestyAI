@@ -25,6 +25,7 @@ from core.moderation import (
     ban_user
 )
 from handlers.stream_handler import DiscordStreamDispatcher, build_v2_message_layout, apply_message_parsers
+from parsers.artifact_parser import ArtifactStreamParser
 from tools.registry import ToolExecutionContext
 from ui.thought_container import ThoughtContainerView, PlaceholderLayoutView
 from ui.context_views import BranchHeaderView, BranchTranscriptView
@@ -254,6 +255,7 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         thinking_start_time = time.time()
         stream_dispatcher = DiscordStreamDispatcher(interaction=interaction, is_ephemeral=is_ephemeral, guild=interaction.guild)
         tool_context = ToolExecutionContext(channel=interaction.channel, guild=interaction.guild, author=interaction.user, bot=interaction.client)
+        artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
 
         accumulated_thoughts = []
         tool_call_history = []
@@ -302,7 +304,9 @@ def setup_slash_commands(tree: app_commands.CommandTree):
                         tool_context.staged_image_bytes = None
 
                 elif event_type == "CONTENT":
-                    await stream_dispatcher.append_text(payload)
+                    await artifact_parser.feed(payload)
+
+            await artifact_parser.finish()
 
             final_dur = max(1, int(time.time() - thinking_start_time))
             has_reasoning = bool(accumulated_thoughts or tool_call_history)
@@ -334,84 +338,6 @@ def setup_slash_commands(tree: app_commands.CommandTree):
                 await interaction.edit_original_response(view=err_view)
             except discord.HTTPException:
                 pass
-
-    @tree.command(name="chat", description="Start an interactive conversation session with PriestyAI")
-    @app_commands.allowed_installs(guilds=True, users=True)
-    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    async def chat_command(interaction: discord.Interaction):
-        if is_user_banned(interaction.user.id):
-            ban_view = BannedUserNoticeView(author=interaction.user)
-            await interaction.response.send_message(view=ban_view, ephemeral=True)
-            return
-
-        if not config_manager.has_user_agreed(interaction.user.id):
-            async def on_agreed_chat(sub_inter: discord.Interaction):
-                await _open_chat_modal(sub_inter)
-
-            modal = build_welcome_terms_modal(on_agree_callback=on_agreed_chat)
-            await interaction.response.send_modal(modal)
-            return
-
-        await _open_chat_modal(interaction)
-
-    async def _open_chat_modal(interaction: discord.Interaction):
-        session_id = str(uuid.uuid4())[:8]
-        fields = [
-            {
-                "type": "text_display",
-                "content": "Start a dedicated conversation session with PriestyAI."
-            },
-            {
-                "type": "text_input",
-                "custom_id": "chat_input",
-                "label": "Your Message",
-                "placeholder": "What would you like to discuss?",
-                "style": "paragraph",
-                "required": True
-            }
-        ]
-        
-        async def on_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
-            user_text = data.get("chat_input", "").strip()
-            if not user_text:
-                await sub_inter.response.send_message(content="Please provide a message to begin.", ephemeral=True)
-                return
-
-            is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(user_text)
-            if is_flagged:
-                log_moderation_violation(sub_inter.user.id, sub_inter.guild_id, flagged_cats, score)
-
-                if is_zero_tolerance:
-                    ban_user(sub_inter.user.id, reason=f"Zero-tolerance violation: {', '.join(flagged_cats)}")
-                    ban_view = BannedUserNoticeView(author=sub_inter.user)
-                    await sub_inter.response.send_message(view=ban_view, ephemeral=True)
-                    return
-
-                refusal_text = await generate_friendly_refusal(flagged_cats)
-                await sub_inter.response.send_message(content=refusal_text, ephemeral=True)
-                return
-
-            await sub_inter.response.defer(ephemeral=False)
-            dispatcher = DiscordStreamDispatcher(interaction=sub_inter, is_ephemeral=False, guild=sub_inter.guild)
-            tool_ctx = ToolExecutionContext(channel=sub_inter.channel, guild=sub_inter.guild, author=sub_inter.user, bot=sub_inter.client)
-
-            async for event_type, payload in ChatEngine.stream_chat(
-                prompt=user_text,
-                context_xml="<context></context>",
-                bot_user_id=sub_inter.client.user.id,
-                tool_context=tool_ctx
-            ):
-                if event_type == "CONTENT":
-                    await dispatcher.append_text(payload)
-            await dispatcher.finalize()
-
-        modal = DynamicModalV2(
-            title="Start a Chat Session",
-            custom_id=f"chat_modal_{session_id}",
-            fields_schema=fields,
-            on_submit_callback=on_submit
-        )
-        await interaction.response.send_modal(modal)
 
     @tree.command(name="data", description="Inspect, search, edit, or delete data stored by PriestyAI")
     @app_commands.allowed_installs(guilds=True, users=True)
@@ -789,6 +715,7 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         tool_call_history = []
         active_tool_start_times = {}
         stream_dispatcher = DiscordStreamDispatcher(existing_response_msg=message, guild=interaction.guild)
+        artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
 
         try:
             async for event_type, payload in ChatEngine.stream_chat(
@@ -854,7 +781,9 @@ def setup_slash_commands(tree: app_commands.CommandTree):
                     await placeholder_view.push_live_update()
 
                 elif event_type == "CONTENT":
-                    await stream_dispatcher.append_text(payload)
+                    await artifact_parser.feed(payload)
+
+            await artifact_parser.finish()
 
             stop_loop.set()
             if placeholder_task:
@@ -1032,4 +961,4 @@ def setup_slash_commands(tree: app_commands.CommandTree):
         )
         await interaction.response.send_modal(modal)
 
-    logger.info("Registered Slash Commands & Context Menus: /terms, /ask, /chat, /data, /config, Branch, Retry, View Prompt, Edit.")
+    logger.info("Registered Slash Commands & Context Menus: /terms, /ask, /data, /config, Branch, Retry, View Prompt, Edit.")

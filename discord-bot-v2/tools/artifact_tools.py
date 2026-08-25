@@ -28,17 +28,6 @@ def generate_unified_diff(old_code: str, new_code: str, filename: str, v_old: in
     res_text = diff_text if diff_text.strip() else f"# No textual changes detected between v{v_old} and v{v_new}"
     return res_text, additions, deletions
 
-@tool_registry.register(
-    name="create_artifact",
-    description=(
-        "MANDATORY tool to create standalone code deliverables, complete scripts, applications, or multi-file projects for the user.\n"
-        "Whenever asked to 'build / make / create a script, program, or app' (e.g. calculator, solver, keygen, web app, game), "
-        "you MUST invoke this tool rather than writing the entire script in chat markdown!\n"
-        "- Single script: provide 'filename', 'title', and 'content' (e.g. filename='calculator.py', content='...').\n"
-        "- Multi-file project: provide 'files' as a list of dicts: [{'filename': 'index.html', 'content': '...'}, ...].\n"
-        "Multi-file projects are automatically bundled into a downloadable .zip archive!"
-    )
-)
 async def create_artifact(
     title: str,
     filename: str = "",

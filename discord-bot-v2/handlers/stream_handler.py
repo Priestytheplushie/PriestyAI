@@ -19,8 +19,7 @@ from discord.ui import (
     UserSelect,
     RoleSelect,
     ChannelSelect,
-    MentionableSelect,
-    File as ComponentFile
+    MentionableSelect
 )
 from config.settings import STREAM_DEBOUNCE_INTERVAL, LOADING_EMOJI
 from parsers.mention_parser import parse_mentions
@@ -155,8 +154,7 @@ def build_v2_message_layout(
     active_version: int = 1,
     total_versions: int = 1,
     message_id: str | int | None = None,
-    is_live_stream: bool = False,
-    live_status_text: str | None = None
+    is_live_stream: bool = False
 ) -> ChatMessageLayoutView:
     view = ChatMessageLayoutView(timeout=900)
     target_mid = message_id or "temp"
@@ -167,15 +165,29 @@ def build_v2_message_layout(
     if timeline_blocks:
         ordered_blocks = list(timeline_blocks)
 
-        if len(ordered_blocks) >= 2 and ordered_blocks[0].get("type") == "artifact":
+        if len(ordered_blocks) >= 2 and ordered_blocks[0].get("type") in ["media", "artifact"]:
             first_text_idx = None
             for idx, b in enumerate(ordered_blocks):
                 if b.get("type") == "text" and b.get("content", "").strip():
                     first_text_idx = idx
                     break
+
             if first_text_idx is not None:
-                first_text = ordered_blocks.pop(first_text_idx)
-                ordered_blocks.insert(0, first_text)
+                first_text_raw = ordered_blocks[first_text_idx]["content"]
+                
+                split_match = re.search(r'(?m)^(?=##\s+)', first_text_raw)
+                split_pos = split_match.start() if split_match and split_match.start() > 10 else -1
+
+                if split_pos == -1:
+                    para_match = re.search(r'\n\n', first_text_raw)
+                    if para_match and para_match.start() > 10:
+                        split_pos = para_match.end()
+
+                if split_pos != -1:
+                    intro_part = first_text_raw[:split_pos].strip()
+                    remainder_part = first_text_raw[split_pos:].strip()
+                    ordered_blocks[first_text_idx]["content"] = remainder_part
+                    ordered_blocks.insert(0, {"type": "text", "content": intro_part})
 
         idx = 0
         while idx < len(ordered_blocks) and len(elements) < 35:
@@ -407,10 +419,6 @@ def build_v2_message_layout(
         if staged_buttons:
             elements.append(ActionRow(*staged_buttons))
 
-    if is_live_stream and len(elements) < 39:
-        status_str = live_status_text or "Synthesizing response..."
-        elements.append(TextDisplay(f"-# {LOADING_EMOJI} *{status_str}*"))
-
     if not is_live_stream and message_id:
         if has_thoughts and len(elements) < 39:
             time_str = f"{thought_duration}s" if thought_duration > 0 else "<1s"
@@ -467,7 +475,7 @@ class DiscordStreamDispatcher:
 
         now = asyncio.get_event_loop().time()
         if (now - self.last_edit_time) >= STREAM_DEBOUNCE_INTERVAL:
-            await self.flush()
+            await self.flush(is_final=False)
 
     def add_artifact_placeholder(self, tool_name: str, args: dict[str, Any]):
         filename = args.get("filename") or args.get("title") or "artifact.txt"
@@ -477,27 +485,49 @@ class DiscordStreamDispatcher:
             "filename": filename,
             "title": title,
             "status": "generating",
-            "is_generating": True
+            "is_generating": True,
+            "start_time": time.time()
         }
         self.timeline.append({"type": "artifact", "artifact": placeholder_art, "status": "generating"})
         logger.info(f"[Dispatcher] Anchored live artifact placeholder: '{filename}'")
 
+    def add_artifact_placeholder_record(self, placeholder_art: dict[str, Any]):
+        if "start_time" not in placeholder_art:
+            placeholder_art["start_time"] = time.time()
+        placeholder_art["status"] = "generating"
+        placeholder_art["is_generating"] = True
+        self.timeline.append({"type": "artifact", "artifact": placeholder_art, "status": "generating"})
+        logger.info(f"[Dispatcher] Anchored live XML artifact placeholder: '{placeholder_art.get('filename')}'")
+
     def update_artifact_ready(self, artifact_data: dict[str, Any]):
         target_fn = artifact_data.get("filename")
+        target_id = artifact_data.get("artifact_id")
         found = False
+
         for block in reversed(self.timeline):
-            if block["type"] == "artifact":
-                if not target_fn or block["artifact"].get("filename") == target_fn:
+            if block.get("type") == "artifact":
+                art = block.get("artifact", {})
+                if (
+                    (target_id and art.get("artifact_id") == target_id)
+                    or (target_fn and art.get("filename") == target_fn)
+                    or block.get("status") == "generating"
+                    or art.get("status") == "generating"
+                    or art.get("is_generating")
+                ):
                     block["artifact"] = dict(artifact_data)
                     block["artifact"]["status"] = "ready"
+                    block["artifact"]["is_generating"] = False
                     block["status"] = "ready"
                     found = True
+                    logger.info(f"[Dispatcher] Replaced generating placeholder with ready artifact: '{target_fn}'")
                     break
 
         if not found:
             ready_art = dict(artifact_data)
             ready_art["status"] = "ready"
+            ready_art["is_generating"] = False
             self.timeline.append({"type": "artifact", "artifact": ready_art, "status": "ready"})
+            logger.info(f"[Dispatcher] Appended ready artifact block: '{target_fn}'")
 
     def add_media_block(self, filename: str, data_bytes: bytes):
         if data_bytes and filename:
@@ -546,12 +576,12 @@ class DiscordStreamDispatcher:
         total_versions: int = 1,
         message_id: str | int | None = None,
         is_final: bool = False,
-        live_status_text: str | None = None
+        force: bool = False
     ):
         if not self.timeline and not is_final:
             return
 
-        if not is_final and self.flush_lock.locked():
+        if not is_final and not force and self.flush_lock.locked():
             return
 
         async with self.flush_lock:
@@ -577,8 +607,7 @@ class DiscordStreamDispatcher:
                         active_version=active_version,
                         total_versions=total_versions,
                         message_id=target_msg_id if is_last_slice else None,
-                        is_live_stream=not is_final,
-                        live_status_text=live_status_text if (is_last_slice and not is_final) else None
+                        is_live_stream=not is_final
                     )
 
                     slice_files = self.get_slice_attachments(slice_blocks) if is_final else []
@@ -641,6 +670,5 @@ class DiscordStreamDispatcher:
             active_version=active_version,
             total_versions=total_versions,
             message_id=message_id,
-            is_final=True,
-            live_status_text=None
+            is_final=True
         )

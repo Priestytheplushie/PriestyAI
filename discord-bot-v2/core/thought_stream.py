@@ -1,108 +1,69 @@
 import re
+import asyncio
+import logging
+from google.genai import types
+from core.client_manager import client_manager
 
-TRANSITION_TAXONOMY = [
-    (
-        r"(?i)^(okay|first|to start|let's begin|let me understand|the user is asking|understanding|i need to understand)",
-        "Understanding Request"
-    ),
-    (
-        r"(?i)^(now|next|looking at|let's check|evaluating|considering|analyzing|examining|regarding)",
-        "Analyzing Context & Constraints"
-    ),
-    (
-        r"(?i)^(let me search|searching for|calling tool|i need to find|querying|looking up|search_web|read_link)",
-        "Executing Research & Verification"
-    ),
-    (
-        r"(?i)^(calculating|computing|writing code|debugging|verifying|processing|deriving|proving|tracing)",
-        "Processing Logic & Derivations"
-    ),
-    (
-        r"(?i)^(in contrast|on the other hand|comparing|alternative|trade-offs|alternatively|however)",
-        "Evaluating Architectural Trade-offs"
-    ),
-    (
-        r"(?i)^(finally|in summary|now i can answer|formulating the response|in conclusion|synthesizing|to conclude)",
-        "Formulating Final Response"
-    )
-]
+logger = logging.getLogger("PriestyAI.ThoughtStream")
+
+THOUGHT_FORMATTER_SYSTEM_INSTRUCTION = """You are the internal reasoning formatter for PriestyAI.
+Your task is to take the model's raw scratchpad monologue and structure it into authentic, first-person reasoning steps matching the exact voice, depth, and cadence of Gemini 3.7 Flash.
+
+STRICT FORMATTING & VOICE DIRECTIVES:
+1. FIRST-PERSON ACTIVE VOICE ("I", "I'm", "Let me"):
+   - Write from the internal perspective of the AI actively thinking and solving the problem.
+   - Example style:
+     "I'm analyzing the user's requirement for an LRU cache with TTL eviction. I need to make sure both capacity limits and time expiration work in O(1) time without blocking lookups. Let me check if Python's OrderedDict is sufficient or if a custom doubly-linked list is necessary..."
+   - NEVER write in the third-person or sound like an explanatory essay/textbook (e.g., avoid "Designing an LRU cache requires harmonizing two strategies...").
+
+2. DYNAMIC TITLES: Group the thoughts into logical conceptual phases. Prepend each phase with a bold semantic title on its own line: **Title**
+   Examples:
+   - **Analyzing Architecture & TTL Eviction Constraints**
+   - **Evaluating Data Structures & Lock Mechanics**
+   - **Tracing Edge Cases & Expiration Boundaries**
+   - **Formulating Final Implementation**
+
+3. PARAGRAPH PROSE: Write in complete, analytical sentences inside full prose paragraphs under each bold title. Do NOT reduce reasoning to bulleted checklists.
+
+4. COMPLETE FIDELITY: Preserve 100% of all technical logic, algorithms, equations, variable names, and code snippets. Do NOT invent new decisions or omit complex steps.
+
+5. CLEAN SLOP: Remove conversational filler words (e.g. "Okay so let's see", "Hmm wait", "Let me check", "Well...").
+
+6. Output ONLY the formatted markdown thoughts with zero meta-commentary.
+"""
 
 def standardize_thoughts_text(raw_thoughts: str) -> str:
     if not raw_thoughts or not raw_thoughts.strip():
         return "No intermediate reasoning steps recorded."
 
     cleaned_raw = raw_thoughts.strip()
+    paragraphs = [p.strip() for p in cleaned_raw.split("\n\n") if p.strip()]
+    return "\n\n".join(paragraphs) if paragraphs else cleaned_raw
 
-    if re.search(r"\*\*[A-Za-z\s&]+\*\*", cleaned_raw):
-        return re.sub(r"\n{3,}", "\n\n", cleaned_raw)
-
-    cleaned_raw = re.sub(r"(?i)^(okay,\s*so\s*|let me see,\s*|well,\s*|let's think,\s*)", "", cleaned_raw)
-
-    sentences = re.split(r'(?<=[.!?])\s+', cleaned_raw)
-    
-    formatted_sections: list[tuple[str, list[str]]] = []
-    current_title = "Understanding Request"
-    current_sentences: list[str] = []
-
-    for sentence in sentences:
-        s_clean = sentence.strip()
-        if not s_clean:
-            continue
-
-        matched_title = None
-        for pattern, title in TRANSITION_TAXONOMY:
-            if re.search(pattern, s_clean):
-                matched_title = title
-                break
-
-        if matched_title and matched_title != current_title:
-            if current_sentences:
-                formatted_sections.append((current_title, current_sentences))
-                current_sentences = []
-            current_title = matched_title
-
-        s_clean = re.sub(r"(?i)^(okay|first|now|next|finally|in summary|let me check)\s*,\s*", "", s_clean)
-        if s_clean:
-            s_clean = s_clean[0].upper() + s_clean[1:]
-        current_sentences.append(s_clean)
-
-    if current_sentences:
-        formatted_sections.append((current_title, current_sentences))
-
-    output_blocks = []
-    for title, s_list in formatted_sections:
-        paragraph = " ".join(s_list)
-        output_blocks.append(f"**{title}**\n{paragraph}")
-
-    return "\n\n".join(output_blocks)
-
-class LiveThoughtStandardizer:
-    def __init__(self):
-        self.buffer = ""
-        self.current_heading = None
-
-    def process_chunk(self, text_chunk: str) -> str:
-        if "**" in text_chunk:
-            return text_chunk
-
-        self.buffer += text_chunk
-        sentences = re.split(r'(\. |\n)', self.buffer)
-
-        if len(sentences) > 1:
-            complete_sentence = sentences[0] + sentences[1]
-            self.buffer = "".join(sentences[2:])
-
-            cleaned = complete_sentence.strip()
-            for pattern, title in TRANSITION_TAXONOMY:
-                if re.search(pattern, cleaned) and self.current_heading != title:
-                    self.current_heading = title
-                    return f"\n\n**{title}**\n{cleaned} "
-
-            return complete_sentence
-
+async def format_thoughts_with_llm(raw_thoughts: str) -> str:
+    if not raw_thoughts or not raw_thoughts.strip():
         return ""
 
-    def flush(self) -> str:
-        remaining = self.buffer
-        self.buffer = ""
-        return remaining
+    client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite")
+    if not client:
+        return standardize_thoughts_text(raw_thoughts)
+
+    try:
+        config = types.GenerateContentConfig(
+            system_instruction=THOUGHT_FORMATTER_SYSTEM_INSTRUCTION,
+            temperature=0.2
+        )
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=active_model,
+                contents=f"Raw Model Thinking:\n{raw_thoughts[:7500]}",
+                config=config
+            ),
+            timeout=4.5
+        )
+        if response.text and response.text.strip():
+            return response.text.strip()
+    except Exception as e:
+        logger.warning(f"[ThoughtStream] JIT thought formatting failed or timed out: {e}")
+
+    return standardize_thoughts_text(raw_thoughts)

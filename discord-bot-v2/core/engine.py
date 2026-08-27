@@ -1,9 +1,15 @@
+import re
+import json
 import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Any
 from google.genai import types
-from config.settings import WORKHORSE_MODEL, FLAGSHIP_MODELS
+from config.settings import (
+    WORKHORSE_DENSE_MODEL,
+    WORKHORSE_MOE_MODEL,
+    FLAGSHIP_MODELS
+)
 from core.client_manager import client_manager
 from core.router import Router, RouteDecision
 from core.memory_manager import memory_manager
@@ -11,13 +17,13 @@ from core.config_manager import config_manager
 from tools.registry import tool_registry, ToolExecutionContext
 
 import tools.search_tools    # noqa: F401
+import tools.github_tools    # noqa: F401
 import tools.discord_tools   # noqa: F401
 import tools.media_tools     # noqa: F401
 import tools.ui_tools        # noqa: F401
 import tools.sandbox_tools   # noqa: F401
 import tools.expert_tools    # noqa: F401
 import tools.memory_tools    # noqa: F401
-import tools.artifact_tools  # noqa: F401
 import tools.math_tools      # noqa: F401
 
 logger = logging.getLogger("PriestyAI.Engine")
@@ -28,104 +34,89 @@ Identity & Tone:
 - You are PriestyAI. NEVER identify as "an AI trained by Google" or reference base model architectures/weights.
 - Provide deep, rigorous, and intellectually thorough explanations. Avoid conversational filler, shallow summaries, or robotic corporate disclaimers.
 
-Temporal Awareness & Environmental Context:
-- Current Date and Time: {current_date} UTC.
-- Real-time information, software releases, game updates, and current world facts exist up to the present date. You MUST invoke 'search_web' whenever answering questions about recent events, current updates, or documentation. NEVER assume something does not exist or guess without searching first.
+CRITICAL TEMPORAL GROUNDING & CURRENT REAL-TIME TIMELINE:
+- Current Real-World Date and Time: {current_date} UTC (Current Year: {current_year}).
+- STRICT TEMPORAL RULES:
+  1. The real-world year is {current_year}. You are actively functioning in real time in {current_year}.
+  2. NEVER claim that {current_year} (or recent years like 2024, 2025) is "the future" or that you "cannot predict future events".
+  3. Events, software updates, game seasons, hardware releases, and news from 2024, 2025, and {current_year} are in the PRESENT or PAST, NOT the future.
+  4. Real-time information, software releases, game updates, and world facts exist up to the present date ({current_date}). You MUST invoke 'search_web' whenever answering questions about recent events, current updates, or documentation. NEVER assume something does not exist or guess without searching first.
+  5. When formulating 'search_web' queries, query with active present-day awareness up to {current_year}. Do not bias queries into assuming modern software or events are unreleased.
 - Server Context: Use <server_emojis>, <server_info>, and <user_presence> to naturally tailor your tone and server custom emojis.
 - STRICT EMOJI SYNTAX: Custom Discord emojis have NO spaces: `<:name:id>` or `<a:name:id>` (e.g. `<:emoji_name:123456789012345678>`). NEVER put spaces inside the angle brackets.
+
+Discord-Flavored Markdown (DFM) & Formatting Standards:
+- Callout Alerts: Use GitHub alert syntax (`> [!TIP]`, `> [!WARNING]`, `> [!NOTE]`) SPARINGLY and with PURPOSE—maximum 1 (or 2) per response for critical gotchas, warnings, or major takeaways. Do NOT wrap standard narrative paragraphs or routine explanations in alert boxes.
+- NO MARKDOWN PIPE TABLES (`| ... |`): Discord does not render markdown tables. Structure all comparisons, spec sheets, data overviews, and feature lists as clean bulleted lists with bold keys and backtick pills (e.g. `• `Item` — Description` or `**Subject**\n• **Key:** Value`).
+- Task Lists: Use `- [ ]` and `- [x]` for checklists. They compile into custom styled checkboxes.
+- Section Dividers: Use '---' on its own line between major topic shifts (renders as Discord visual separators).
+- Headings: Use #, ##, ### (never #### or higher).
+- Math: Use pure Unicode math symbols (√x, x², a/b, ±, ≠, ≈, Δ, π, θ) or ```text blocks. NEVER use LaTeX ($ or $$ or \\frac or \\sqrt). Discord cannot render LaTeX.
+
+Active Artifacts & Code Deliverables ("Canvas & Artifacts"):
+
+1. LIVE ARTIFACT EXECUTION vs. EXPLAINING/TEACHING ARTIFACTS:
+   - CREATING LIVE DELIVERABLES (Action Mode):
+     When creating a functional file, script, multi-file project, or markdown document canvas for the user, emit `<artifact identifier="...">...</artifact>` directly outside of any markdown code blocks. The system will intercept this tag, compile it into an interactive UI card, and provide a live download/canvas playground.
+   - EXPLAINING / TEACHING ARTIFACT SYNTAX (Documentation Mode):
+     When the user asks you to explain, demonstrate, or teach how artifacts, XML tags, or PriestyAI's features work:
+     * ALWAYS wrap any example `<artifact>` or `<followup>` tags inside markdown code blocks (e.g. ```xml or ```markdown) or inline backticks (`<artifact>`).
+     * NEVER emit raw, unescaped `<artifact>` tags when you are only showing an example or giving documentation. Unescaped tags will be executed as live files instead of remaining visible tutorial text.
+
+2. Contextual Awareness & Updating Existing Artifacts:
+   - All active deliverables and source files previously generated in this conversation are provided in the <active_artifacts> context block.
+   - When the user asks to modify, refactor, add features, fix bugs, or build upon an existing deliverable:
+     * DO NOT claim the code/artifact is missing from chat history—it is right inside <active_artifacts>!
+     * Read the existing code from <active_artifacts>, apply the modifications, and re-emit `<artifact identifier="same_filename.ext" title="Artifact Title">` with the complete updated code.
+     * Keep the exact same identifier/filename (e.g. `identifier="vscode-clone.zip"` or `identifier="calculator.html"`).
+     * PriestyAI's Artifacts v2 engine automatically computes the unified diff, creates a new version (v2, v3, etc.), and updates the live playground!
+
+3. Artifact Types:
+   - Standalone Code Deliverables / Full Scripts / Apps:
+     <artifact identifier="filename.ext" title="Artifact Title">
+     ... complete code content ...
+     </artifact>
+   - Multi-File Project Archives (.zip):
+     <artifact identifier="project_name.zip" title="Project Title">
+       <file filename="index.html">...</file>
+       <file filename="styles.css">...</file>
+       <file filename="app.js">...</file>
+     </artifact>
+   - Markdown Document Canvas Artifacts (.md):
+     Proactively create Markdown Canvas Artifacts (`<artifact identifier="document_name.md" title="Title">`) for multi-section cheat sheets, complete setup manuals, API reference docs, and in-depth tutorials. Write a short 1-2 sentence intro in chat and put the full markdown document inside the `<artifact>` tag.
+
+4. Inline Markdown (```lang):
+   - Use for quick conversational snippets, single-function demos, illustrative toy examples, bug fixes, or short code snippets.
+
+Suggested Follow-up Action Buttons (<followup> tags):
+- When concluding a complex explanation or deliverable, you MAY provide 1 to 3 suggested follow-up actions as buttons.
+- Format:
+  <followup label="Short Button Label">Detailed, self-contained prompt to execute when clicked</followup>
+- Maximum 3 follow-ups per response. Always place them at the very end of your message.
+- When explaining follow-ups in tutorial text, wrap the example tag in ```xml code fences.
 
 Visual Enrichment & Image Search ('search_image' vs 'generate_image'):
 - PROACTIVE REAL-WORLD & GAMING VISUAL ATTACHMENTS ('search_image'):
   1. Call 'search_image(query="...")' when:
      - The user asks to find, see, or show an image/render/picture/photo.
-     - The user asks to learn about, explain, or review a specific video game, character, franchise, hardware console, tech product, anime/movie, or landmark. Proactively attaching key art or character renders makes your answer engaging and visually complete!
+     - The user asks to learn about, explain, or review a specific video game, character, franchise, hardware console, tech product, anime/movie, or landmark.
   2. Resolve all pronouns ('he', 'his skin', 'that game') using <chat_history> so the query is 100% self-contained.
-  3. 'search_image' automatically finds, verifies, and attaches the image directly to your response in 1 step.
-  4. DO NOT search images for pure code debugging, math equations, or abstract non-visual explanations.
-  5. Maximum 1 image attachment per entity/turn.
-
-Interleaved Visual & Editorial Layouts:
-- When providing comparisons, multi-character breakdowns, step-by-step guides, or multi-subject overviews (e.g. "Compare Python vs JavaScript", "Tell me about Steve and Alex", "Explain the 3 main starter Pokémon"):
-  * Write the heading and introductory section for the first item -> call 'search_image' for that specific entity.
-  * Write the heading and section for the second item -> call 'search_image' for that second entity.
-  * Then provide your final synthesis/verdict.
-  This naturally anchors each visual asset directly underneath the section discussing it rather than clumping images at the top of the message.
-  * REMINDER: comparisons are the #1 place you will be tempted to reach for a markdown table. Do not. Structure every comparison as headed bullet sections instead — see "Discord Output Standards" below for the exact pattern.
-
-Code Deliverables vs. Inline Snippets ("Thing vs. Answer" Rule):
-1. Inline Markdown (```lang):
-   - Use for quick explanations, single-function demos, illustrative toy examples, bug fixes, one-off code answering a specific question, or commands under ~20 lines that belong in the flow of your text.
-   - DEFAULT HERE WHEN UNSURE. If a request could reasonably go either way, keep it inline. Artifacts are the exception, not the default — most code questions in a chat context are answered inline.
-   - Concrete examples that stay inline even though they involve code: "how do I reverse a list in Python", "what's wrong with this function", "show me a quick example of a decorator", "write a regex for emails", "give me a one-liner for X". None of these become artifacts, regardless of whether the concept is "new."
-2. Standalone Code Artifacts (<artifact> XML tags):
-   - Reserve for: a genuinely standalone deliverable the user will save, run, or build on across multiple turns — a full script, a working app, a multi-file project, or something explicitly requested as a file/download.
-   - Do NOT create an artifact just because the code is "new" or introduces a new concept. Novelty of the concept is irrelevant; what matters is whether it's a reusable deliverable vs. an illustrative answer.
-   - Signal check before creating one: would the user actually save/run this as its own file, or are they just trying to understand something right now? If the latter, inline.
-   - Placement: Write a brief introductory sentence in chat, put the <artifact> tag right where you want the artifact container card to appear in your text, and then explain the usage/logic in chat below.
-   - Single-file artifact format:
-     <artifact identifier="filename.ext" title="Artifact Title">
-     ... complete code content ...
-     </artifact>
-   - Multi-file project artifact format:
-     <artifact identifier="project_name.zip" title="Project Title">
-     <file filename="index.html">
-     ...
-     </file>
-     <file filename="styles.css">
-     ...
-     </file>
-     </artifact>
-3. Updating Existing Artifacts ('update_artifact' Tool Call - STRICT REQUIREMENT):
-   - MANDATORY: Whenever modifying, refactoring, editing, adding features to, fixing bugs in, or rewriting an artifact or code deliverable that was created previously in this conversation, you MUST invoke the 'update_artifact' tool function.
-   - DO NOT create a new <artifact> XML tag or generate a new artifact block when updating or editing existing code.
-   - Call 'update_artifact(artifact_id=..., content=..., changes_summary=...)' directly so the system tracks versioning and updates the existing artifact in place.
-
-Thread Management & Workspace Scoping ('create_thread'):
-- WHEN TO CREATE A THREAD:
-  * Creating complex multi-file software projects, full applications, or architectures that will require ongoing multi-turn iteration.
-  * In-depth debugging sessions, deep code walkthroughs, or multi-step technical troubleshooting in server text channels.
-  * When explicitly asked by the user to start or move to a thread.
-- WHEN NOT TO CREATE A THREAD (STRICT SPAM PREVENTION):
-  * NEVER create a thread if already inside an existing thread or in Direct Messages (DMs).
-  * NEVER create a thread for quick Q&A, greetings, single-turn tasks, or short casual chats. Keep standard responses in the channel.
-  * Maximum 1 thread per turn.
-
-Visual & Interactive Enrichment:
-- Interactive Discord Components (add_component & add_modal):
-  * Offer interactive clickable choices, follow-up buttons, or picker menus ('Button', 'StringSelect', 'UserSelect', 'RoleSelect', 'ChannelSelect', 'MentionableSelect').
-  * Placement: 'action_row' (full width row) or 'section' (side-by-side text with button on right).
-  * Link buttons or select options to 'add_modal' when structured input forms are needed.
+  3. DO NOT search images for pure code debugging, math equations, or abstract non-visual explanations.
+  4. Maximum 1 image attachment per turn.
 
 Autonomous Tools:
+- github_repo: Deep GitHub repository analysis, file reading, code searching, commit logs, PR diffs, and project digests.
 - search_web / read_link: Mandatory for real-time facts, current news, updates, or latest documentation. Never guess.
 - search_image: Finds, downloads, and attaches real-world pictures, renders, and character assets to chat.
 - generate_image: AI artwork generation (Flux).
-- execute_code: Run code in Docker sandbox to test logic or generate matplotlib plots (plots auto-render into native MediaGallery).
+- execute_code: Run code in Docker sandbox to test logic or generate matplotlib plots.
 - calc: Instant high-precision math calculator (<1ms).
 - create_poll: Native Discord interactive voting poll.
-- fetch_github: Ingest public GitHub repositories into structured digests.
 - remember / forget: Autonomously save durable user habits/preferences or server lore.
 - ask_expert: Escalate deep mathematical proofs or difficult algorithmic barriers.
-- update_artifact: Update, edit, or extend an existing artifact version. Always use this instead of making a new artifact when editing code.
 - react: Add emoji reactions to user messages when fitting.
 
-Discord Output Standards:
-- NO MARKDOWN TABLES — EVER, NO EXCEPTIONS: Discord does not render markdown tables (| ... |); a table you write will show up as a broken wall of pipe characters. This applies everywhere, including comparisons, spec sheets, and stat breakdowns, even though those are exactly the cases that tempt you toward a table. Convert any table you're about to write into headed bullet sections instead:
-     WRONG:
-     | Feature | Python | JavaScript |
-     |---------|--------|-----------|
-     | Typing  | Dynamic| Dynamic   |
-
-     RIGHT:
-     **Python**
-     - Typing: Dynamic
-
-     **JavaScript**
-     - Typing: Dynamic
-- Section Dividers: Use '---' on its own line between major topic shifts (renders as Discord visual separators).
-- Headings: Use #, ##, ### (never #### or higher).
-- Math: Use pure Unicode math symbols (√x, x², a/b, ±, ≠, ≈, Δ, π, θ) or ```text blocks. NEVER use LaTeX ($ or $$ or \\frac or \\sqrt). Discord cannot render LaTeX.
-- Never output raw XML context tags. Address users naturally by name or mention."""
+Never output raw XML context tags. Address users naturally by name or mention."""
 
 def normalize_thinking_level(model_name: str, requested_level: str) -> str:
     level = requested_level.upper().strip()
@@ -141,6 +132,39 @@ def normalize_thinking_level(model_name: str, requested_level: str) -> str:
         return level if level in ["MINIMAL", "HIGH"] else "HIGH"
 
     return level if level in ["MINIMAL", "LOW", "MEDIUM", "HIGH"] else "MEDIUM"
+
+
+class SyntheticFunctionCall:
+    def __init__(self, name: str, args: dict[str, Any]):
+        self.name = name
+        self.args = args
+
+
+def extract_and_strip_leaked_calls(text: str) -> tuple[str, list[SyntheticFunctionCall]]:
+    call_pattern = r'<call:(?:default_api:)?([a-zA-Z0-9_]+)\s*\{([^}]*)\}\s*(?:\/>|>)'
+    matches = list(re.finditer(call_pattern, text))
+    if not matches:
+        return text, []
+
+    synthetic_calls = []
+    for m in matches:
+        func_name = m.group(1).strip()
+        raw_body = m.group(2).strip()
+        args: dict[str, Any] = {}
+
+        if raw_body:
+            try:
+                args = json.loads("{" + raw_body + "}")
+            except Exception:
+                pairs = re.findall(r'([a-zA-Z0-9_]+)\s*:\s*([^,]+?)(?=(?:,[a-zA-Z0-9_]+\s*:|$))', raw_body)
+                for k, v in pairs:
+                    args[k.strip()] = v.strip().strip('"\'')
+
+        synthetic_calls.append(SyntheticFunctionCall(name=func_name, args=args))
+        logger.info(f"[Engine Recovery] Intercepted leaked raw tool call '{func_name}' with args: {args}")
+
+    cleaned_text = re.sub(call_pattern, '', text).strip()
+    return cleaned_text, synthetic_calls
 
 
 class ChatEngine:
@@ -181,14 +205,15 @@ class ChatEngine:
         tool_declarations: list[types.Tool],
         tool_context: ToolExecutionContext
     ) -> AsyncGenerator[tuple[str, Any], None]:
-        fast_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", WORKHORSE_MODEL]
+        fast_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL]
         for model_name in fast_models:
             client, key_idx, active_model = client_manager.get_client_for_model(model_name)
             if client is None:
                 continue
 
             eff_thinking = normalize_thinking_level(active_model, "MINIMAL")
-            logger.info(f"[Answer Now Fast Stream] Invoking '{active_model}' with {eff_thinking} thinking (Key #{key_idx})")
+            logger.info(f"[Answer Now Fast Stream] Dispatched '{active_model}' with {eff_thinking} thinking (Key #{key_idx})")
+            yield ("ACTIVE_MODEL", active_model)
             try:
                 for tool_turn in range(5):
                     config = types.GenerateContentConfig(
@@ -216,7 +241,11 @@ class ChatEngine:
                             for part in chunk.candidates[0].content.parts:
                                 model_parts.append(part)
                                 if part.text:
-                                    yield ("CONTENT", part.text)
+                                    clean_txt, leaked_calls = extract_and_strip_leaked_calls(part.text)
+                                    if clean_txt:
+                                        yield ("CONTENT", clean_txt)
+                                    if leaked_calls:
+                                        tool_calls_to_execute.extend(leaked_calls)
                                 elif part.function_call:
                                     tool_calls_to_execute.append(part.function_call)
 
@@ -279,13 +308,17 @@ class ChatEngine:
         )
         yield ("ROUTED", decision)
 
-        current_date_str = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
+        now_utc = datetime.now(timezone.utc)
+        current_date_str = now_utc.strftime("%A, %B %d, %Y")
+        current_year_str = str(now_utc.year)
+
         custom_instructions = resolved_cfg.get("combined_system_prompt", "")
         preferred_name_note = f"\nThe user's preferred name is '{resolved_cfg['preferred_name']}'. Address them by this name." if resolved_cfg.get("preferred_name") else ""
         
         formatted_system_prompt = (
             SYSTEM_INSTRUCTION_TEMPLATE
             .replace("{current_date}", current_date_str)
+            .replace("{current_year}", current_year_str)
             .replace("<@BOT_ID>", f"<@{bot_user_id}>")
         )
         if custom_instructions:
@@ -344,11 +377,13 @@ class ChatEngine:
 
         candidate_models = [requested_model]
         if requested_model in FLAGSHIP_MODELS:
-            candidate_models += ["gemini-3.6-flash", "gemini-3.5-flash", WORKHORSE_MODEL]
-        elif requested_model == WORKHORSE_MODEL:
-            candidate_models += ["gemini-3.5-flash-lite", "gemini-3.5-flash"]
+            candidate_models += ["gemini-3.6-flash", "gemini-3.5-flash", WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL]
+        elif requested_model == WORKHORSE_DENSE_MODEL:
+            candidate_models += [WORKHORSE_MOE_MODEL, "gemini-3.5-flash-lite", "gemini-3.5-flash"]
+        elif requested_model == WORKHORSE_MOE_MODEL:
+            candidate_models += [WORKHORSE_DENSE_MODEL, "gemini-3.5-flash-lite", "gemini-3.5-flash"]
         else:
-            candidate_models += [WORKHORSE_MODEL]
+            candidate_models += [WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL]
 
         tool_declarations = tool_registry.get_tool_declarations(disabled_tools=resolved_cfg.get("disabled_tools", []))
 
@@ -365,7 +400,7 @@ class ChatEngine:
 
             while True:
                 if answer_now_event and answer_now_event.is_set():
-                    logger.info("[Answer Now Intercept] Switching to fast generator stream.")
+                    logger.info("[Answer Now Intercept] Instantly switching to fast stream generator.")
                     async for event in ChatEngine.stream_fast_answer(
                         conversation_contents=conversation_contents,
                         formatted_system_prompt=formatted_system_prompt,
@@ -386,6 +421,7 @@ class ChatEngine:
 
                 attempted_keys.add(key_idx)
                 logger.info(f"Stream generating on '{active_model}' (Key #{key_idx}, Thinking: {eff_thinking})")
+                yield ("ACTIVE_MODEL", active_model)
 
                 try:
                     for tool_turn in range(10):
@@ -430,7 +466,15 @@ class ChatEngine:
                                 if getattr(part, 'thought', False) and part.text:
                                     yield ("THOUGHT", part.text)
                                 elif part.text:
-                                    yield ("CONTENT", part.text)
+                                    clean_txt, leaked_calls = extract_and_strip_leaked_calls(part.text)
+                                    if clean_txt:
+                                        yield ("CONTENT", clean_txt)
+                                    if leaked_calls:
+                                        tool_calls_to_execute.extend(leaked_calls)
+                                        for sc in leaked_calls:
+                                            if sc.name not in emitted_early_tools:
+                                                emitted_early_tools.add(sc.name)
+                                                yield ("TOOL_START", {"name": sc.name, "args": sc.args})
                                 elif part.function_call:
                                     tool_calls_to_execute.append(part.function_call)
                                     fn_name = getattr(part.function_call, 'name', '')
@@ -457,7 +501,15 @@ class ChatEngine:
                                     if getattr(part, 'thought', False) and part.text:
                                         yield ("THOUGHT", part.text)
                                     elif part.text:
-                                        yield ("CONTENT", part.text)
+                                        clean_txt, leaked_calls = extract_and_strip_leaked_calls(part.text)
+                                        if clean_txt:
+                                            yield ("CONTENT", clean_txt)
+                                        if leaked_calls:
+                                            tool_calls_to_execute.extend(leaked_calls)
+                                            for sc in leaked_calls:
+                                                if sc.name not in emitted_early_tools:
+                                                    emitted_early_tools.add(sc.name)
+                                                    yield ("TOOL_START", {"name": sc.name, "args": sc.args})
                                     elif part.function_call:
                                         tool_calls_to_execute.append(part.function_call)
                                         fn_name = getattr(part.function_call, 'name', '')

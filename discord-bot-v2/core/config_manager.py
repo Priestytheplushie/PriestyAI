@@ -307,7 +307,7 @@ class ConfigManager:
         if not interaction.guild:
             return False, "This configuration scope requires a Discord server."
 
-        member = interaction.guild.get_member(interaction.user.id)
+        member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
         if not member:
             return False, "Member context unavailable."
 

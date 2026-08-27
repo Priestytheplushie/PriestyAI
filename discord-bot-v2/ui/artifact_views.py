@@ -1,22 +1,21 @@
 import io
+import time
+import zipfile
 import logging
 from typing import Any
 import discord
-import time
-import zipfile
-from discord import ui
 from discord.ui import (
-    LayoutView,
     Container,
     Section,
     TextDisplay,
-    Separator,
     ActionRow,
     Button,
     Select
 )
 from config.settings import LOADING_EMOJI
 from ui.modals import DynamicModalV2
+from core.playground_server import playground_server
+from parsers.markdown_parser import apply_dfm
 
 logger = logging.getLogger("PriestyAI.ArtifactUI")
 
@@ -80,49 +79,36 @@ FILE_ICON_MAP = {
 
 DEFAULT_FILE_ICON = "<:ext_txt:1541304855593881670>"
 
-
 def get_file_icon(filename: str) -> str:
     if not filename:
         return DEFAULT_FILE_ICON
-
-    ext = (
-        filename.rsplit(".", 1)[-1].lower()
-        if "." in filename
-        else filename.lower()
-    )
-
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else filename.lower()
     return FILE_ICON_MAP.get(ext, DEFAULT_FILE_ICON)
-
 
 def format_size(bytes_count: int) -> str:
     if bytes_count < 1024:
         return f"{bytes_count} B"
     elif bytes_count < 1024 * 1024:
         return f"{bytes_count / 1024:.1f} KB"
-
     return f"{bytes_count / (1024 * 1024):.1f} MB"
 
+def is_markdown_document(filename: str) -> bool:
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return ext in ("md", "markdown", "txt")
 
 def prepare_artifact_download_payload(
     artifact: dict[str, Any],
     target_version: int = 1
 ) -> tuple[str, list[discord.File]]:
-
     filename = artifact.get("filename", "download.txt")
     versions = artifact.get("versions", [])
     files_data = artifact.get("files", [])
 
     target_v_data = None
-
     if versions and 1 <= target_version <= len(versions):
         target_v_data = versions[target_version - 1]
 
-    v_files = (
-        target_v_data.get("files", files_data)
-        if target_v_data
-        else files_data
-    )
-
+    v_files = target_v_data.get("files", files_data) if target_v_data else files_data
     is_multi = filename.endswith(".zip") or len(v_files) > 1
 
     discord_files: list[discord.File] = []
@@ -130,12 +116,7 @@ def prepare_artifact_download_payload(
 
     if is_multi:
         zip_buf = io.BytesIO()
-
-        with zipfile.ZipFile(
-            zip_buf,
-            "w",
-            zipfile.ZIP_DEFLATED
-        ) as zf:
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in v_files:
                 f_name = f.get("filename", "file.txt")
                 f_content = f.get("content", "")
@@ -144,86 +125,30 @@ def prepare_artifact_download_payload(
         zip_buf.seek(0)
         zip_bytes = zip_buf.getvalue()
 
-        zip_fn = (
-            filename
-            if filename.endswith(".zip")
-            else f"{filename.rsplit('.', 1)[0]}.zip"
-        )
+        zip_fn = filename if filename.endswith(".zip") else f"{filename.rsplit('.', 1)[0]}.zip"
+        discord_files.append(discord.File(io.BytesIO(zip_bytes), filename=zip_fn))
 
-        discord_files.append(
-            discord.File(
-                io.BytesIO(zip_bytes),
-                filename=zip_fn
-            )
-        )
-
-        text_lines.append(
-            f"📦 **Your project is ready!**"
-        )
-        text_lines.append(
-            f"• `{zip_fn}` — Full project"
-        )
+        text_lines.append("📦 **Your project is ready!**")
+        text_lines.append(f"• `{zip_fn}` — Full project archive")
 
         for f in v_files[:9]:
             f_name = f.get("filename", "file.txt")
             f_content = f.get("content", "")
-
-            f_bytes = f_content.encode("utf-8")
-
-            discord_files.append(
-                discord.File(
-                    io.BytesIO(f_bytes),
-                    filename=f_name
-                )
-            )
-
-            text_lines.append(
-                f"• `{f_name}`"
-            )
+            discord_files.append(discord.File(io.BytesIO(f_content.encode("utf-8")), filename=f_name))
+            text_lines.append(f"• `{f_name}`")
 
         if len(v_files) > 9:
-            text_lines.append(
-                f"-# Plus {len(v_files) - 9} more files in the project archive"
-            )
-
+            text_lines.append(f"-# Plus {len(v_files) - 9} more files in the project archive")
     else:
-        content = (
-            target_v_data.get("content", "")
-            if target_v_data
-            else (
-                v_files[0].get("content", "")
-                if v_files
-                else ""
-            )
-        )
-
+        content = target_v_data.get("content", "") if target_v_data else (v_files[0].get("content", "") if v_files else "")
         raw_bytes = content.encode("utf-8")
+        f_name = filename if not filename.endswith(".zip") else (v_files[0].get("filename", "script.txt") if v_files else "script.txt")
 
-        f_name = (
-            filename
-            if not filename.endswith(".zip")
-            else (
-                v_files[0].get("filename", "script.txt")
-                if v_files
-                else "script.txt"
-            )
-        )
-
-        discord_files.append(
-            discord.File(
-                io.BytesIO(raw_bytes),
-                filename=f_name
-            )
-        )
-
-        text_lines.append(
-            f"📥 **Your file is ready:** `{f_name}`"
-        )
+        discord_files.append(discord.File(io.BytesIO(raw_bytes), filename=f_name))
+        text_lines.append(f"📥 **Your file is ready:** `{f_name}`")
 
     msg_text = "\n".join(text_lines)
-
     return msg_text, discord_files
-
 
 def build_code_preview_modal(
     filename: str,
@@ -231,69 +156,79 @@ def build_code_preview_modal(
     channel_id: str | int = 0,
     message_id: str | int = 0,
     attachment_url: str | None = None,
-    on_submit_callback: Any = None
+    on_submit_callback: Any = None,
+    version: int = 1,
+    diff_stats: tuple[int, int] | None = None,
+    artifact_id: str | None = None
 ) -> DynamicModalV2:
-
-    ext = (
-        filename.rsplit(".", 1)[-1].lower()
-        if "." in filename
-        else ""
-    )
-
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     icon = get_file_icon(filename)
     lines = len(raw_code.splitlines())
     size_b = len(raw_code.encode("utf-8"))
+    is_doc = is_markdown_document(filename)
+
+    version_tag = f" • v{version}" if version > 1 else ""
+    if diff_stats and (diff_stats[0] > 0 or diff_stats[1] > 0):
+        version_tag += f" (+{diff_stats[0]} -{diff_stats[1]})"
 
     header_parts = [
-        f"**{icon} {filename}** ({lines:,} lines • {format_size(size_b)})",
-        "-# Click **Submit** below to download this file."
+        f"**{icon} {filename}** ({lines:,} lines • {format_size(size_b)}{version_tag})"
     ]
 
+    if artifact_id:
+        playground_url = playground_server.get_artifact_url(artifact_id, version)
+        if playground_url:
+            header_parts.append(f"[Open Artifact ↗]({playground_url}) (Opens in a browser)")
+
+    header_parts.append("-# Click **Submit** below to download this file.")
+
     if attachment_url and attachment_url.startswith("http"):
-        header_parts.append(
-            f"[Download directly]({attachment_url})"
-        )
+        header_parts.append(f"[Download directly]({attachment_url})")
 
-    header_text = "\n".join(header_parts)
+    header_str = "\n".join(header_parts)[:450]
+    total_budget = 3700
+    body_budget = max(500, total_budget - len(header_str))
 
-    formatted_code = (
-        f"```{ext}\n"
-        f"{raw_code[:3600]}\n"
-        f"```"
-    )
+    trunc_note = "\n\n-# ⚠️ *Preview truncated. Download to view full document.*"
+
+    if is_doc:
+        rendered_md = apply_dfm(raw_code.strip())
+        if len(rendered_md) > body_budget:
+            cutoff = max(100, body_budget - len(trunc_note))
+            body_content = rendered_md[:cutoff].rstrip() + trunc_note
+        else:
+            body_content = rendered_md
+    else:
+        fence_overhead = len(f"```{ext}\n\n```") + len(trunc_note)
+        code_budget = max(100, body_budget - fence_overhead)
+        if len(raw_code) > code_budget:
+            truncated_code = raw_code[:code_budget].rstrip()
+            body_content = f"```{ext}\n{truncated_code}\n```\n-# ⚠️ *Code preview truncated. Download to view all lines.*"
+        else:
+            body_content = f"```{ext}\n{raw_code}\n```"
 
     fields = [
         {
             "type": "text_display",
-            "content": f"{header_text}\n\n{formatted_code}"[:4000]
+            "content": header_str
+        },
+        {
+            "type": "text_display",
+            "content": body_content
         }
     ]
 
-    async def default_submit(
-        interaction: discord.Interaction,
-        data: dict[str, Any]
-    ):
+    async def default_submit(interaction: discord.Interaction, data: dict[str, Any]):
         if on_submit_callback:
             await on_submit_callback(interaction, data)
             return
 
         raw_bytes = raw_code.encode("utf-8")
-
-        f_file = discord.File(
-            io.BytesIO(raw_bytes),
-            filename=filename
-        )
-
-        msg_content = (
-            f"📥 **Your file is ready:** `{filename}`"
-        )
+        f_file = discord.File(io.BytesIO(raw_bytes), filename=filename)
+        msg_content = f"📥 **Your file is ready:** `{filename}`"
 
         if not interaction.response.is_done():
-            await interaction.response.send_message(
-                content=msg_content,
-                file=f_file,
-                ephemeral=True
-            )
+            await interaction.response.send_message(content=msg_content, file=f_file, ephemeral=True)
 
     return DynamicModalV2(
         title=f"{filename}"[:45],
@@ -301,7 +236,6 @@ def build_code_preview_modal(
         fields_schema=fields,
         on_submit_callback=default_submit
     )
-
 
 def build_artifact_open_modal(
     artifact: dict[str, Any],
@@ -311,199 +245,131 @@ def build_artifact_open_modal(
     attachment_url: str | None = None,
     on_submit_callback: Any = None
 ) -> DynamicModalV2:
-
     filename = artifact.get("filename", "project.zip")
     title = artifact.get("title", filename)
+    artifact_id = artifact.get("artifact_id")
     files = artifact.get("files", [])
     versions = artifact.get("versions", [])
-
     icon = get_file_icon(filename)
 
     target_v_data = None
-
     if versions and 1 <= target_version <= len(versions):
         target_v_data = versions[target_version - 1]
 
-    is_multi_file = (
-        filename.endswith(".zip")
-        or len(files) > 1
-    )
-
+    is_multi_file = filename.endswith(".zip") or len(files) > 1
     fields = []
+    total_budget = 3700
 
     if is_multi_file:
-        file_list = (
-            target_v_data.get("files", files)
-            if target_v_data
-            else files
-        )
-
-        total_lines = sum(
-            f.get(
-                "lines",
-                len(f.get("content", "").splitlines())
-            )
-            for f in file_list
-        )
-
-        total_size = sum(
-            f.get(
-                "size_bytes",
-                len(f.get("content", "").encode("utf-8"))
-            )
-            for f in file_list
-        )
+        file_list = target_v_data.get("files", files) if target_v_data else files
+        total_lines = sum(f.get("lines", len(f.get("content", "").splitlines())) for f in file_list)
+        total_size = sum(f.get("size_bytes", len(f.get("content", "").encode("utf-8"))) for f in file_list)
 
         tree_lines = [
-            (
-                f"**{icon} {filename}** "
-                f"({len(file_list)} files • "
-                f"{total_lines:,} lines • "
-                f"{format_size(total_size)})"
-            ),
-            "-# Click **Submit** below to download the project."
+            f"**{icon} {filename}** ({len(file_list)} files • {total_lines:,} lines • {format_size(total_size)})"
         ]
 
+        if artifact_id:
+            playground_url = playground_server.get_artifact_url(artifact_id, target_version)
+            if playground_url:
+                tree_lines.append(f"[Open Artifact ↗]({playground_url}) (Opens in a browser)")
+
+        tree_lines.append("-# Click **Submit** below to download the project.")
+
         if attachment_url and attachment_url.startswith("http"):
-            tree_lines.append(
-                f"[Download directly]({attachment_url})"
-            )
+            tree_lines.append(f"[Download directly]({attachment_url})")
 
         tree_lines.append("\n**Files in this project:**")
-
-        for f in file_list[:12]:
+        for f in file_list[:8]:
             f_name = f.get("filename", "file.txt")
             f_icon = get_file_icon(f_name)
+            f_lines = f.get("lines", len(f.get("content", "").splitlines()))
+            tree_lines.append(f"• {f_icon} `{f_name}` — {f_lines:,} lines")
 
-            f_lines = f.get(
-                "lines",
-                len(f.get("content", "").splitlines())
-            )
+        if len(file_list) > 8:
+            tree_lines.append(f"-# Plus {len(file_list) - 8} more files")
 
-            tree_lines.append(
-                f"• {f_icon} `{f_name}` — {f_lines:,} lines"
-            )
-
-        if len(file_list) > 12:
-            tree_lines.append(
-                f"-# Plus {len(file_list) - 12} more files"
-            )
-
-        fields.append(
-            {
-                "type": "text_display",
-                "content": "\n".join(tree_lines)[:1800]
-            }
-        )
+        tree_str = "\n".join(tree_lines)[:1100]
+        fields.append({"type": "text_display", "content": tree_str})
 
         if file_list:
             first_f = file_list[0]
-
-            first_name = first_f.get(
-                "filename",
-                "index.html"
-            )
-
-            first_code = first_f.get(
-                "content",
-                ""
-            )
-
+            first_name = first_f.get("filename", "index.html")
+            first_code = first_f.get("content", "")
             first_icon = get_file_icon(first_name)
+            ext = first_name.rsplit(".", 1)[-1].lower() if "." in first_name else ""
+            is_first_doc = is_markdown_document(first_name)
 
-            ext = (
-                first_name.rsplit(".", 1)[-1].lower()
-                if "." in first_name
-                else ""
-            )
+            preview_budget = max(400, total_budget - len(tree_str))
+            trunc_note = "\n\n-# ⚠️ *Preview truncated.*"
 
-            fields.append(
-                {
-                    "type": "text_display",
-                    "content": (
-                        f"**Preview: {first_icon} `{first_name}`**\n"
-                        f"```{ext}\n"
-                        f"{first_code[:1800]}\n"
-                        f"```"
-                    )
-                }
-            )
+            if is_first_doc:
+                rendered = apply_dfm(first_code)
+                if len(rendered) > preview_budget - 40:
+                    preview_body = f"**Preview: {first_icon} `{first_name}`**\n\n{rendered[:max(50, preview_budget - len(trunc_note) - 40)].rstrip()}{trunc_note}"
+                else:
+                    preview_body = f"**Preview: {first_icon} `{first_name}`**\n\n{rendered}"
+            else:
+                code_budget = max(50, preview_budget - len(f"**Preview: {first_icon} `{first_name}`**\n```{ext}\n\n```{trunc_note}"))
+                if len(first_code) > code_budget:
+                    preview_body = f"**Preview: {first_icon} `{first_name}`**\n```{ext}\n{first_code[:code_budget].rstrip()}\n```\n-# ⚠️ *Preview truncated.*"
+                else:
+                    preview_body = f"**Preview: {first_icon} `{first_name}`**\n```{ext}\n{first_code}\n```"
 
+            fields.append({
+                "type": "text_display",
+                "content": preview_body
+            })
     else:
-        content = (
-            target_v_data.get("content", "")
-            if target_v_data
-            else (
-                files[0].get("content", "")
-                if files
-                else ""
-            )
-        )
-
+        content = target_v_data.get("content", "") if target_v_data else (files[0].get("content", "") if files else "")
         lines = len(content.splitlines())
         size_b = len(content.encode("utf-8"))
-
-        ext = (
-            filename.rsplit(".", 1)[-1].lower()
-            if "." in filename
-            else ""
-        )
+        is_doc = is_markdown_document(filename)
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
         header_parts = [
-            (
-                f"**{icon} {filename}** "
-                f"({lines:,} lines • {format_size(size_b)})"
-            ),
-            (
-                "-# This file is too large to show in full here. "
-                "Click **Submit** to download it."
-            )
+            f"**{icon} {filename}** ({lines:,} lines • {format_size(size_b)})"
         ]
 
+        if artifact_id:
+            playground_url = playground_server.get_artifact_url(artifact_id, target_version)
+            if playground_url:
+                header_parts.append(f"[Open Artifact ↗]({playground_url}) (Opens in a browser)")
+
+        header_parts.append("-# Click **Submit** to download this file.")
+
         if attachment_url and attachment_url.startswith("http"):
-            header_parts.append(
-                f"[Download directly]({attachment_url})"
-            )
+            header_parts.append(f"[Download directly]({attachment_url})")
 
-        fields.append(
-            {
-                "type": "text_display",
-                "content": "\n".join(header_parts)
-            }
-        )
+        header_str = "\n".join(header_parts)[:450]
+        fields.append({"type": "text_display", "content": header_str})
 
-        fields.append(
-            {
-                "type": "text_display",
-                "content": (
-                    f"```{ext}\n"
-                    f"{content[:3400]}\n"
-                    f"```"
-                )
-            }
-        )
+        body_budget = max(500, total_budget - len(header_str))
+        trunc_note = "\n\n-# ⚠️ *Preview truncated. Download to view full document.*"
 
-    async def default_submit(
-        interaction: discord.Interaction,
-        data: dict[str, Any]
-    ):
+        if is_doc:
+            rendered = apply_dfm(content.strip())
+            if len(rendered) > body_budget:
+                body_content = rendered[:max(50, body_budget - len(trunc_note))].rstrip() + trunc_note
+            else:
+                body_content = rendered
+            fields.append({"type": "text_display", "content": body_content})
+        else:
+            code_budget = max(50, body_budget - len(f"```{ext}\n\n```{trunc_note}"))
+            if len(content) > code_budget:
+                body_content = f"```{ext}\n{content[:code_budget].rstrip()}\n```\n-# ⚠️ *Code preview truncated. Download to view all lines.*"
+            else:
+                body_content = f"```{ext}\n{content}\n```"
+            fields.append({"type": "text_display", "content": body_content})
+
+    async def default_submit(interaction: discord.Interaction, data: dict[str, Any]):
         if on_submit_callback:
             await on_submit_callback(interaction, data)
             return
 
-        msg_content, discord_files = (
-            prepare_artifact_download_payload(
-                artifact,
-                target_version
-            )
-        )
-
+        msg_content, discord_files = prepare_artifact_download_payload(artifact, target_version)
         if not interaction.response.is_done():
-            await interaction.response.send_message(
-                content=msg_content,
-                files=discord_files,
-                ephemeral=True
-            )
+            await interaction.response.send_message(content=msg_content, files=discord_files, ephemeral=True)
 
     return DynamicModalV2(
         title=f"{title}"[:45],
@@ -512,303 +378,115 @@ def build_artifact_open_modal(
         on_submit_callback=default_submit
     )
 
-
 def build_artifact_components_for_message(
     artifact: dict[str, Any],
     message_id: str | int = "temp",
     selected_version: int | None = None,
     is_live_stream: bool = False
 ) -> list[Any]:
-    filename = artifact.get(
-        "filename",
-        "project.zip"
-    )
-
-    artifact_id = artifact.get(
-        "artifact_id",
-        "art_0"
-    )
-
-    files = artifact.get(
-        "files",
-        []
-    )
-
+    filename = artifact.get("filename", "project.zip")
+    artifact_id = artifact.get("artifact_id", "art_0")
+    files = artifact.get("files", [])
     icon = get_file_icon(filename)
+    versions = artifact.get("versions", [])
+    total_versions = max(1, len(versions) if versions else artifact.get("total_versions", 1))
+    status = artifact.get("status", "ready")
 
-    versions = artifact.get(
-        "versions",
-        []
-    )
-
-    total_versions = max(
-        1,
-        len(versions)
-        if versions
-        else artifact.get("total_versions", 1)
-    )
-
-    status = artifact.get(
-        "status",
-        "ready"
-    )
-
-    if (
-        status == "generating"
-        or artifact.get("is_generating")
-    ):
+    if status == "generating" or artifact.get("is_generating"):
         container = Container()
-
-        fn = (
-            filename
-            or artifact.get("title")
-            or "artifact.txt"
-        )
-
+        fn = filename or artifact.get("title") or "artifact.txt"
         icon = get_file_icon(fn)
 
-        start_t = artifact.get(
-            "start_time"
-        )
-
+        start_t = artifact.get("start_time")
         if start_t is None or start_t <= 0:
             start_t = time.time()
             artifact["start_time"] = start_t
+        elapsed = max(0, int(time.time() - start_t))
 
-        elapsed = max(
-            0,
-            int(time.time() - start_t)
-        )
-
-        display_text = (
-            f"{icon} **{fn}**\n"
-            f"-# {LOADING_EMOJI} Creating your Artifact... ({elapsed}s)"
-        )
-
-        open_btn = Button(
-            label="Open",
-            style=discord.ButtonStyle.secondary,
-            disabled=True
-        )
-
-        container.add_item(
-            Section(
-                TextDisplay(display_text),
-                accessory=open_btn
-            )
-        )
-
+        display_text = f"{icon} **{fn}**\n-# {LOADING_EMOJI} Creating your Artifact... ({elapsed}s)"
+        open_btn = Button(label="Open", style=discord.ButtonStyle.secondary, disabled=True)
+        container.add_item(Section(TextDisplay(display_text), accessory=open_btn))
         return [container]
 
-    is_multi_file = (
-        filename.endswith(".zip")
-        or len(files) > 1
-    )
-
-    active_v = (
-        selected_version
-        or artifact.get(
-            "active_version",
-            total_versions
-        )
-    )
+    is_multi_file = filename.endswith(".zip") or len(files) > 1
+    active_v = selected_version or artifact.get("active_version", total_versions)
 
     target_v_data = None
-
     if versions and 1 <= active_v <= len(versions):
         target_v_data = versions[active_v - 1]
 
-    ts = (
-        target_v_data.get("timestamp")
-        if target_v_data
-        else artifact.get("timestamp")
-    )
-
-    ts_str = (
-        f" • <t:{int(ts)}:R>"
-        if ts
-        else ""
-    )
+    ts = target_v_data.get("timestamp") if target_v_data else artifact.get("timestamp")
+    ts_str = f" • <t:{int(ts)}:R>" if ts else ""
 
     container = Container()
 
     if is_multi_file:
         file_list = target_v_data.get("files", files) if target_v_data else files
-        file_count = (
-            len(file_list)
-            if file_list
-            else artifact.get("file_count", 1)
-        )
+        file_count = len(file_list) if file_list else artifact.get("file_count", 1)
+        total_size = sum(f.get("size_bytes", len(f.get("content", "").encode("utf-8"))) for f in file_list)
 
-        total_size = sum(
-            f.get("size_bytes", len(f.get("content", "").encode("utf-8")))
-            for f in file_list
-        )
-
-        display_text = (
-            f"{icon} **{filename}**\n"
-            f"-# {file_count} files • {format_size(total_size)}{ts_str}"
-        )
+        version_badge = f" • v{active_v}" if total_versions > 1 else ""
+        display_text = f"{icon} **{filename}**\n-# {file_count} files • {format_size(total_size)}{version_badge}{ts_str}"
 
         open_btn = Button(
             label="Open",
             style=discord.ButtonStyle.secondary,
-            custom_id=(
-                f"artopen:"
-                f"{message_id}:"
-                f"{artifact_id}:"
-                f"{active_v}"
-            ),
+            custom_id=f"artopen:{message_id}:{artifact_id}:{active_v}",
             disabled=is_live_stream
         )
-
-        container.add_item(
-            Section(
-                TextDisplay(display_text),
-                accessory=open_btn
-            )
-        )
+        container.add_item(Section(TextDisplay(display_text), accessory=open_btn))
 
     else:
-        content = (
-            target_v_data.get("content", "")
-            if target_v_data
-            else (
-                files[0].get("content", "")
-                if files
-                else ""
-            )
-        )
+        content = target_v_data.get("content", "") if target_v_data else (files[0].get("content", "") if files else "")
+        lines = target_v_data.get("lines", len(content.splitlines())) if target_v_data else len(content.splitlines())
+        size_b = target_v_data.get("size_bytes", len(content.encode("utf-8"))) if target_v_data else len(content.encode("utf-8"))
 
-        lines = (
-            target_v_data.get(
-                "lines",
-                len(content.splitlines())
-            )
-            if target_v_data
-            else len(content.splitlines())
-        )
+        adds = target_v_data.get("additions", 0) if target_v_data else artifact.get("additions", 0)
+        dels = target_v_data.get("deletions", 0) if target_v_data else artifact.get("deletions", 0)
 
-        size_b = (
-            target_v_data.get(
-                "size_bytes",
-                len(content.encode("utf-8"))
-            )
-            if target_v_data
-            else len(content.encode("utf-8"))
-        )
+        version_badge = ""
+        if total_versions > 1:
+            diff_part = f" (+{adds} -{dels})" if (adds > 0 or dels > 0) else ""
+            version_badge = f" • v{active_v}{diff_part}"
 
-        display_text = (
-            f"{icon} **{filename}**\n"
-            f"-# {lines:,} lines • {format_size(size_b)}{ts_str}"
-        )
-
+        display_text = f"{icon} **{filename}**\n-# {lines:,} lines • {format_size(size_b)}{version_badge}{ts_str}"
         is_large = len(content) > 3800
 
-        if is_large:
-            btn = Button(
-                label="Open",
-                style=discord.ButtonStyle.secondary,
-                custom_id=(
-                    f"artopen:"
-                    f"{message_id}:"
-                    f"{artifact_id}:"
-                    f"{active_v}"
-                ),
-                disabled=is_live_stream
-            )
-
-        else:
-            btn = Button(
-                label="Preview",
-                style=discord.ButtonStyle.secondary,
-                custom_id=(
-                    f"artprev:"
-                    f"{message_id}:"
-                    f"{artifact_id}:"
-                    f"{active_v}"
-                ),
-                disabled=is_live_stream
-            )
-
-        container.add_item(
-            Section(
-                TextDisplay(display_text),
-                accessory=btn
-            )
+        btn = Button(
+            label="Open" if is_large else "Preview",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"{'artopen' if is_large else 'artprev'}:{message_id}:{artifact_id}:{active_v}",
+            disabled=is_live_stream
         )
+        container.add_item(Section(TextDisplay(display_text), accessory=btn))
 
-    if (
-        total_versions >= 2
-        and versions
-        and not is_live_stream
-    ):
+    if total_versions >= 2 and versions and not is_live_stream:
         history_options = []
-
         for v_entry in reversed(versions[:25]):
-            v_num = v_entry.get(
-                "version",
-                1
-            )
-
-            v_summary = v_entry.get(
-                "summary",
-                f"Version {v_num}"
-            )
-
-            v_adds = v_entry.get(
-                "additions",
-                0
-            )
-
-            v_dels = v_entry.get(
-                "deletions",
-                0
-            )
-
-            diff_stat = (
-                f"(+{v_adds} -{v_dels}) "
-                if v_adds > 0 or v_dels > 0
-                else ""
-            )
-
-            is_latest = (
-                v_num == total_versions
-            )
-
-            v_label = (
-                f"Version {v_num} (Latest)"
-                if is_latest
-                else f"Version {v_num}"
-            )
+            v_num = v_entry.get("version", 1)
+            v_summary = v_entry.get("summary", f"Version {v_num}")
+            v_adds = v_entry.get("additions", 0)
+            v_dels = v_entry.get("deletions", 0)
+            diff_stat = f"(+{v_adds} -{v_dels}) " if (v_adds > 0 or v_dels > 0) else ""
+            is_latest = (v_num == total_versions)
+            v_label = f"Version {v_num} (Latest)" if is_latest else f"Version {v_num}"
 
             history_options.append(
                 discord.SelectOption(
                     label=v_label,
                     value=str(v_num),
-                    description=(
-                        f"{diff_stat}{v_summary}"
-                    )[:100],
+                    description=f"{diff_stat}{v_summary}"[:100],
                     emoji=icon,
-                    default=(
-                        v_num == active_v
-                    )
+                    default=(v_num == active_v)
                 )
             )
 
         history_select = Select(
-            custom_id=(
-                f"arthist:"
-                f"{message_id}:"
-                f"{artifact_id}"
-            ),
+            custom_id=f"arthist:{message_id}:{artifact_id}",
             placeholder="Browse History...",
             options=history_options,
             disabled=is_live_stream
         )
-
-        container.add_item(
-            ActionRow(history_select)
-        )
+        container.add_item(ActionRow(history_select))
 
     return [container]

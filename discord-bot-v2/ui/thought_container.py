@@ -1,3 +1,5 @@
+import re
+import time
 import asyncio
 import logging
 from typing import Any, Callable
@@ -11,15 +13,19 @@ from discord.ui import (
     ActionRow,
     Button,
     View,
-    MediaGallery,
     File as ComponentFile
 )
-from core.thought_stream import standardize_thoughts_text
+from config.settings import LOADING_EMOJI
+from core.thought_stream import standardize_thoughts_text, format_thoughts_with_llm
 from ui.artifact_views import get_file_icon
+from core.branch_manager import branch_manager
+from agent.constants import OCTICONS_MAP
 
 logger = logging.getLogger("PriestyAI.ThoughtUI")
 
 TOOL_META_MAP = {
+    "github_repo": ("<:github:1542000155371507802>", "GitHub"),
+    "fetch_github": ("<:github:1542000155371507802>", "GitHub Repo"),
     "recall_memories": ("🧠", "Recalled Memories"),
     "remember": ("💾", "Memory Saved"),
     "forget": ("🧹", "Memory Forgotten"),
@@ -28,7 +34,6 @@ TOOL_META_MAP = {
     "execute_code": ("💻", "Code Sandbox"),
     "search_web": ("🔍", "Web Search"),
     "read_link": ("📄", "Article / Video"),
-    "fetch_github": ("🐙", "GitHub Repo"),
     "create_poll": ("📊", "Created Poll"),
     "calc": ("🔢", "Math Calculator"),
     "search_image": ("🖼️", "Image Search"),
@@ -44,7 +49,17 @@ TOOL_META_MAP = {
     "send_message": ("💬", "Sent Message"),
     "read_message_history": ("📜", "Chat History"),
     "search_channel_history": ("🔎", "Channel Search"),
-    "clear_conversation": ("🧹", "Context Reset")
+    "clear_conversation": ("🧹", "Context Reset"),
+
+    "agent_terminal": (OCTICONS_MAP["oct_terminal"], "Terminal"),
+    "agent_read_file": (OCTICONS_MAP["oct_checklist"], "Read File"),
+    "agent_write_file": (OCTICONS_MAP["oct_pencil"], "Write File"),
+    "agent_edit_diff": (OCTICONS_MAP["oct_diff"], "Patch Diff"),
+    "agent_list_dir": (OCTICONS_MAP["oct_search"], "List Directory"),
+    "agent_search_web": (OCTICONS_MAP["oct_search"], "Web Search"),
+    "agent_read_link": (OCTICONS_MAP["oct_link"], "Read Link"),
+    "agent_search_discord_history": (OCTICONS_MAP["oct_search"], "Discord History"),
+    "clone_repo": (OCTICONS_MAP["oct_repo"], "Clone Repo")
 }
 
 def format_truncated_block(code: str, lang: str, max_chars: int = 3000, label: str = "Code") -> str:
@@ -62,11 +77,51 @@ def format_truncated_block(code: str, lang: str, max_chars: int = 3000, label: s
         f"-# ⚠️ *Preview truncated. Download the full file above to view all lines.*"
     )
 
-def format_tool_display_text(tool_name: str, args: dict[str, Any], result: dict[str, Any], duration_ms: int) -> str:
+def format_tool_display_text(tool_name: str, args: dict[str, Any], result: dict[str, Any], duration_ms: int, tool_call: dict[str, Any] | None = None) -> str:
     icon, name_clean = TOOL_META_MAP.get(tool_name, ("⚙️", tool_name.replace("_", " ").title()))
     time_tag = f"`{duration_ms}ms`" if duration_ms > 0 else ""
 
-    if tool_name == "create_artifact":
+    if tool_name == "agent_terminal":
+        cmd = args.get("command", "")[:35]
+        return f"{OCTICONS_MAP['oct_terminal']} Executed **`{cmd}`** {time_tag}".strip()
+    elif tool_name == "agent_read_file":
+        p = args.get("path", "file")
+        f_icon = get_file_icon(p)
+        return f"{OCTICONS_MAP['oct_checklist']} Read {f_icon} **`{p}`** {time_tag}".strip()
+    elif tool_name == "agent_write_file":
+        p = args.get("path", "file")
+        f_icon = get_file_icon(p)
+        return f"{OCTICONS_MAP['oct_pencil']} Created {f_icon} **`{p}`** {time_tag}".strip()
+    elif tool_name == "agent_edit_diff":
+        p = args.get("path", "file")
+        f_icon = get_file_icon(p)
+        adds = (tool_call.get("additions", 0) if tool_call else 0) or (result.get("additions", 0) if isinstance(result, dict) else 0)
+        dels = (tool_call.get("deletions", 0) if tool_call else 0) or (result.get("deletions", 0) if isinstance(result, dict) else 0)
+        diff_tag = f" (+{adds} -{dels})" if (adds > 0 or dels > 0) else ""
+        return f"{OCTICONS_MAP['oct_diff']} Patched {f_icon} **`{p}`**{diff_tag} {time_tag}".strip()
+    elif tool_name == "agent_list_dir":
+        sub = args.get("subpath") or "./"
+        return f"{OCTICONS_MAP['oct_search']} Listed directory **`{sub}`** {time_tag}".strip()
+    elif tool_name == "agent_search_web":
+        q = args.get("query", "")[:30]
+        return f'{OCTICONS_MAP["oct_search"]} Searched web **"{q}"** {time_tag}'.strip()
+    elif tool_name == "agent_read_link":
+        u = args.get("url", "")[:35]
+        return f"{OCTICONS_MAP['oct_link']} Read link **`{u}`** {time_tag}".strip()
+    elif tool_name == "agent_search_discord_history":
+        q = args.get("query", "")[:30]
+        return f'{OCTICONS_MAP["oct_search"]} Searched Discord history **"{q}"** {time_tag}'.strip()
+    elif tool_name == "clone_repo":
+        repo = args.get("repo", "repository")
+        return f"{OCTICONS_MAP['oct_repo']} Cloned repository **`{repo}`** {time_tag}".strip()
+
+    elif tool_name in ["github_repo", "fetch_github"]:
+        r = args.get("repo") or args.get("repo_url", "")
+        action = args.get("action", "digest")
+        path = args.get("path") or args.get("subpath", "")
+        detail = f"`{path}`" if path else f"`{r}`"
+        return f"<:github:1542000155371507802> GitHub **{action.replace('_', ' ').title()}** ({detail}) {time_tag}".strip()
+    elif tool_name == "create_artifact":
         fname = args.get("filename") or args.get("title", "Artifact")
         file_icon = get_file_icon(fname)
         return f"{file_icon} Created **{fname}** {time_tag}".strip()
@@ -89,9 +144,6 @@ def format_tool_display_text(tool_name: str, args: dict[str, Any], result: dict[
         t = result.get("title") if isinstance(result, dict) else None
         label_text = f"**{t[:28]}**" if t else f"`{q}`"
         return f"🖼️ Found **Image** ({label_text}) {time_tag}".strip()
-    elif tool_name == "fetch_github":
-        r = args.get("repo_url", "")[:25]
-        return f"🐙 Inspected **GitHub Repo** (`{r}`) {time_tag}".strip()
     elif tool_name == "create_poll":
         q = args.get("question", "")[:25]
         return f"📊 Created **Poll** (`{q}`)".strip()
@@ -155,7 +207,44 @@ class ToolInspectorView(LayoutView):
         icon, name_clean = TOOL_META_MAP.get(name, ("⚙️", name.replace("_", " ").title()))
         container = Container()
 
-        if name == "create_artifact":
+        if name in ["github_repo", "fetch_github"]:
+            repo = args.get("repo") or args.get("repo_url", "Repository")
+            action = args.get("action", "digest").replace("_", " ").title()
+            header_line = f"<:github:1542000155371507802> **GitHub {action}:** `{repo}`"
+        elif name == "agent_terminal":
+            cmd = args.get("command", "command")
+            header_line = f"{OCTICONS_MAP['oct_terminal']} **Terminal:** `{cmd}`"
+        elif name == "agent_read_file":
+            p = args.get("path", "file")
+            f_icon = get_file_icon(p)
+            header_line = f"{OCTICONS_MAP['oct_checklist']} **Read File:** {f_icon} `{p}`"
+        elif name == "agent_write_file":
+            p = args.get("path", "file")
+            f_icon = get_file_icon(p)
+            header_line = f"{OCTICONS_MAP['oct_pencil']} **Created File:** {f_icon} `{p}`"
+        elif name == "agent_edit_diff":
+            p = args.get("path", "file")
+            f_icon = get_file_icon(p)
+            adds = self.tool_call.get("additions", 0) or (result.get("additions", 0) if isinstance(result, dict) else 0)
+            dels = self.tool_call.get("deletions", 0) or (result.get("deletions", 0) if isinstance(result, dict) else 0)
+            diff_stat = f" (+{adds} -{dels})" if (adds > 0 or dels > 0) else ""
+            header_line = f"{OCTICONS_MAP['oct_diff']} **Patched File:** {f_icon} `{p}`{diff_stat}"
+        elif name == "agent_list_dir":
+            sub = args.get("subpath") or "./"
+            header_line = f"{OCTICONS_MAP['oct_search']} **Directory List:** `{sub}`"
+        elif name == "agent_search_web":
+            q = args.get("query", "")
+            header_line = f'{OCTICONS_MAP["oct_search"]} **Web Search:** "{q}"'
+        elif name == "agent_read_link":
+            u = args.get("url", "")
+            header_line = f"{OCTICONS_MAP['oct_link']} **Article Reader:** `{u}`"
+        elif name == "agent_search_discord_history":
+            q = args.get("query", "")
+            header_line = f'{OCTICONS_MAP["oct_search"]} **Discord History Search:** "{q}"'
+        elif name == "clone_repo":
+            repo = args.get("repo", "repository")
+            header_line = f"{OCTICONS_MAP['oct_repo']} **Cloned Repository:** `{repo}`"
+        elif name == "create_artifact":
             fname = args.get("filename", "artifact.zip")
             file_icon = get_file_icon(fname)
             header_line = f"{file_icon} **Created Artifact:** `{fname}`"
@@ -174,8 +263,6 @@ class ToolInspectorView(LayoutView):
             header_line = "🖼️ **Visual Image Search & Attachment**"
         elif name == "calc":
             header_line = "🔢 **Math Calculation**"
-        elif name == "fetch_github":
-            header_line = "🐙 **GitHub Codebase Ingestion**"
         elif name == "create_poll":
             header_line = "📊 **Discord Native Poll**"
         elif name == "remember":
@@ -199,7 +286,107 @@ class ToolInspectorView(LayoutView):
         container.add_item(TextDisplay(header_line or "*No Header Details*"))
         container.add_item(Separator(visible=True))
 
-        if name == "search_image":
+        if name == "agent_edit_diff":
+            path = args.get("path", "file")
+            f_icon = get_file_icon(path)
+            diff_text = self.tool_call.get("diff_text", "")
+            adds = self.tool_call.get("additions", 0)
+            dels = self.tool_call.get("deletions", 0)
+            stats_tag = f" (+{adds} additions • -{dels} deletions)" if (adds > 0 or dels > 0) else ""
+            container.add_item(TextDisplay(f"### {f_icon} Patch Diff: `{path}`{stats_tag}\n```diff\n{(diff_text or '# Direct patch applied')[:3000]}\n```"))
+
+        elif name == "agent_write_file":
+            path = args.get("path", "file")
+            f_icon = get_file_icon(path)
+            ext = path.split(".")[-1].lower() if "." in path else "text"
+            content = args.get("content", "")
+            lines = len(content.splitlines())
+            container.add_item(TextDisplay(f"### {f_icon} Created File: `{path}` ({lines} lines)\n```{ext}\n{content[:3000]}\n```"))
+
+        elif name == "agent_read_file":
+            path = args.get("path", "file")
+            f_icon = get_file_icon(path)
+            ext = path.split(".")[-1].lower() if "." in path else "text"
+            content = result.get("content", "") if isinstance(result, dict) else str(result)
+            lines_tag = result.get("showing_lines", "") if isinstance(result, dict) else ""
+            container.add_item(TextDisplay(f"### {f_icon} Source View: `{path}` (Lines {lines_tag})\n```{ext}\n{content[:3000]}\n```"))
+
+        elif name == "agent_terminal":
+            cmd = args.get("command", "")
+            exit_code = result.get("exit_code", 0) if isinstance(result, dict) else 0
+            stdout = result.get("stdout", "(no output)") if isinstance(result, dict) else str(result)
+            stderr = result.get("stderr") if isinstance(result, dict) else None
+            status_tag = "✅ Exit Code: `0` (Success)" if exit_code == 0 else f"❌ Exit Code: `{exit_code}` (Failed)"
+            container.add_item(TextDisplay(f"### {OCTICONS_MAP['oct_terminal']} Command: `{cmd}`\n{status_tag}\n\n**Output:**\n```text\n{stdout[:2200]}\n```"))
+            if stderr:
+                container.add_item(TextDisplay(f"**Alerts & Stderr:**\n```text\n{stderr[:1000]}\n```"))
+
+        elif name == "agent_list_dir":
+            subpath = args.get("subpath") or "./"
+            files = result.get("files", []) if isinstance(result, dict) else []
+            total_count = result.get("file_count", len(files)) if isinstance(result, dict) else len(files)
+            file_list_str = "\n".join([f"• `{f}`" for f in files[:45]])
+            if total_count > 45:
+                file_list_str += f"\n-# ... and {total_count - 45} more files"
+            container.add_item(TextDisplay(f"### {OCTICONS_MAP['oct_search']} Workspace Directory: `{subpath}` ({total_count} files total)\n{file_list_str}"))
+
+        elif name == "agent_search_web":
+            query = args.get("query", "")
+            res_items = result.get("results", []) if isinstance(result, dict) else []
+            links_text = "\n".join([f"• **[{r.get('title', 'Source')}]({r.get('link', '')})**\n  {r.get('snippet', '')}" for r in res_items[:4]])
+            container.add_item(TextDisplay(f"### {OCTICONS_MAP['oct_search']} Query: \"{query}\"\n\n**Sources Found:**\n{links_text}" if links_text else "*No search results found*"))
+
+        elif name == "agent_read_link":
+            url = args.get("url", "")
+            content = result.get("content", "") if isinstance(result, dict) else str(result)
+            container.add_item(TextDisplay(f"### {OCTICONS_MAP['oct_link']} Source Article: [Read Link]({url})\n\n```text\n{content[:2500]}\n```"))
+
+        elif name == "agent_search_discord_history":
+            query = args.get("query", "")
+            matched = result.get("results", []) if isinstance(result, dict) else []
+            history_text = "\n".join([f"• **{m.get('author', 'User')}**: {m.get('content', '')}" for m in matched[:8]])
+            container.add_item(TextDisplay(f"### {OCTICONS_MAP['oct_search']} Discord History Query: \"{query}\"\n\n{history_text or '*No matches found*'}\n"))
+
+        elif name == "clone_repo":
+            repo = args.get("repo", "")
+            container.add_item(TextDisplay(f"### {OCTICONS_MAP['oct_repo']} Cloned Repository: `{repo}`\nRepository source files have been synchronized into the workspace root `./`."))
+
+        elif name in ["github_repo", "fetch_github"]:
+            repo = result.get("repo", args.get("repo", args.get("repo_url", "")))
+            action_type = str(args.get("action", "digest")).lower()
+
+            if "error" in result:
+                container.add_item(TextDisplay(f"⚠️ **Error:** {result['error']}"))
+            elif action_type in ["read_file", "file", "read"] and "content" in result:
+                path = result.get("path", "")
+                fname = path.split("/")[-1] if path else "file.txt"
+                total_l = result.get("total_lines", 0)
+                lang = result.get("language", "text")
+                code_txt = result.get("content", "")
+                showing = result.get("showing_lines", f"1 - {total_l}")
+
+                container.add_item(TextDisplay(f"**Repository:** `{repo}`\n**File:** `{path}` ({total_l:,} total lines • showing lines {showing})\n\n```{lang}\n{code_txt[:2500]}\n```"))
+                container.add_item(ComponentFile(f"attachment://{fname}"))
+            elif "tree" in result:
+                tree_txt = result.get("tree", "")
+                container.add_item(TextDisplay(f"**Directory Tree ({result.get('subpath_filter', 'root')}):**\n\n{tree_txt[:2500]}"))
+            elif "description" in result:
+                desc = result.get("description", "")
+                lang = result.get("primary_language", "Unknown")
+                stars = result.get("stars", 0)
+                manifests = result.get("manifest_dependencies", "")
+                info_lines = [
+                    f"**Repository:** `{repo}`",
+                    f"**Description:** {desc}",
+                    f"**Language:** `{lang}` • **Stars:** `{stars:,}`"
+                ]
+                if manifests:
+                    info_lines.append(f"\n{manifests}")
+                container.add_item(TextDisplay("\n".join(info_lines)[:2500]))
+            else:
+                container.add_item(TextDisplay(f"**Result Data:**\n```json\n{str(result)[:2500]}\n```"))
+
+        elif name == "search_image":
             query = args.get("query", "")
             title = result.get("title") or args.get("caption") or "Image Asset"
             source = result.get("source", "Web")
@@ -227,12 +414,6 @@ class ToolInspectorView(LayoutView):
             dims = result.get("dimensions", "1024x1024")
             url = result.get("image_url", "")
             container.add_item(TextDisplay(f"**Prompt:** *{prompt}*\n**Dimensions:** `{dims}`\n**URL:** [Direct Link]({url})"))
-
-        elif name == "fetch_github":
-            repo = result.get("repo", args.get("repo_url", ""))
-            sub = result.get("subpath", "root")
-            digest = result.get("digest", "")
-            container.add_item(TextDisplay(f"**Repository:** `{repo}`\n**Filter:** `{sub}`\n\n```text\n{digest[:2500]}\n```"))
 
         elif name == "create_poll":
             q = args.get("question", "")
@@ -392,41 +573,64 @@ class ThoughtContainerView(LayoutView):
         raw_thoughts: str,
         tool_calls: list[dict[str, Any]],
         duration_seconds: int,
+        formatted_thoughts: str | None = None,
         is_thinking: bool = False,
-        parent_view: Any = None
+        is_raw_mode: bool | None = None,
+        show_toggle: bool | None = None,
+        parent_view: Any = None,
+        message_id: str | int | None = None,
+        version_idx: int = 1,
+        model_name: str | None = None
     ):
         super().__init__(timeout=600)
         self.raw_thoughts = raw_thoughts
+        self.formatted_thoughts = formatted_thoughts
         self.tool_calls = tool_calls
         self.duration_seconds = duration_seconds
         self.is_thinking = is_thinking
+        self.model_name = (model_name or "").lower().strip()
+
+        is_gemma = bool(self.model_name and "gemma" in self.model_name)
+
+        if show_toggle is not None:
+            self.show_toggle = show_toggle and not is_thinking and is_gemma
+        else:
+            self.show_toggle = is_gemma and not is_thinking
+
+        if is_raw_mode is None:
+            self.is_raw_mode = is_gemma and not bool(formatted_thoughts)
+        else:
+            self.is_raw_mode = is_raw_mode
+
         self.parent_view = parent_view
+        self.message_id = str(message_id) if message_id else None
+        self.version_idx = version_idx
         
         self.is_inspecting_tool = False
         self.is_paginating = False
+        self.is_formatting = False
+        self.last_user_action_time: float = 0.0
         self.current_page = 0
-        self._refresh_content(raw_thoughts, tool_calls, duration_seconds, is_thinking)
+        self._refresh_content()
 
-    def _refresh_content(self, raw_thoughts: str, tool_calls: list[dict[str, Any]], duration_seconds: int, is_thinking: bool):
-        if raw_thoughts.strip():
-            self.raw_thoughts = raw_thoughts
-        if tool_calls:
-            self.tool_calls = tool_calls
+    def _refresh_content(self):
+        active_text = self.raw_thoughts if (self.is_raw_mode or self.is_thinking) else (self.formatted_thoughts or self.raw_thoughts)
 
-        self.duration_seconds = max(self.duration_seconds, duration_seconds)
-        self.is_thinking = is_thinking
-
-        if not self.raw_thoughts.strip() and self.tool_calls:
+        if not active_text.strip() and self.tool_calls:
             self.thought_blocks = [
                 "**Orchestrating Actions**\nExecuting requested tools and analyzing context."
             ]
-        elif not self.raw_thoughts.strip():
+        elif not active_text.strip():
             self.thought_blocks = [
                 "**Analyzing Request**\nProcessing input query and preparing context."
             ]
         else:
-            std_text = standardize_thoughts_text(self.raw_thoughts)
-            self.thought_blocks = [b.strip() for b in std_text.split("\n\n") if b.strip()]
+            if self.is_raw_mode or self.is_thinking:
+                blocks = [p.strip() for p in active_text.split("\n\n") if p.strip()]
+                self.thought_blocks = blocks if blocks else [active_text.strip()]
+            else:
+                std_text = standardize_thoughts_text(active_text)
+                self.thought_blocks = [b.strip() for b in std_text.split("\n\n") if b.strip()]
 
         self.pages = self._build_pages()
         self._render_page()
@@ -497,11 +701,39 @@ class ThoughtContainerView(LayoutView):
         page_data = self.pages[self.current_page]
         items = page_data.get("items", [])
 
-        state_title = "Thinking..." if self.is_thinking else "Thoughts"
-        header_text = f"<:thinking:1540750574851723385> **{state_title}** `({self.duration_seconds}s)`"
-
         container = Container()
-        container.add_item(TextDisplay(header_text))
+
+        if self.is_thinking:
+            header_text = f"<:thinking:1540750574851723385> **Thinking...** `({self.duration_seconds}s)`"
+            container.add_item(TextDisplay(header_text))
+        else:
+            if self.is_raw_mode:
+                header_text = f"<:thinking:1540750574851723385> **Raw Thoughts** `({self.duration_seconds}s)`"
+                if self.show_toggle:
+                    toggle_btn = Button(
+                        label="Formatting..." if self.is_formatting else "Format",
+                        emoji=LOADING_EMOJI if self.is_formatting else None,
+                        style=discord.ButtonStyle.secondary,
+                        custom_id="btn_toggle_thought_fmt",
+                        disabled=self.is_formatting
+                    )
+                    toggle_btn.callback = self._on_toggle_view_mode
+                    container.add_item(Section(TextDisplay(header_text), accessory=toggle_btn))
+                else:
+                    container.add_item(TextDisplay(header_text))
+            else:
+                header_text = f"<:thinking:1540750574851723385> **Thoughts** `({self.duration_seconds}s)`"
+                if self.show_toggle:
+                    toggle_btn = Button(
+                        label="View Raw",
+                        style=discord.ButtonStyle.secondary,
+                        custom_id="btn_toggle_thought_raw"
+                    )
+                    toggle_btn.callback = self._on_toggle_view_mode
+                    container.add_item(Section(TextDisplay(header_text), accessory=toggle_btn))
+                else:
+                    container.add_item(TextDisplay(header_text))
+
         container.add_item(Separator(visible=True))
 
         for item in items:
@@ -515,7 +747,7 @@ class ThoughtContainerView(LayoutView):
                 t_args = tool_call.get("args", {})
                 t_res = tool_call.get("result", {})
                 t_dur = tool_call.get("duration_ms", 0)
-                display_str = format_tool_display_text(t_name, t_args, t_res, t_dur).strip() or "*Tool Action*"
+                display_str = format_tool_display_text(t_name, t_args, t_res, t_dur, tool_call=tool_call).strip() or "*Tool Action*"
 
                 acc_btn = Button(
                     label="View ↗",
@@ -559,13 +791,62 @@ class ThoughtContainerView(LayoutView):
 
         self.add_item(container)
 
+    async def _on_toggle_view_mode(self, interaction: discord.Interaction):
+        self.last_user_action_time = time.time()
+        if self.is_raw_mode:
+            if not self.formatted_thoughts and self.raw_thoughts:
+                self.is_formatting = True
+                self._render_page()
+                try:
+                    await interaction.response.edit_message(view=self)
+                except Exception:
+                    pass
+
+                formatted = await format_thoughts_with_llm(self.raw_thoughts)
+                self.formatted_thoughts = formatted
+                self.is_formatting = False
+
+                if self.message_id:
+                    gen = branch_manager.get_generation(self.message_id)
+                    if gen:
+                        versions = gen.get("versions", [])
+                        if 1 <= self.version_idx <= len(versions):
+                            v_data = versions[self.version_idx - 1]
+                            v_data["formatted_thoughts"] = formatted
+                            branch_manager.update_version_data(self.message_id, self.version_idx, v_data)
+
+                if self.parent_view and hasattr(self.parent_view, "thought_data"):
+                    self.parent_view.thought_data["formatted_thoughts"] = formatted
+
+                self.is_raw_mode = False
+                self.current_page = 0
+                self._refresh_content()
+                try:
+                    await interaction.edit_original_response(view=self)
+                except Exception:
+                    pass
+                return
+
+            self.is_raw_mode = False
+        else:
+            self.is_raw_mode = True
+
+        self.current_page = 0
+        self._refresh_content()
+        try:
+            await interaction.response.edit_message(view=self)
+        except Exception as ex:
+            logger.debug(f"Toggle thought mode error: {ex}")
+
     def _create_inspector_callback(self, tool_call: dict[str, Any]):
         async def callback(interaction: discord.Interaction):
+            self.last_user_action_time = time.time()
             self.is_inspecting_tool = True
             if self.parent_view:
                 self.parent_view.is_inspecting = True
 
             async def back_to_container(back_interaction: discord.Interaction):
+                self.last_user_action_time = time.time()
                 self.is_inspecting_tool = False
                 if self.parent_view:
                     self.parent_view.is_inspecting = False
@@ -585,32 +866,60 @@ class ThoughtContainerView(LayoutView):
         return callback
 
     async def _on_prev_page(self, interaction: discord.Interaction):
-        if self.current_page > 0:
-            self.is_paginating = True
-            self.current_page -= 1
-            if self.parent_view:
-                self.parent_view.active_interaction = interaction
-            self._render_page()
-            try:
-                await interaction.response.edit_message(view=self)
-            except Exception as ex:
-                logger.debug(f"Prev page edit exception: {ex}")
-            finally:
-                self.is_paginating = False
+        self.last_user_action_time = time.time()
+        self.is_paginating = True
+
+        lock = self.parent_view.update_lock if (self.parent_view and hasattr(self.parent_view, "update_lock")) else None
+        if lock:
+            await lock.acquire()
+
+        try:
+            if self.current_page > 0:
+                self.current_page -= 1
+                if self.parent_view:
+                    self.parent_view.active_interaction = interaction
+                self._render_page()
+                try:
+                    await interaction.response.edit_message(view=self)
+                except Exception as ex:
+                    logger.debug(f"Prev page edit exception: {ex}")
+            else:
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
+        finally:
+            if lock and lock.locked():
+                lock.release()
+            self.is_paginating = False
 
     async def _on_next_page(self, interaction: discord.Interaction):
-        if self.current_page < len(self.pages) - 1:
-            self.is_paginating = True
-            self.current_page += 1
-            if self.parent_view:
-                self.parent_view.active_interaction = interaction
-            self._render_page()
-            try:
-                await interaction.response.edit_message(view=self)
-            except Exception as ex:
-                logger.debug(f"Next page edit exception: {ex}")
-            finally:
-                self.is_paginating = False
+        self.last_user_action_time = time.time()
+        self.is_paginating = True
+
+        lock = self.parent_view.update_lock if (self.parent_view and hasattr(self.parent_view, "update_lock")) else None
+        if lock:
+            await lock.acquire()
+
+        try:
+            if self.current_page < len(self.pages) - 1:
+                self.current_page += 1
+                if self.parent_view:
+                    self.parent_view.active_interaction = interaction
+                self._render_page()
+                try:
+                    await interaction.response.edit_message(view=self)
+                except Exception as ex:
+                    logger.debug(f"Next page edit exception: {ex}")
+            else:
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
+        finally:
+            if lock and lock.locked():
+                lock.release()
+            self.is_paginating = False
 
 
 class PlaceholderLayoutView(LayoutView):
@@ -620,7 +929,8 @@ class PlaceholderLayoutView(LayoutView):
         duration_seconds: int = 0,
         is_enabled: bool = False,
         on_answer_now_callback: Callable | None = None,
-        thought_data: dict[str, Any] | None = None
+        thought_data: dict[str, Any] | None = None,
+        model_name: str | None = None
     ):
         super().__init__(timeout=900)
         self.loading_text = loading_text
@@ -628,6 +938,7 @@ class PlaceholderLayoutView(LayoutView):
         self.is_enabled = is_enabled
         self.on_answer_now_callback = on_answer_now_callback
         self.thought_data = thought_data or {"thoughts": "", "tool_calls": []}
+        self.model_name = (model_name or (self.thought_data.get("model") if self.thought_data else "")).lower()
 
         self.active_container: ThoughtContainerView | None = None
         self.active_interaction: discord.Interaction | None = None
@@ -678,6 +989,15 @@ class PlaceholderLayoutView(LayoutView):
         if self.is_inspecting or self.active_container.is_inspecting_tool or self.active_container.is_paginating:
             return
 
+        if self.active_container.current_page > 0 or (time.time() - getattr(self.active_container, "last_user_action_time", 0.0)) < 2.0:
+            raw_thoughts = self.thought_data.get("thoughts", "")
+            tool_calls = self.thought_data.get("tool_calls", [])
+            self.active_container.raw_thoughts = raw_thoughts
+            self.active_container.formatted_thoughts = raw_thoughts
+            self.active_container.tool_calls = tool_calls
+            self.active_container.duration_seconds = self.duration_seconds
+            return
+
         if self.update_lock.locked():
             return
 
@@ -685,12 +1005,13 @@ class PlaceholderLayoutView(LayoutView):
             try:
                 raw_thoughts = self.thought_data.get("thoughts", "")
                 tool_calls = self.thought_data.get("tool_calls", [])
-                self.active_container._refresh_content(
-                    raw_thoughts=raw_thoughts,
-                    tool_calls=tool_calls,
-                    duration_seconds=self.duration_seconds,
-                    is_thinking=True
-                )
+                self.active_container.raw_thoughts = raw_thoughts
+                self.active_container.formatted_thoughts = raw_thoughts
+                self.active_container.tool_calls = tool_calls
+                self.active_container.duration_seconds = self.duration_seconds
+                self.active_container.is_thinking = True
+                self.active_container.show_toggle = False
+                self.active_container._refresh_content()
                 await self.active_interaction.edit_original_response(view=self.active_container)
             except (discord.HTTPException, discord.NotFound):
                 pass
@@ -715,10 +1036,13 @@ class PlaceholderLayoutView(LayoutView):
 
         self.active_container = ThoughtContainerView(
             raw_thoughts=raw_thoughts,
+            formatted_thoughts=raw_thoughts,
             tool_calls=tool_calls,
             duration_seconds=self.duration_seconds,
             is_thinking=True,
-            parent_view=self
+            show_toggle=False,
+            parent_view=self,
+            model_name=self.model_name
         )
         self.active_interaction = interaction
         self.is_inspecting = False
@@ -738,13 +1062,15 @@ class ThinkingButtonView(View):
         duration_seconds: int = 0,
         is_thinking: bool = False,
         is_enabled: bool = True,
-        thought_data: dict[str, Any] | None = None
+        thought_data: dict[str, Any] | None = None,
+        model_name: str | None = None
     ):
         super().__init__(timeout=900)
         self.duration_seconds = duration_seconds
         self.is_thinking = is_thinking
         self.is_enabled = is_enabled
-        self.thought_data = thought_data or {"thoughts": "", "tool_calls": []}
+        self.thought_data = thought_data or {"thoughts": "", "formatted_thoughts": None, "tool_calls": []}
+        self.model_name = (model_name or (self.thought_data.get("model") if self.thought_data else "")).lower()
         
         self.active_container: ThoughtContainerView | None = None
         self.active_interaction: discord.Interaction | None = None
@@ -770,14 +1096,40 @@ class ThinkingButtonView(View):
 
     async def _on_button_click(self, interaction: discord.Interaction):
         raw_thoughts = self.thought_data.get("thoughts", "")
+        formatted_thoughts = self.thought_data.get("formatted_thoughts")
         tool_calls = self.thought_data.get("tool_calls", [])
+
+        if self.is_thinking:
+            self.active_container = ThoughtContainerView(
+                raw_thoughts=raw_thoughts,
+                formatted_thoughts=raw_thoughts,
+                tool_calls=tool_calls,
+                duration_seconds=self.duration_seconds,
+                is_thinking=True,
+                show_toggle=False,
+                parent_view=self,
+                model_name=self.model_name
+            )
+            self.active_interaction = interaction
+            self.is_inspecting = False
+
+            try:
+                await interaction.response.send_message(
+                    view=self.active_container,
+                    ephemeral=True
+                )
+            except Exception as ex:
+                logger.debug(f"Thinking button click error: {ex}")
+            return
 
         self.active_container = ThoughtContainerView(
             raw_thoughts=raw_thoughts,
+            formatted_thoughts=formatted_thoughts,
             tool_calls=tool_calls,
             duration_seconds=self.duration_seconds,
-            is_thinking=self.is_thinking,
-            parent_view=self
+            is_thinking=False,
+            parent_view=self,
+            model_name=self.model_name
         )
         self.active_interaction = interaction
         self.is_inspecting = False
@@ -788,4 +1140,4 @@ class ThinkingButtonView(View):
                 ephemeral=True
             )
         except Exception as ex:
-            logger.debug(f"Final thinking button click error: {ex}")
+            logger.debug(f"Thinking button click error: {ex}")

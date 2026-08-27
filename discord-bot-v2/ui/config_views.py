@@ -22,12 +22,12 @@ from ui.modals import DynamicModalV2
 logger = logging.getLogger("PriestyAI.ConfigViews")
 
 DEFAULT_SERVER_BIO = (
-    "PriestyAI — Intelligent server companion & reasoning assistant.\n\n"
-    "• Real-time web search, Docker code execution & image generation\n"
-    "• Autonomous long-term memory & per-channel directives\n\n"
-    "✨ Chat: @mention me or use </ask:1540889817980731543>\n"
-    "⚙️ Manage: </config:1541093516078485646> • </data:1541122763044163665>\n"
-    "💡 *Tip: Right-click any response to **Branch** or **Retry**.*"
+    "**PriestyAI** — Intelligent server companion & assistant.\n\n"
+    "• Real-time web search, image creation & file downloads\n"
+    "• Autonomous workspace agents & personal memory\n\n"
+    "✨ **Chat:** @mention • </ask:1540889817980731543> • </agent:1542273792221511761>\n"
+    "⚙️ **Manage:** </config:1541093516078485646> • </data:1541122763044163665>\n"
+    "💡 Tip: Right-click any response to **Branch** or **Retry**."
 )
 
 SCOPE_DISPLAY_NAMES = {

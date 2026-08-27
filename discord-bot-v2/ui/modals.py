@@ -172,6 +172,8 @@ class DynamicModalV2(ui.Modal):
 
     def to_dict(self) -> dict[str, Any]:
         components_payload = []
+        total_text_chars = 0
+        max_allowed_chars = 3750
 
         for idx, field in enumerate(self.fields_schema):
             if isinstance(field, str):
@@ -181,9 +183,14 @@ class DynamicModalV2(ui.Modal):
 
             if field_type in ["textdisplay", "text_display"]:
                 content = field.get("content", field.get("label", ""))
+                remaining = max_allowed_chars - total_text_chars
+                if remaining <= 0:
+                    continue
+                safe_content = content[:remaining]
+                total_text_chars += len(safe_content)
                 components_payload.append({
                     "type": 10,
-                    "content": content[:4000]
+                    "content": safe_content
                 })
             else:
                 child_payload = self._build_child_component_dict(field, idx)

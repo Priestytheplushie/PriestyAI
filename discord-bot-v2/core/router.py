@@ -6,7 +6,8 @@ from google.genai import types
 from config.settings import (
     ROUTER_PRIMARY,
     ROUTER_FALLBACK,
-    WORKHORSE_MODEL
+    WORKHORSE_DENSE_MODEL,
+    WORKHORSE_MOE_MODEL
 )
 from core.client_manager import client_manager
 
@@ -14,7 +15,7 @@ logger = logging.getLogger("PriestyAI.Router")
 
 class RouteDecision(BaseModel):
     target_model: str = Field(
-        description="Chosen model: 'gemma-4-31b-it', 'gemini-3.5-flash-lite', or 'gemini-3.7-flash'"
+        description="Chosen model: 'gemma-4-31b-it' (Dense Coding/Math), 'gemma-4-26b-a4b-it' (Fast MoE General), 'gemini-3.5-flash-lite' (Instant Utility), or 'gemini-3.7-flash' (Flagship Deep Analysis)"
     )
     thinking_level: str = Field(
         description="Reasoning level: 'MINIMAL', 'LOW', 'MEDIUM', or 'HIGH'"
@@ -35,14 +36,19 @@ ROUTING HIERARCHY & COMPLEXITY PRINCIPLES:
    - Image lookups, picture searches, and visual requests ("show me a picture of...", "what does X look like?").
    - Direct image generation requests ("draw me a...", "generate an artwork of...").
    - Short conversational banter, greetings, simple trivia, translations, or quick utility questions.
-   - Goal: Instant execution without wasting time or API tokens on unnecessary deep reasoning.
+   - Goal: Instant execution without latency or wasting API tokens on unnecessary deep reasoning.
 
-2. WORKHORSE ROUTE -> target_model: "gemma-4-31b-it" | thinking_level: "MEDIUM" or "HIGH"
-   - Standard coding scripts, single-file game builds, math derivations, algorithm writing, conceptual explanations, and multi-turn technical discussions.
-   - Use "MEDIUM" for standard coding and single-turn questions; use "HIGH" for complex proofs or multi-step algorithms.
-   - Constraint: If audio/video files are attached, do NOT use Gemma (route to Gemini Flash).
+2. FAST WORKHORSE ROUTE (MoE) -> target_model: "gemma-4-26b-a4b-it" | thinking_level: "MEDIUM" or "HIGH"
+   - Standard conversational reasoning, long document explanations, science/general knowledge, short scripting, and fast agentic queries.
+   - 26B total capacity with 4B active execution speed (~2x faster token generation than dense).
+   - Constraint: If audio/video media is attached, do NOT use Gemma (route to Gemini Flash).
 
-3. FLAGSHIP SPECIALIST ROUTE -> target_model: "gemini-3.7-flash" | thinking_level: "HIGH"
+3. DEEP WORKHORSE ROUTE (Dense) -> target_model: "gemma-4-31b-it" | thinking_level: "HIGH"
+   - Heavy software engineering, full script / application builds, intricate code refactoring, complex bug debugging, and mathematical derivations / proofs.
+   - Top-tier dense reasoning and algorithmic accuracy.
+   - Constraint: If audio/video media is attached, do NOT use Gemma (route to Gemini Flash).
+
+4. FLAGSHIP SPECIALIST ROUTE -> target_model: "gemini-3.7-flash" | thinking_level: "HIGH"
    - Complex full-scale multi-file software projects, deep architectural system design, heavy video/audio analysis, or advanced escalated verification.
 
 Witty Statuses:
@@ -81,8 +87,8 @@ class Router:
                     decision_data = json.loads(response.text)
                     decision = RouteDecision(**decision_data)
                     
-                    if has_media and decision.target_model == "gemma-4-31b-it":
-                        logger.warning("[Router Override] 'gemma-4-31b-it' selected for multimodal input. Redirecting to 'gemini-3.5-flash'.")
+                    if has_media and "gemma" in decision.target_model:
+                        logger.warning(f"[Router Override] '{decision.target_model}' selected with rich media. Ensuring 'gemini-3.5-flash' fallback for audio/video stability.")
                         decision.target_model = "gemini-3.5-flash"
                         decision.thinking_level = "MEDIUM"
 
@@ -96,11 +102,11 @@ class Router:
                 client_manager.report_error(key_idx, active_model, Exception(err_desc))
                 logger.warning(f"Router attempt failed on {active_model} (Key #{key_idx}): {err_desc}")
 
-        fallback_model = "gemini-3.5-flash-lite" if has_media else WORKHORSE_MODEL
+        fallback_model = "gemini-3.5-flash-lite" if has_media else WORKHORSE_MOE_MODEL
         logger.warning(f"Router fallback activated: Using safe route '{fallback_model}'.")
         return RouteDecision(
             target_model=fallback_model,
-            thinking_level="MEDIUM" if fallback_model == WORKHORSE_MODEL else "MINIMAL",
+            thinking_level="MEDIUM" if "gemma" in fallback_model else "MINIMAL",
             witty_statuses=[
                 "Herding digital sheep",
                 "Warming up synaptic cores",

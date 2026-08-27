@@ -1,10 +1,11 @@
 import io
+import re
 import time
 import base64
 import asyncio
 import logging
-import discord
 from typing import Any
+import discord
 from discord import app_commands
 from config.settings import DISCORD_TOKEN
 from core.client_manager import client_manager
@@ -12,9 +13,19 @@ from core.branch_manager import branch_manager
 from core.config_manager import config_manager
 from core.poll_manager import poll_manager
 from core.searxng_client import searxng_client
+from core.playground_server import playground_server
+from agent.session_manager import session_manager
+from agent.engine import AgentEngine
+from agent.views import AgentStepInspectorView, build_agent_new_task_modal
+from agent.constants import OCTICONS_MAP
 from handlers.chat_handler import ChatHandler
-from handlers.slash_handler import setup_slash_commands
-from handlers.stream_handler import build_v2_message_layout, apply_message_parsers
+from commands import setup_commands, build_retry_placeholder_layout
+from handlers.stream_handler import (
+    build_v2_message_layout,
+    apply_message_parsers,
+    chunk_timeline,
+    cleanup_sibling_messages
+)
 from ui.thought_container import ThoughtContainerView
 from ui.context_views import BranchTranscriptView
 from ui.artifact_views import build_code_preview_modal, build_artifact_open_modal, prepare_artifact_download_payload
@@ -37,8 +48,10 @@ class PriestyBot(discord.Client):
 
     async def setup_hook(self):
         asyncio.create_task(searxng_client.ensure_running())
+        asyncio.create_task(playground_server.start())
+        asyncio.create_task(session_manager.prune_stale_workspaces())
 
-        setup_slash_commands(self.tree)
+        setup_commands(self.tree)
         try:
             synced = await self.tree.sync()
             logger.info(f"[CommandTree] Successfully synced {len(synced)} application command(s) & context menus globally!")
@@ -46,6 +59,7 @@ class PriestyBot(discord.Client):
             logger.error(f"[CommandTree] Failed to sync application commands: {e}")
 
     async def close(self):
+        await playground_server.stop()
         await super().close()
 
     async def on_ready(self):
@@ -116,11 +130,14 @@ class PriestyBot(discord.Client):
 
         self.record_activity()
 
-        is_in_branch = False
         if isinstance(message.channel, discord.Thread):
+            agent_session = session_manager.get_session_by_thread_id(message.channel.id)
+            if agent_session:
+                await AgentEngine.handle_thread_message(message, agent_session)
+                return
+
             branch = branch_manager.get_branch_by_thread_id(message.channel.id)
             if branch:
-                is_in_branch = True
                 branch_manager.add_branch_message(
                     thread_id=message.channel.id,
                     role="user",
@@ -128,12 +145,14 @@ class PriestyBot(discord.Client):
                     author_id=message.author.id,
                     content=message.clean_content
                 )
+                await ChatHandler.handle_message(self, message, force_respond=True)
+                return
 
         is_ai_channel = False
         if message.guild and message.channel:
             is_ai_channel = config_manager.is_ai_channel(message.guild.id, message.channel.id)
 
-        await ChatHandler.handle_message(self, message, force_respond=(is_in_branch or is_ai_channel))
+        await ChatHandler.handle_message(self, message, force_respond=is_ai_channel)
 
     async def on_interaction(self, interaction: discord.Interaction):
         self.record_activity()
@@ -164,6 +183,65 @@ class PriestyBot(discord.Client):
                 return target_msg.attachments[0].url
             return None
 
+        if custom_id.startswith("fup:"):
+            parts = custom_id.split(":")
+            if len(parts) >= 3:
+                msg_id = parts[1]
+                fup_idx = int(parts[2]) if parts[2].isdigit() else 0
+
+                gen = branch_manager.get_generation(msg_id)
+                if gen and interaction.message:
+                    root_id = gen["message_id"]
+                    active_v = gen.get("active_version", 1)
+                    versions = gen.get("versions", [])
+                    if 1 <= active_v <= len(versions):
+                        v_data = versions[active_v - 1]
+                        fups = v_data.get("staged_followups", [])
+                        if 0 <= fup_idx < len(fups):
+                            fup_item = fups[fup_idx]
+                            prompt_text = fup_item.get("prompt", "")
+
+                            for f in fups:
+                                f["disabled"] = True
+
+                            v_data["staged_followups"] = fups
+                            branch_manager.update_version_data(root_id, active_v, v_data)
+
+                            mod_map = {m["modal_id"]: m for m in v_data.get("staged_modals", [])}
+                            disabled_view = build_v2_message_layout(
+                                raw_text=v_data.get("content", "") if not v_data.get("timeline_blocks") else None,
+                                timeline_blocks=v_data.get("timeline_blocks"),
+                                guild=interaction.guild,
+                                staged_components=v_data.get("staged_components", []),
+                                staged_artifacts=v_data.get("staged_artifacts", []),
+                                staged_followups=fups,
+                                modals_map=mod_map,
+                                thought_duration=v_data.get("duration_seconds", 0),
+                                has_thoughts=v_data.get("has_thoughts", False),
+                                active_version=active_v,
+                                total_versions=len(versions),
+                                message_id=root_id,
+                                is_live_stream=False
+                            )
+
+                            try:
+                                await interaction.response.edit_message(view=disabled_view)
+                            except Exception:
+                                try:
+                                    await interaction.response.defer()
+                                except Exception:
+                                    pass
+
+                            await ChatHandler.handle_followup_turn(
+                                bot=self,
+                                interaction=interaction,
+                                prompt_text=prompt_text
+                            )
+                            return
+
+            await interaction.response.send_message(content="❌ Follow-up action expired.", ephemeral=True)
+            return
+
         if custom_id.startswith("artprev:"):
             parts = custom_id.split(":")
             if len(parts) >= 4:
@@ -185,13 +263,20 @@ class PriestyBot(discord.Client):
                             if not inter.response.is_done():
                                 await inter.response.send_message(content=msg_content, files=discord_files, ephemeral=True)
 
+                        adds = v_entry.get("additions", 0)
+                        dels = v_entry.get("deletions", 0)
+                        diff_tup = (adds, dels) if (adds > 0 or dels > 0) else None
+
                         modal = build_code_preview_modal(
                             filename=filename,
                             raw_code=v_entry.get("content", ""),
                             channel_id=chan_id,
                             message_id=msg_id,
                             attachment_url=att_url,
-                            on_submit_callback=preview_submit
+                            on_submit_callback=preview_submit,
+                            version=target_v,
+                            diff_stats=diff_tup,
+                            artifact_id=art_id
                         )
                         await interaction.response.send_modal(modal)
                         return
@@ -216,27 +301,20 @@ class PriestyBot(discord.Client):
 
                                 if art_versions and 1 <= target_v <= len(art_versions):
                                     v_entry = art_versions[target_v - 1]
+                                    adds = v_entry.get("additions", 0)
+                                    dels = v_entry.get("deletions", 0)
+                                    diff_tup = (adds, dels) if (adds > 0 or dels > 0) else None
+
                                     modal = build_code_preview_modal(
                                         filename=filename,
                                         raw_code=v_entry.get("content", ""),
                                         channel_id=chan_id,
                                         message_id=msg_id,
                                         attachment_url=att_url,
-                                        on_submit_callback=gen_preview_submit
-                                    )
-                                    await interaction.response.send_modal(modal)
-                                    return
-                                files = art.get("files", [])
-                                if files:
-                                    f_name = files[0].get("filename", "code.txt")
-                                    att_url = await resolve_attachment_url(f_name, msg_id)
-                                    modal = build_code_preview_modal(
-                                        filename=f_name,
-                                        raw_code=files[0].get("content", ""),
-                                        channel_id=chan_id,
-                                        message_id=msg_id,
-                                        attachment_url=att_url,
-                                        on_submit_callback=gen_preview_submit
+                                        on_submit_callback=gen_preview_submit,
+                                        version=target_v,
+                                        diff_stats=diff_tup,
+                                        artifact_id=art_id
                                     )
                                     await interaction.response.send_modal(modal)
                                     return
@@ -298,6 +376,7 @@ class PriestyBot(discord.Client):
                     chosen_v = int(selected_v_str)
                     gen = branch_manager.get_generation(msg_id)
                     if gen and interaction.message:
+                        root_id = gen["message_id"]
                         active_v = gen.get("active_version", 1)
                         versions = gen.get("versions", [])
                         if 1 <= active_v <= len(versions):
@@ -306,6 +385,7 @@ class PriestyBot(discord.Client):
                             timeline_blocks = v_data.get("timeline_blocks")
                             staged_comps = v_data.get("staged_components", [])
                             staged_arts = v_data.get("staged_artifacts", [])
+                            staged_fups = v_data.get("staged_followups", [])
                             staged_mods = v_data.get("staged_modals", [])
                             dur = v_data.get("duration_seconds", 0)
                             has_t = v_data.get("has_thoughts", False)
@@ -326,12 +406,13 @@ class PriestyBot(discord.Client):
                                 guild=interaction.guild,
                                 staged_components=staged_comps,
                                 staged_artifacts=staged_arts,
+                                staged_followups=staged_fups,
                                 modals_map=mod_map,
                                 thought_duration=dur,
                                 has_thoughts=has_t,
                                 active_version=active_v,
                                 total_versions=len(versions),
-                                message_id=msg_id,
+                                message_id=root_id,
                                 is_live_stream=False
                             )
                             await interaction.response.edit_message(view=updated_view)
@@ -363,10 +444,16 @@ class PriestyBot(discord.Client):
             await interaction.response.send_message(content="🗑️ **Branch deleted.** Deleting thread...", ephemeral=True)
             try:
                 if isinstance(interaction.channel, discord.Thread):
+                    agent_ses = session_manager.get_session_by_thread_id(interaction.channel.id)
+                    if agent_ses:
+                        asyncio.create_task(session_manager.cleanup_session(agent_ses["session_id"]))
                     await interaction.channel.delete()
                 elif branch.get("thread_id"):
                     thread_obj = interaction.guild.get_thread(int(branch["thread_id"])) or await interaction.guild.fetch_channel(int(branch["thread_id"]))
                     if thread_obj:
+                        agent_ses = session_manager.get_session_by_thread_id(thread_obj.id)
+                        if agent_ses:
+                            asyncio.create_task(session_manager.cleanup_session(agent_ses["session_id"]))
                         await thread_obj.delete()
             except Exception as ex:
                 logger.warning(f"Failed to delete thread channel: {ex}")
@@ -394,18 +481,40 @@ class PriestyBot(discord.Client):
                 await interaction.response.send_message(content="❌ Generation record expired.", ephemeral=True)
                 return
 
+            root_id = str(gen_record["message_id"])
             current_v = gen_record.get("active_version", 1)
-            total_v = len(gen_record.get("versions", []))
+            versions = gen_record.get("versions", [])
+            total_v = len(versions)
             target_v = (current_v - 1) if is_prev else (current_v + 1)
 
-            target_version_data = branch_manager.set_active_version(msg_id, target_v)
-            if target_version_data and interaction.message:
+            if not (1 <= target_v <= total_v):
+                await interaction.response.send_message(content="❌ Target version out of range.", ephemeral=True)
+                return
+
+            target_version_data = branch_manager.set_active_version(root_id, target_v)
+            if target_version_data and interaction.channel:
+                curr_v_data = versions[current_v - 1] if 1 <= current_v <= len(versions) else {}
+                old_message_ids = [str(x) for x in curr_v_data.get("message_ids", [root_id])]
+                if root_id not in old_message_ids:
+                    old_message_ids.insert(0, root_id)
+
+                if target_version_data.get("status") == "generating":
+                    generating_view = build_retry_placeholder_layout(
+                        status_text=f"Generating version {target_v}",
+                        target_version=target_v,
+                        total_versions=total_v,
+                        message_id=root_id
+                    )
+                    await interaction.response.edit_message(view=generating_view)
+                    return
+
                 dur = target_version_data.get("duration_seconds", 0)
                 has_t = target_version_data.get("has_thoughts", False)
                 v_content = target_version_data.get("content", "")
-                timeline_blocks = target_version_data.get("timeline_blocks")
+                raw_timeline = target_version_data.get("timeline_blocks") or ([{"type": "text", "content": v_content}] if v_content else [])
                 staged_comps = target_version_data.get("staged_components", [])
                 staged_arts = target_version_data.get("staged_artifacts", [])
+                staged_fups = target_version_data.get("staged_followups", [])
                 staged_mods = target_version_data.get("staged_modals", [])
                 mod_map = {m["modal_id"]: m for m in staged_mods}
 
@@ -420,39 +529,114 @@ class PriestyBot(discord.Client):
                             img_name = fname
                         files.append(discord.File(io.BytesIO(raw), filename=fname))
 
-                v2_view = build_v2_message_layout(
-                    raw_text=v_content if not timeline_blocks else None,
-                    timeline_blocks=timeline_blocks,
+                target_slices = chunk_timeline(raw_timeline)
+                num_slices = max(1, len(target_slices))
+                new_version_msg_ids = []
+
+                first_slice = target_slices[0]
+                is_first_last = (num_slices == 1)
+
+                v2_view_primary = build_v2_message_layout(
+                    timeline_blocks=first_slice,
                     guild=interaction.guild,
-                    staged_components=staged_comps,
+                    staged_components=staged_comps if is_first_last else None,
                     staged_artifacts=staged_arts,
-                    modals_map=mod_map,
+                    staged_followups=staged_fups if is_first_last else None,
+                    modals_map=mod_map if is_first_last else None,
                     image_filename=img_name,
                     has_image=bool(img_name),
-                    thought_duration=dur,
-                    has_thoughts=has_t,
+                    thought_duration=dur if is_first_last else 0,
+                    has_thoughts=has_t if is_first_last else False,
                     active_version=target_v,
                     total_versions=total_v,
-                    message_id=msg_id,
+                    message_id=root_id if is_first_last else None,
                     is_live_stream=False
                 )
 
-                if files:
-                    await interaction.response.edit_message(view=v2_view, attachments=files)
-                else:
-                    await interaction.response.edit_message(view=v2_view)
+                root_msg = None
+                try:
+                    if str(interaction.message.id) == root_id:
+                        if files:
+                            await interaction.response.edit_message(view=v2_view_primary, attachments=files)
+                        else:
+                            await interaction.response.edit_message(view=v2_view_primary)
+                        root_msg = interaction.message
+                    else:
+                        root_msg = await interaction.channel.fetch_message(int(root_id))
+                        if files:
+                            await root_msg.edit(view=v2_view_primary, attachments=files)
+                        else:
+                            await root_msg.edit(view=v2_view_primary)
+                        if not interaction.response.is_done():
+                            await interaction.response.defer()
+                except Exception as ex:
+                    logger.warning(f"Root message update error during version swap: {ex}")
+
+                new_version_msg_ids.append(root_id)
+
+                for s_idx in range(1, num_slices):
+                    slice_data = target_slices[s_idx]
+                    is_slice_last = (s_idx == num_slices - 1)
+
+                    slice_view = build_v2_message_layout(
+                        timeline_blocks=slice_data,
+                        guild=interaction.guild,
+                        staged_components=staged_comps if is_slice_last else None,
+                        staged_artifacts=staged_arts,
+                        staged_followups=staged_fups if is_slice_last else None,
+                        modals_map=mod_map if is_slice_last else None,
+                        thought_duration=dur if is_slice_last else 0,
+                        has_thoughts=has_t if is_slice_last else False,
+                        active_version=target_v,
+                        total_versions=total_v,
+                        message_id=root_id if is_slice_last else None,
+                        is_live_stream=False
+                    )
+
+                    existing_sibling_msg = None
+                    if s_idx < len(old_message_ids):
+                        existing_sibling_id = old_message_ids[s_idx]
+                        if existing_sibling_id != root_id:
+                            try:
+                                existing_sibling_msg = await interaction.channel.fetch_message(int(existing_sibling_id))
+                                await existing_sibling_msg.edit(view=slice_view)
+                                new_version_msg_ids.append(str(existing_sibling_msg.id))
+                            except Exception:
+                                existing_sibling_msg = None
+
+                    if not existing_sibling_msg:
+                        new_msg = await interaction.channel.send(view=slice_view)
+                        new_version_msg_ids.append(str(new_msg.id))
+
+                if len(old_message_ids) > num_slices:
+                    orphan_ids = [m for m in old_message_ids[num_slices:] if m != root_id]
+                    if orphan_ids:
+                        asyncio.create_task(cleanup_sibling_messages(interaction.channel, orphan_ids))
+
+                target_version_data["message_ids"] = new_version_msg_ids
+                branch_manager.update_version_data(root_id, target_v, target_version_data)
+                
+                if 1 <= current_v <= len(versions):
+                    curr_v_data["message_ids"] = new_version_msg_ids
+                    branch_manager.update_version_data(root_id, current_v, curr_v_data)
+
             return
 
-        if custom_id.startswith("gen_thought_"):
+        if custom_id.startswith("gen_thought_") and not custom_id.startswith("gen_thought_agent_"):
             parts = custom_id.replace("gen_thought_", "").split("_")
             if len(parts) >= 2:
                 msg_id = parts[0]
-                v_idx = int(parts[1])
+                v_idx = int(parts[1]) if parts[1].isdigit() else 1
                 gen = branch_manager.get_generation(msg_id)
                 if gen:
+                    root_id = gen["message_id"]
                     versions = gen.get("versions", [])
                     if 1 <= v_idx <= len(versions):
                         v_data = versions[v_idx - 1]
+
+                        raw_thoughts = v_data.get("thoughts", "")
+                        formatted_thoughts = v_data.get("formatted_thoughts")
+                        model_name = v_data.get("model")
 
                         files = []
                         for att in v_data.get("attachments", []):
@@ -463,10 +647,14 @@ class PriestyBot(discord.Client):
                                 files.append(discord.File(io.BytesIO(raw), filename=fname))
 
                         container = ThoughtContainerView(
-                            raw_thoughts=v_data.get("thoughts", ""),
+                            raw_thoughts=raw_thoughts,
+                            formatted_thoughts=formatted_thoughts,
                             tool_calls=v_data.get("tool_calls", []),
                             duration_seconds=v_data.get("duration_seconds", 0),
-                            is_thinking=False
+                            is_thinking=(v_data.get("status") == "generating"),
+                            message_id=root_id,
+                            version_idx=v_idx,
+                            model_name=model_name
                         )
                         if files:
                             await interaction.response.send_message(view=container, files=files, ephemeral=True)
@@ -475,6 +663,70 @@ class PriestyBot(discord.Client):
                         return
 
             await interaction.response.send_message(content="❌ Thoughts unavailable for this version.", ephemeral=True)
+            return
+
+        if custom_id.startswith("agent_step_view_"):
+            parts = custom_id.replace("agent_step_view_", "").split("_")
+            if len(parts) >= 2:
+                session_id = parts[0]
+                step_idx = parts[1]
+                
+                step_data = session_manager.get_step_log(session_id, step_idx)
+                if step_data:
+                    inspector = AgentStepInspectorView(step_data)
+                    await interaction.response.send_message(view=inspector, ephemeral=True)
+                    return
+
+            await interaction.response.send_message(content="❌ Step inspection data expired.", ephemeral=True)
+            return
+
+        if custom_id.startswith("gen_thought_agent_"):
+            session_id = custom_id.replace("gen_thought_agent_", "")
+            t_data = session_manager.get_session_thoughts(session_id)
+            if t_data:
+                container = ThoughtContainerView(
+                    raw_thoughts=t_data.get("thoughts", "") or "Researching workspace and analyzing repository architecture...",
+                    tool_calls=t_data.get("tool_calls", []),
+                    duration_seconds=t_data.get("duration_seconds", 1),
+                    is_thinking=False,
+                    model_name="gemma-4-31b-it"
+                )
+                await interaction.response.send_message(view=container, ephemeral=True)
+                return
+
+            await interaction.response.send_message(content="❌ Reasoning details unavailable for this session.", ephemeral=True)
+            return
+
+        if custom_id.startswith("agent_new_task_"):
+            session_id = custom_id.replace("agent_new_task_", "")
+            session = session_manager.get_session_by_id(session_id)
+            if not session:
+                await interaction.response.send_message(content="❌ Agent session not found.", ephemeral=True)
+                return
+
+            perms = getattr(interaction.user, "guild_permissions", None)
+            if not session_manager.is_collaborator(session, interaction.user.id, perms):
+                await interaction.response.send_message(content="❌ Only session collaborators can start a new task in this workspace.", ephemeral=True)
+                return
+
+            async def on_new_task_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+                next_prompt = data.get("prompt", "").strip()
+                if not next_prompt:
+                    await sub_inter.response.send_message(content="❌ Task prompt cannot be empty.", ephemeral=True)
+                    return
+
+                await sub_inter.response.defer(ephemeral=True)
+
+                thread = interaction.channel
+                if isinstance(thread, discord.Thread):
+                    session_manager.update_session(session_id, state="planning")
+                    await thread.send(content=f"{OCTICONS_MAP['oct_checklist']} **New Task Started by {interaction.user.mention}:**\n> {next_prompt}")
+                    asyncio.create_task(AgentEngine.start_planning_turn(thread, session, feedback=next_prompt))
+                else:
+                    await sub_inter.followup.send(content="❌ Cannot find the agent thread.", ephemeral=True)
+
+            modal = build_agent_new_task_modal(session_id, on_submit=on_new_task_submit)
+            await interaction.response.send_modal(modal)
             return
 
 if __name__ == "__main__":

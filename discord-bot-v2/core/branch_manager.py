@@ -1,16 +1,32 @@
 import os
 import time
 import json
-import base64
+import difflib
 import sqlite3
+import asyncio
 import logging
 from typing import Any
-import discord
 
 logger = logging.getLogger("PriestyAI.BranchManager")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "priestyai.db")
+
+def compute_code_diff(old_code: str, new_code: str, filename: str, v_old: int, v_new: int) -> tuple[str, int, int]:
+    old_lines = old_code.splitlines(keepends=True)
+    new_lines = new_code.splitlines(keepends=True)
+    diff_lines = list(difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=f"{filename} (v{v_old})",
+        tofile=f"{filename} (v{v_new})",
+        n=3
+    ))
+    diff_text = "".join(diff_lines)
+    additions = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
+    deletions = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
+    return diff_text, additions, deletions
+
 
 class BranchManager:
     def __init__(self, db_path: str = DB_PATH):
@@ -82,6 +98,17 @@ class BranchManager:
                 d = dict(row)
                 d["versions"] = json.loads(d.get("versions_json") or "[]")
                 return d
+
+            cursor.execute("SELECT versions_json FROM message_generations")
+            for g_row in cursor.fetchall():
+                try:
+                    versions = json.loads(g_row["versions_json"] or "[]")
+                    for v in versions:
+                        for art in v.get("staged_artifacts", []):
+                            if art.get("artifact_id") == str(artifact_id):
+                                return art
+                except Exception:
+                    continue
         return None
 
     def get_artifact_by_channel_and_file(self, channel_id: str | int, filename: str) -> dict[str, Any] | None:
@@ -98,6 +125,20 @@ class BranchManager:
                 return d
         return None
 
+    def get_channel_artifacts(self, channel_id: str | int, limit: int = 5) -> list[dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM conversation_artifacts WHERE channel_id = ? ORDER BY updated_at DESC LIMIT ?",
+                (str(channel_id), limit)
+            )
+            results = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                d["versions"] = json.loads(d.get("versions_json") or "[]")
+                results.append(d)
+            return results
+
     def save_or_update_artifact(
         self,
         channel_id: str | int,
@@ -105,27 +146,40 @@ class BranchManager:
         title: str,
         content: str,
         files: list[dict[str, Any]] | None = None,
-        change_summary: str = "",
-        is_update: bool = False
+        change_summary: str = ""
     ) -> dict[str, Any]:
-        existing = self.get_artifact_by_channel_and_file(channel_id, filename) if is_update else None
+        existing = self.get_artifact_by_channel_and_file(channel_id, filename)
         now_ts = int(time.time())
+
+        clean_fn = filename.strip()
+        clean_title = title or clean_fn
+        lines = len(content.splitlines()) if content else sum(len(f.get("content", "").splitlines()) for f in (files or []))
+        size_b = len(content.encode("utf-8")) if content else sum(len(f.get("content", "").encode("utf-8")) for f in (files or []))
+
+        result_payload: dict[str, Any] = {}
 
         if existing:
             artifact_id = existing["artifact_id"]
             versions = existing.get("versions", [])
-            new_v_num = len(versions) + 1
-            
-            lines = len(content.splitlines()) if content else sum(len(f.get("content", "").splitlines()) for f in (files or []))
-            size_b = len(content.encode("utf-8")) if content else sum(len(f.get("content", "").encode("utf-8")) for f in (files or []))
+            v_old = len(versions)
+            v_new = v_old + 1
+
+            old_entry = versions[-1] if versions else {}
+            old_code = old_entry.get("content", "")
+
+            diff_text, additions, deletions = compute_code_diff(old_code, content, clean_fn, v_old, v_new)
+            summary = change_summary.strip() or f"Updated implementation (v{v_new})"
 
             version_entry = {
-                "version": new_v_num,
-                "summary": change_summary.strip() or f"Updated {filename}",
+                "version": v_new,
+                "summary": summary,
                 "content": content,
                 "files": files or [],
                 "lines": max(1, lines),
                 "size_bytes": size_b,
+                "diff": diff_text,
+                "additions": additions,
+                "deletions": deletions,
                 "timestamp": now_ts
             }
 
@@ -139,23 +193,25 @@ class BranchManager:
                     UPDATE conversation_artifacts
                     SET title = ?, active_version = ?, versions_json = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE artifact_id = ?
-                """, (title or existing.get("title", filename), new_v_num, json.dumps(versions), str(artifact_id)))
+                """, (clean_title, v_new, json.dumps(versions), str(artifact_id)))
                 conn.commit()
 
-            return {
+            logger.info(f"[Artifacts] Auto-updated '{clean_fn}' -> v{v_new} (+{additions} -{deletions})")
+            result_payload = {
                 "artifact_id": artifact_id,
-                "filename": filename,
-                "title": title or existing.get("title", filename),
-                "active_version": new_v_num,
+                "filename": clean_fn,
+                "title": clean_title,
+                "active_version": v_new,
                 "total_versions": len(versions),
                 "versions": versions,
+                "additions": additions,
+                "deletions": deletions,
+                "diff": diff_text,
+                "is_update": True,
                 "latest_version_data": version_entry
             }
         else:
             artifact_id = f"art_{int(time.time() * 1000)}"
-            lines = len(content.splitlines()) if content else sum(len(f.get("content", "").splitlines()) for f in (files or []))
-            size_b = len(content.encode("utf-8")) if content else sum(len(f.get("content", "").encode("utf-8")) for f in (files or []))
-
             initial_version = {
                 "version": 1,
                 "summary": change_summary.strip() or "Initial implementation",
@@ -163,6 +219,9 @@ class BranchManager:
                 "files": files or [],
                 "lines": max(1, lines),
                 "size_bytes": size_b,
+                "diff": "",
+                "additions": 0,
+                "deletions": 0,
                 "timestamp": now_ts
             }
             versions = [initial_version]
@@ -173,18 +232,32 @@ class BranchManager:
                     INSERT INTO conversation_artifacts (
                         artifact_id, channel_id, filename, title, active_version, versions_json
                     ) VALUES (?, ?, ?, ?, 1, ?)
-                """, (str(artifact_id), str(channel_id), filename.strip(), title or filename, json.dumps(versions)))
+                """, (str(artifact_id), str(channel_id), clean_fn, clean_title, json.dumps(versions)))
                 conn.commit()
 
-            return {
+            logger.info(f"[Artifacts] Created initial '{clean_fn}' (v1)")
+            result_payload = {
                 "artifact_id": artifact_id,
-                "filename": filename,
-                "title": title or filename,
+                "filename": clean_fn,
+                "title": clean_title,
                 "active_version": 1,
                 "total_versions": 1,
                 "versions": versions,
+                "additions": 0,
+                "deletions": 0,
+                "diff": "",
+                "is_update": False,
                 "latest_version_data": initial_version
             }
+
+        try:
+            from core.playground_server import playground_server
+            loop = asyncio.get_running_loop()
+            loop.create_task(playground_server.notify_artifact_updated(result_payload["artifact_id"], result_payload))
+        except (RuntimeError, Exception):
+            pass
+
+        return result_payload
 
 
     def create_branch(
@@ -296,6 +369,9 @@ class BranchManager:
         context_xml: str,
         initial_version_data: dict[str, Any]
     ):
+        if "message_ids" not in initial_version_data or not initial_version_data["message_ids"]:
+            initial_version_data["message_ids"] = [str(message_id)]
+
         versions = [initial_version_data]
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -321,15 +397,25 @@ class BranchManager:
             conn.commit()
 
     def get_generation(self, message_id: str | int) -> dict[str, Any] | None:
+        mid_str = str(message_id)
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM message_generations WHERE message_id = ?", (str(message_id),))
+            cursor.execute("SELECT * FROM message_generations WHERE message_id = ?", (mid_str,))
             row = cursor.fetchone()
             if row:
                 d = dict(row)
                 d["attachments"] = json.loads(d.get("attachments_json") or "[]")
                 d["versions"] = json.loads(d.get("versions_json") or "[]")
                 return d
+
+            cursor.execute("SELECT * FROM message_generations WHERE versions_json LIKE ?", (f'%"{mid_str}"%',))
+            for row in cursor.fetchall():
+                d = dict(row)
+                d["attachments"] = json.loads(d.get("attachments_json") or "[]")
+                d["versions"] = json.loads(d.get("versions_json") or "[]")
+                for v in d["versions"]:
+                    if mid_str in [str(x) for x in v.get("message_ids", [])]:
+                        return d
         return None
 
     def add_retry_version(self, message_id: str | int, new_version_data: dict[str, Any]) -> int:
@@ -337,8 +423,13 @@ class BranchManager:
         if not gen:
             return 1
 
+        root_id = gen["message_id"]
         versions = gen.get("versions", [])
         new_version_data["version_idx"] = len(versions) + 1
+        
+        if "message_ids" not in new_version_data or not new_version_data["message_ids"]:
+            new_version_data["message_ids"] = [str(root_id)]
+
         versions.append(new_version_data)
         new_active_idx = len(versions)
 
@@ -348,23 +439,40 @@ class BranchManager:
                 UPDATE message_generations 
                 SET versions_json = ?, active_version = ?
                 WHERE message_id = ?
-            """, (json.dumps(versions), new_active_idx, str(message_id)))
+            """, (json.dumps(versions), new_active_idx, str(root_id)))
             conn.commit()
 
         return new_active_idx
+
+    def update_version_data(self, message_id: str | int, version_idx: int, updated_data: dict[str, Any]):
+        gen = self.get_generation(message_id)
+        if not gen:
+            return
+
+        root_id = gen["message_id"]
+        versions = gen.get("versions", [])
+        if 1 <= version_idx <= len(versions):
+            versions[version_idx - 1] = updated_data
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE message_generations SET versions_json = ? WHERE message_id = ?
+                """, (json.dumps(versions), str(root_id)))
+                conn.commit()
 
     def set_active_version(self, message_id: str | int, version_idx: int) -> dict[str, Any] | None:
         gen = self.get_generation(message_id)
         if not gen:
             return None
 
+        root_id = gen["message_id"]
         versions = gen.get("versions", [])
         if 1 <= version_idx <= len(versions):
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE message_generations SET active_version = ? WHERE message_id = ?
-                """, (version_idx, str(message_id)))
+                """, (version_idx, str(root_id)))
                 conn.commit()
             return versions[version_idx - 1]
         return None
@@ -374,6 +482,7 @@ class BranchManager:
         if not gen:
             return
 
+        root_id = gen["message_id"]
         active_idx = gen.get("active_version", 1)
         versions = gen.get("versions", [])
         if 1 <= active_idx <= len(versions):
@@ -385,7 +494,7 @@ class BranchManager:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE message_generations SET versions_json = ? WHERE message_id = ?
-                """, (json.dumps(versions), str(message_id)))
+                """, (json.dumps(versions), str(root_id)))
                 conn.commit()
 
 branch_manager = BranchManager()

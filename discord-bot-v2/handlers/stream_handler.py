@@ -9,6 +9,7 @@ import discord
 from discord import ui
 from discord.ui import (
     LayoutView,
+    Container,
     TextDisplay,
     Separator,
     Section,
@@ -26,12 +27,29 @@ from parsers.mention_parser import parse_mentions
 from parsers.timestamp_parser import parse_timestamps
 from parsers.emoji_parser import parse_emojis
 from parsers.math_parser import sanitize_latex
+from parsers.markdown_parser import (
+    apply_dfm,
+    parse_dfm_structures_to_blocks
+)
 from ui.modals import DynamicModalV2
 from ui.artifact_views import build_artifact_components_for_message
+from core.branch_manager import branch_manager
 
 logger = logging.getLogger("PriestyAI.StreamHandler")
 
-MAX_V2_MESSAGE_TEXT_BUDGET = 3600
+MAX_V2_MESSAGE_TEXT_BUDGET = 3500
+
+async def cleanup_sibling_messages(channel: discord.abc.Messageable, sibling_ids: list[str | int]):
+    for mid in sibling_ids:
+        try:
+            clean_id = int(str(mid).strip())
+            msg = await channel.fetch_message(clean_id)
+            if msg:
+                await msg.delete()
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        except Exception as e:
+            logger.debug(f"Failed to delete sibling message {mid}: {e}")
 
 def clean_discord_markdown(text: str) -> str:
     text = re.sub(r'(?m)^#{4,}\s+', '### ', text)
@@ -41,10 +59,32 @@ def clean_discord_markdown(text: str) -> str:
 def apply_message_parsers(text: str, guild: discord.Guild | None) -> str:
     text = clean_discord_markdown(text)
     text = sanitize_latex(text)
+    text = apply_dfm(text)
     text = parse_mentions(text, guild)
     text = parse_timestamps(text)
     text = parse_emojis(text, guild)
     return text
+
+def extract_text_from_v2_message(msg: discord.Message) -> str:
+    if msg.content and msg.content.strip():
+        return msg.content.strip()
+
+    extracted_parts = []
+
+    def _traverse_components(items):
+        for item in items:
+            if hasattr(item, "content") and item.content:
+                extracted_parts.append(str(item.content))
+            elif hasattr(item, "text") and item.text:
+                extracted_parts.append(str(item.text))
+            elif hasattr(item, "children") and item.children:
+                _traverse_components(item.children)
+
+    if hasattr(msg, "components") and msg.components:
+        _traverse_components(msg.components)
+
+    full_extracted = "\n\n".join(extracted_parts).strip()
+    return full_extracted or "*No message content*"
 
 def split_text_into_v2_message_chunks(text: str, max_chars: int = MAX_V2_MESSAGE_TEXT_BUDGET) -> list[str]:
     if len(text) <= max_chars:
@@ -120,7 +160,7 @@ def chunk_timeline(timeline: list[dict[str, Any]], max_chars: int = MAX_V2_MESSA
                         current_slice.append({"type": "text", "content": sub_text})
                     current_slice_chars += sub_len
 
-        elif b_type in ["artifact", "media", "component"]:
+        elif b_type in ["artifact", "media", "component", "alert"]:
             overhead = 150
             if (current_slice_chars + overhead > max_chars or len(current_slice) >= 30) and current_slice:
                 message_slices.append(current_slice)
@@ -145,6 +185,7 @@ def build_v2_message_layout(
     timeline_blocks: list[dict[str, Any]] | None = None,
     staged_components: list[dict[str, Any]] | None = None,
     staged_artifacts: list[dict[str, Any]] | None = None,
+    staged_followups: list[dict[str, Any]] | None = None,
     modals_map: dict[str, dict[str, Any]] | None = None,
     interaction_dispatcher: Callable[[discord.Interaction, str, Any], Any] | None = None,
     image_filename: str | None = None,
@@ -165,46 +206,45 @@ def build_v2_message_layout(
     if timeline_blocks:
         ordered_blocks = list(timeline_blocks)
 
-        if len(ordered_blocks) >= 2 and ordered_blocks[0].get("type") in ["media", "artifact"]:
-            first_text_idx = None
-            for idx, b in enumerate(ordered_blocks):
-                if b.get("type") == "text" and b.get("content", "").strip():
-                    first_text_idx = idx
-                    break
-
-            if first_text_idx is not None:
-                first_text_raw = ordered_blocks[first_text_idx]["content"]
-                
-                split_match = re.search(r'(?m)^(?=##\s+)', first_text_raw)
-                split_pos = split_match.start() if split_match and split_match.start() > 10 else -1
-
-                if split_pos == -1:
-                    para_match = re.search(r'\n\n', first_text_raw)
-                    if para_match and para_match.start() > 10:
-                        split_pos = para_match.end()
-
-                if split_pos != -1:
-                    intro_part = first_text_raw[:split_pos].strip()
-                    remainder_part = first_text_raw[split_pos:].strip()
-                    ordered_blocks[first_text_idx]["content"] = remainder_part
-                    ordered_blocks.insert(0, {"type": "text", "content": intro_part})
-
         idx = 0
-        while idx < len(ordered_blocks) and len(elements) < 35:
+        while idx < len(ordered_blocks) and len(elements) < 32:
             block = ordered_blocks[idx]
             b_type = block.get("type", "text")
 
             if b_type == "text":
                 text_content = block.get("content", "").strip()
                 if text_content:
-                    parsed = apply_message_parsers(text_content, guild)
-                    sections = re.split(r'(?m)^\s*(?:---|\*\*\*|___)\s*$', parsed)
-                    for s_idx, sec in enumerate(sections):
-                        sec_clean = sec.strip()
-                        if sec_clean:
-                            elements.append(TextDisplay(sec_clean))
-                        if s_idx < len(sections) - 1 and len(elements) < 35:
-                            elements.append(Separator(visible=True))
+                    dfm_blocks = parse_dfm_structures_to_blocks(text_content)
+                    for d_block in dfm_blocks:
+                        if len(elements) >= 32:
+                            break
+                        if d_block["type"] == "text":
+                            parsed = apply_message_parsers(d_block["content"], guild)
+                            sections = re.split(r'(?m)^\s*(?:---|\*\*\*|___)\s*$', parsed)
+                            for s_idx, sec in enumerate(sections):
+                                sec_clean = sec.strip()
+                                if sec_clean:
+                                    elements.append(TextDisplay(sec_clean))
+                                if s_idx < len(sections) - 1 and len(elements) < 32:
+                                    elements.append(Separator(visible=True))
+                        elif d_block["type"] == "alert":
+                            alert_container = Container()
+                            alert_header = f"{d_block['emoji']} **{d_block['title']}**"
+                            alert_body = apply_message_parsers(d_block["content"], guild)
+                            alert_container.add_item(TextDisplay(alert_header))
+                            alert_container.add_item(Separator(visible=True))
+                            alert_container.add_item(TextDisplay(alert_body[:1800]))
+                            elements.append(alert_container)
+                idx += 1
+
+            elif b_type == "alert":
+                alert_container = Container()
+                alert_header = f"{block.get('emoji', '💡')} **{block.get('title', 'Alert')}**"
+                alert_body = apply_message_parsers(block.get("content", ""), guild)
+                alert_container.add_item(TextDisplay(alert_header))
+                alert_container.add_item(Separator(visible=True))
+                alert_container.add_item(TextDisplay(alert_body[:1800]))
+                elements.append(alert_container)
                 idx += 1
 
             elif b_type == "artifact":
@@ -229,26 +269,39 @@ def build_v2_message_layout(
                 idx += 1
 
     elif raw_text is not None:
-        parsed_full_text = apply_message_parsers(raw_text, guild)
-        sections = re.split(r'(?m)^\s*(?:---|\*\*\*|___)\s*$', parsed_full_text)
-        for s_idx, sec in enumerate(sections):
-            if len(elements) >= 35:
+        dfm_blocks = parse_dfm_structures_to_blocks(raw_text)
+        for d_block in dfm_blocks:
+            if len(elements) >= 32:
                 break
-            sec_clean = sec.strip()
-            if sec_clean:
-                elements.append(TextDisplay(sec_clean))
-            if s_idx < len(sections) - 1 and len(elements) < 35:
-                elements.append(Separator(visible=True))
+            if d_block["type"] == "text":
+                parsed_full_text = apply_message_parsers(d_block["content"], guild)
+                sections = re.split(r'(?m)^\s*(?:---|\*\*\*|___)\s*$', parsed_full_text)
+                for s_idx, sec in enumerate(sections):
+                    if len(elements) >= 32:
+                        break
+                    sec_clean = sec.strip()
+                    if sec_clean:
+                        elements.append(TextDisplay(sec_clean))
+                    if s_idx < len(sections) - 1 and len(elements) < 32:
+                        elements.append(Separator(visible=True))
+            elif d_block["type"] == "alert":
+                alert_container = Container()
+                alert_header = f"{d_block['emoji']} **{d_block['title']}**"
+                alert_body = apply_message_parsers(d_block["content"], guild)
+                alert_container.add_item(TextDisplay(alert_header))
+                alert_container.add_item(Separator(visible=True))
+                alert_container.add_item(TextDisplay(alert_body[:1800]))
+                elements.append(alert_container)
 
         for art in (staged_artifacts or []):
-            if len(elements) < 35:
+            if len(elements) < 32:
                 art_items = build_artifact_components_for_message(art, message_id=target_mid, is_live_stream=is_live_stream)
                 elements.extend(art_items)
 
     if not elements:
         elements.append(TextDisplay("*Thinking...*"))
 
-    if has_image and image_filename and len(elements) < 38 and not is_live_stream:
+    if has_image and image_filename and len(elements) < 35 and not is_live_stream:
         if not any(isinstance(e, MediaGallery) for e in elements):
             gallery = MediaGallery(discord.MediaGalleryItem(f"attachment://{image_filename}"))
             elements.append(gallery)
@@ -257,7 +310,7 @@ def build_v2_message_layout(
         staged_buttons = []
 
         for comp in staged_components:
-            if len(elements) >= 38:
+            if len(elements) >= 35:
                 break
 
             c_type = str(comp.get("type", "button")).lower().strip().replace(" ", "_")
@@ -298,12 +351,8 @@ def build_v2_message_layout(
                     if isinstance(last_item, TextDisplay):
                         target_text = last_item.content
                         elements.pop()
-                elif sec_text and elements:
-                    last_item = elements[-1]
-                    if isinstance(last_item, TextDisplay):
-                        elements.pop()
 
-                elements.append(Section(TextDisplay((target_text or "Action")[:2000]), accessory=acc_btn))
+                elements.append(Section(TextDisplay((target_text or "Action")[:1000]), accessory=acc_btn))
 
             elif c_type in ["button", "btn"]:
                 style_map = {
@@ -419,16 +468,39 @@ def build_v2_message_layout(
         if staged_buttons:
             elements.append(ActionRow(*staged_buttons))
 
-    if not is_live_stream and message_id:
+    if staged_followups and not is_live_stream and len(elements) < 38:
+        elements.append(Separator(visible=True))
+        fup_buttons = []
+        for idx, fup in enumerate(staged_followups[:3]):
+            fup_label = fup.get("label", "Follow-up")[:80]
+            is_fup_disabled = bool(fup.get("disabled", False)) or is_live_stream
+            btn = Button(
+                label=fup_label,
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"fup:{target_mid}:{idx}",
+                disabled=is_fup_disabled
+            )
+            fup_buttons.append(btn)
+        if fup_buttons:
+            elements.append(ActionRow(*fup_buttons))
+
+    if message_id:
+        if (has_thoughts or total_versions >= 2) and elements:
+            elements.append(Separator(visible=True))
+
         if has_thoughts and len(elements) < 39:
             time_str = f"{thought_duration}s" if thought_duration > 0 else "<1s"
-            t_btn = Button(label=f"🧠 Thought for {time_str}", style=discord.ButtonStyle.secondary, custom_id=f"gen_thought_{message_id}_{active_version}")
+            t_btn = Button(
+                label=f"🧠 Thought for {time_str}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"gen_thought_{message_id}_{active_version}"
+            )
             elements.append(ActionRow(t_btn))
 
         if total_versions >= 2 and len(elements) < 39:
-            prev_btn = Button(label="◀", style=discord.ButtonStyle.secondary, disabled=(active_version <= 1), custom_id=f"gen_prev_{message_id}")
+            prev_btn = Button(label="◀", style=discord.ButtonStyle.secondary, disabled=(active_version <= 1 or is_live_stream), custom_id=f"gen_prev_{message_id}")
             ind_btn = Button(label=f"{active_version} / {total_versions}", style=discord.ButtonStyle.secondary, disabled=True, custom_id=f"gen_ind_{message_id}")
-            next_btn = Button(label="▶", style=discord.ButtonStyle.secondary, disabled=(active_version >= total_versions), custom_id=f"gen_next_{message_id}")
+            next_btn = Button(label="▶", style=discord.ButtonStyle.secondary, disabled=(active_version >= total_versions or is_live_stream), custom_id=f"gen_next_{message_id}")
             elements.append(ActionRow(prev_btn, ind_btn, next_btn))
 
     for el in elements:
@@ -443,18 +515,25 @@ class DiscordStreamDispatcher:
         guild: discord.Guild | None = None,
         existing_response_msg: discord.Message | None = None,
         interaction: discord.Interaction | None = None,
-        is_ephemeral: bool = False
+        target_channel: discord.abc.Messageable | None = None,
+        is_ephemeral: bool = False,
+        active_version: int = 1,
+        total_versions: int = 1
     ):
         self.origin_message = origin_message
         self.guild = guild
         self.primary_message = existing_response_msg
         self.interaction = interaction
+        self.target_channel = target_channel
         self.is_ephemeral = is_ephemeral
+        self.active_version = active_version
+        self.total_versions = total_versions
 
         self.sent_messages: list[discord.Message] = [existing_response_msg] if existing_response_msg else []
         self.interaction_overflow_count = 1 if interaction else 0
 
         self.timeline: list[dict[str, Any]] = []
+        self.staged_followups: list[dict[str, Any]] = []
         self.raw_attachment_buffers: list[dict[str, Any]] = []
         self.last_edit_time = 0.0
         self.flush_lock = asyncio.Lock()
@@ -476,6 +555,14 @@ class DiscordStreamDispatcher:
         now = asyncio.get_event_loop().time()
         if (now - self.last_edit_time) >= STREAM_DEBOUNCE_INTERVAL:
             await self.flush(is_final=False)
+
+    def add_followup_button(self, label: str, prompt: str):
+        if len(self.staged_followups) < 3:
+            self.staged_followups.append({
+                "label": label.strip()[:80],
+                "prompt": prompt.strip(),
+                "disabled": False
+            })
 
     def add_artifact_placeholder(self, tool_name: str, args: dict[str, Any]):
         filename = args.get("filename") or args.get("title") or "artifact.txt"
@@ -568,12 +655,13 @@ class DiscordStreamDispatcher:
         self,
         staged_artifacts: list[dict[str, Any]] | None = None,
         staged_components: list[dict[str, Any]] | None = None,
+        staged_followups: list[dict[str, Any]] | None = None,
         modals_map: dict[str, dict[str, Any]] | None = None,
         interaction_dispatcher: Callable | None = None,
         thought_duration: int = 0,
         has_thoughts: bool = False,
-        active_version: int = 1,
-        total_versions: int = 1,
+        active_version: int | None = None,
+        total_versions: int | None = None,
         message_id: str | int | None = None,
         is_final: bool = False,
         force: bool = False
@@ -584,14 +672,24 @@ class DiscordStreamDispatcher:
         if not is_final and not force and self.flush_lock.locked():
             return
 
+        target_active_v = active_version if active_version is not None else self.active_version
+        target_total_v = total_versions if total_versions is not None else self.total_versions
+        target_msg_id = message_id or (self.primary_message.id if self.primary_message else None)
+        active_followups = staged_followups if staged_followups is not None else self.staged_followups
+
+        if not is_final and target_msg_id:
+            gen = branch_manager.get_generation(target_msg_id)
+            if gen and gen.get("active_version") != target_active_v:
+                return
+
         async with self.flush_lock:
             try:
                 message_slices = chunk_timeline(self.timeline, max_chars=MAX_V2_MESSAGE_TEXT_BUDGET)
-                target_msg_id = message_id or (self.primary_message.id if self.primary_message else None)
 
                 for i, slice_blocks in enumerate(message_slices):
                     is_last_slice = (i == len(message_slices) - 1)
                     chunk_comps = staged_components if (is_last_slice and is_final) else None
+                    chunk_fups = active_followups if (is_last_slice and is_final) else None
                     chunk_mod_map = modals_map if (is_last_slice and is_final) else None
                     chunk_dispatcher = interaction_dispatcher if (is_last_slice and is_final) else None
 
@@ -600,12 +698,13 @@ class DiscordStreamDispatcher:
                         timeline_blocks=slice_blocks,
                         staged_components=chunk_comps,
                         staged_artifacts=staged_artifacts,
+                        staged_followups=chunk_fups,
                         modals_map=chunk_mod_map,
                         interaction_dispatcher=chunk_dispatcher,
                         thought_duration=thought_duration if is_last_slice else 0,
                         has_thoughts=has_thoughts if is_last_slice else False,
-                        active_version=active_version,
-                        total_versions=total_versions,
+                        active_version=target_active_v,
+                        total_versions=target_total_v,
                         message_id=target_msg_id if is_last_slice else None,
                         is_live_stream=not is_final
                     )
@@ -634,13 +733,22 @@ class DiscordStreamDispatcher:
                             else:
                                 await msg.edit(view=layout_view)
                         else:
-                            target_chan = self.origin_message.channel if self.origin_message else (self.primary_message.channel if self.primary_message else None)
+                            target_chan = self.target_channel or (self.origin_message.channel if self.origin_message else (self.primary_message.channel if self.primary_message else None))
                             if target_chan:
-                                if attachments_list is not discord.utils.MISSING:
-                                    new_msg = await target_chan.send(view=layout_view, files=slice_files)
+                                if self.origin_message and not self.sent_messages:
+                                    if attachments_list is not discord.utils.MISSING:
+                                        new_msg = await self.origin_message.reply(view=layout_view, files=slice_files, mention_author=False)
+                                    else:
+                                        new_msg = await self.origin_message.reply(view=layout_view, mention_author=False)
                                 else:
-                                    new_msg = await target_chan.send(view=layout_view)
+                                    if attachments_list is not discord.utils.MISSING:
+                                        new_msg = await target_chan.send(view=layout_view, files=slice_files)
+                                    else:
+                                        new_msg = await target_chan.send(view=layout_view)
+
                                 self.sent_messages.append(new_msg)
+                                if not self.primary_message:
+                                    self.primary_message = new_msg
 
                 self.last_edit_time = asyncio.get_event_loop().time()
             except discord.DiscordServerError:
@@ -652,6 +760,7 @@ class DiscordStreamDispatcher:
         self,
         staged_artifacts: list[dict[str, Any]] | None = None,
         staged_components: list[dict[str, Any]] | None = None,
+        staged_followups: list[dict[str, Any]] | None = None,
         modals_map: dict[str, dict[str, Any]] | None = None,
         interaction_dispatcher: Callable | None = None,
         thought_duration: int = 0,
@@ -663,6 +772,7 @@ class DiscordStreamDispatcher:
         await self.flush(
             staged_artifacts=staged_artifacts,
             staged_components=staged_components,
+            staged_followups=staged_followups,
             modals_map=modals_map,
             interaction_dispatcher=interaction_dispatcher,
             thought_duration=thought_duration,
@@ -672,3 +782,5 @@ class DiscordStreamDispatcher:
             message_id=message_id,
             is_final=True
         )
+        if not self.primary_message and self.sent_messages:
+            self.primary_message = self.sent_messages[0]

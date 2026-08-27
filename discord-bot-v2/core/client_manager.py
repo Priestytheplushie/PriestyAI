@@ -7,6 +7,9 @@ from config.settings import (
     GEMINI_API_KEYS,
     FLAGSHIP_MODELS,
     LITE_MODELS,
+    GEMMA_MODELS,
+    WORKHORSE_DENSE_MODEL,
+    WORKHORSE_MOE_MODEL,
     WORKHORSE_MODEL
 )
 
@@ -36,7 +39,7 @@ class KeyModelManager:
         return now >= self.cooldowns.get((key_idx, model_name), 0)
 
     def is_completely_exhausted(self) -> bool:
-        all_models = FLAGSHIP_MODELS + LITE_MODELS + [WORKHORSE_MODEL]
+        all_models = FLAGSHIP_MODELS + LITE_MODELS + GEMMA_MODELS
         for m in all_models:
             for idx in range(self.key_count):
                 if self.is_available(idx, m):
@@ -69,13 +72,15 @@ class KeyModelManager:
     def _get_cascade_list(self, model_name: str) -> list[str]:
         if model_name in FLAGSHIP_MODELS:
             idx = FLAGSHIP_MODELS.index(model_name)
-            return FLAGSHIP_MODELS[idx:] + [WORKHORSE_MODEL] + LITE_MODELS
-        elif model_name == WORKHORSE_MODEL:
-            return [WORKHORSE_MODEL] + LITE_MODELS + FLAGSHIP_MODELS
+            return FLAGSHIP_MODELS[idx:] + [WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL] + LITE_MODELS
+        elif model_name == WORKHORSE_DENSE_MODEL:
+            return [WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL] + LITE_MODELS + FLAGSHIP_MODELS
+        elif model_name == WORKHORSE_MOE_MODEL:
+            return [WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL] + LITE_MODELS + FLAGSHIP_MODELS
         elif model_name in LITE_MODELS:
             idx = LITE_MODELS.index(model_name)
-            return LITE_MODELS[idx:] + [WORKHORSE_MODEL]
-        return [WORKHORSE_MODEL]
+            return LITE_MODELS[idx:] + [WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL]
+        return [WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL]
 
     def report_error(self, key_idx: int, model_name: str, error: Exception):
         now = time.time()

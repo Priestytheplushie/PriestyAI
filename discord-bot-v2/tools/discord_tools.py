@@ -1,3 +1,4 @@
+import ast
 import json
 import uuid
 import logging
@@ -53,22 +54,37 @@ def normalize_component_type(component_type: str) -> str:
     }
     return mapping.get(cleaned, cleaned)
 
+def parse_options_robust(raw_options: Any) -> list[dict[str, Any]]:
+    if isinstance(raw_options, list):
+        return [o for o in raw_options if isinstance(o, dict)]
+    if isinstance(raw_options, str):
+        raw_str = raw_options.strip()
+        try:
+            val = json.loads(raw_str)
+            if isinstance(val, list):
+                return [o for o in val if isinstance(o, dict)]
+        except Exception:
+            pass
+        try:
+            val = ast.literal_eval(raw_str)
+            if isinstance(val, list):
+                return [o for o in val if isinstance(o, dict)]
+        except Exception:
+            pass
+    return []
+
 @tool_registry.register(
     name="add_component",
     description=(
         "Stages interactive Discord UI components (Buttons, Select Menus, or Section Accessories) to attach to your response.\n"
-        "Use this tool whenever you want to offer clickable actions, follow-up buttons, or dropdown menus.\n"
         "Supported component_type values:\n"
         "- 'Button': Clickable button (set label, style: 'primary'|'secondary'|'success'|'danger', or modal_id)\n"
-        "- 'StringSelect': Dropdown menu with custom text options (options: [{'label':'...','value':'...','description':'...','modal_id':'...'}]). Options can optionally open distinct modals!\n"
+        "- 'StringSelect': Dropdown menu with custom text options (options: [{'label':'...','value':'...','description':'...'}]).\n"
         "- 'UserSelect': Native Discord user/member picker dropdown\n"
         "- 'RoleSelect': Native Discord server role picker dropdown\n"
-        "- 'ChannelSelect': Native Discord channel picker dropdown (optional channel_types: ['text', 'voice'])\n"
-        "- 'MentionableSelect': Native Discord user OR role picker dropdown\n\n"
-        "Placement options:\n"
-        "- 'action_row' (Default): Full-width row beneath or between text.\n"
-        "- 'section': Side-by-side layout (Text on left, Button on right). Set section_text for the text beside the button.\n"
-        "Supports multi-select via min_values and max_values (1 to 25)."
+        "- 'ChannelSelect': Native Discord channel picker dropdown\n"
+        "- 'MentionableSelect': Native Discord user OR role picker dropdown\n"
+        "Placement options: 'action_row' (default) or 'section' (side-by-side text with button on right)."
     )
 )
 async def add_component(
@@ -102,14 +118,7 @@ async def add_component(
     target_modal_id = modal_id or (comp_id if c_type == "button" else None)
     clean_placement = "section" if (placement.lower().strip() == "section" or section_text.strip()) and c_type == "button" else "action_row"
 
-    parsed_options = options
-    if isinstance(parsed_options, str):
-        try:
-            parsed_options = json.loads(parsed_options)
-        except Exception:
-            parsed_options = []
-    elif not isinstance(parsed_options, list):
-        parsed_options = []
+    parsed_options = parse_options_robust(options)
 
     option_modals = {}
     if c_type == "string_select" and isinstance(parsed_options, list):
@@ -153,7 +162,7 @@ async def add_component(
             logger.info(f"[add_component] Updated existing '{c_type}' (ID: '{comp_id}')")
         else:
             context.staged_components.append(component_payload)
-            logger.info(f"[add_component] Staged '{c_type}' (ID: '{comp_id}', placement: '{clean_placement}')")
+            logger.info(f"[add_component] Staged '{c_type}' (ID: '{comp_id}', options: {len(parsed_options)})")
 
     return {
         "status": "staged",
@@ -161,6 +170,7 @@ async def add_component(
         "custom_id": comp_id,
         "modal_id": target_modal_id,
         "placement": clean_placement,
+        "options_count": len(parsed_options),
         "details": component_payload
     }
 
@@ -168,10 +178,9 @@ async def add_component(
     name="create_poll",
     description=(
         "Creates a native Discord Poll with interactive vote buttons.\n"
-        "- question: The poll topic or title (e.g. 'Which architecture pattern do you prefer?')\n"
-        "- options: List of choices (2 to 10 options, e.g. ['Option A', 'Option B'])\n"
-        "- duration_hours: Duration before poll concludes (1 to 168 hours, default 24)\n"
-        "Automatically tallies votes and announces the winner when the poll expires!"
+        "- question: The poll topic or title\n"
+        "- options: List of choices (2 to 10 options)\n"
+        "- duration_hours: Duration before poll concludes (1 to 168 hours, default 24)"
     )
 )
 async def create_poll(
@@ -312,14 +321,7 @@ async def search_channel_history(query: str, limit: int = 25, channel_id: str = 
 
 @tool_registry.register(
     name="create_thread",
-    description=(
-        "Creates a dedicated Discord thread to host an extended discussion, complex project build, "
-        "or deep debugging session without cluttering the main channel.\n"
-        "STRICT USAGE GUIDELINES:\n"
-        "- DO invoke this for large multi-turn coding projects, in-depth debugging sessions, or when requested.\n"
-        "- DO NOT invoke this for simple single-turn questions, greetings, quick lookups, or if already in a thread/DM.\n"
-        "- Maximum 1 thread per turn."
-    )
+    description="Creates a dedicated Discord thread to host an extended discussion or deep coding project."
 )
 async def create_thread(name: str, private: bool = False, message_id: str = "", context: ToolExecutionContext = None) -> dict[str, Any]:
     if not context or not context.channel:

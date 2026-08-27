@@ -15,6 +15,12 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise ValueError("DISCORD_TOKEN environment variable is missing from .env")
 
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+if GITHUB_TOKEN:
+    logger.info("GitHub API authentication loaded via GITHUB_TOKEN (5,000 req/hr).")
+else:
+    logger.warning("GITHUB_TOKEN not found in .env. GitHub tool will run in unauthenticated mode (60 req/hr).")
+
 GEMINI_API_KEYS: list[str] = []
 primary_key = os.getenv("GEMINI_API_KEY")
 if primary_key:
@@ -43,7 +49,10 @@ LITE_MODELS = [
     "gemini-3.1-flash-lite"
 ]
 
-WORKHORSE_MODEL = "gemma-4-31b-it"
+WORKHORSE_DENSE_MODEL = "gemma-4-31b-it"
+WORKHORSE_MOE_MODEL = "gemma-4-26b-a4b-it"
+WORKHORSE_MODEL = WORKHORSE_DENSE_MODEL
+GEMMA_MODELS = [WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL]
 
 ROUTER_PRIMARY = "gemini-3.5-flash-lite"
 ROUTER_FALLBACK = "gemini-3.5-flash-lite"

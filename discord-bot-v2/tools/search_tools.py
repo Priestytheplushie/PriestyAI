@@ -19,6 +19,13 @@ def sanitize_query(query: str) -> str:
 def is_youtube_url(url: str) -> bool:
     return bool(re.search(r'(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)', url, re.IGNORECASE))
 
+def normalize_youtube_url(url: str) -> str:
+    match = re.search(r'youtu\.be\/([a-zA-Z0-9_-]+)', url)
+    if match:
+        video_id = match.group(1)
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return url
+
 @tool_registry.register(
     name="search_web",
     description=(
@@ -79,31 +86,32 @@ async def read_link(url: str, context: ToolExecutionContext = None) -> dict[str,
     logger.info(f"[read_link] Fetching URL: {url}")
 
     if is_youtube_url(url):
-        logger.info(f"[read_link] Detected YouTube link: '{url}'. Running native video comprehension...")
+        canonical_yt_url = normalize_youtube_url(url)
+        logger.info(f"[read_link] Detected YouTube link: '{canonical_yt_url}'. Running native video comprehension...")
         client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite")
         if client:
             try:
                 prompt_instruction = (
-                    "Analyze this YouTube video thoroughly. Provide a structured, comprehensive summary with key takeaways, "
-                    "timestamps for major topic transitions, visual context, and conclusions."
+                    "Analyze this YouTube video thoroughly. Provide the exact video title, channel author, and a structured, "
+                    "comprehensive summary with key takeaways, timestamps for major topic transitions, visual context, and conclusions."
                 )
                 response = await client.aio.models.generate_content(
                     model=active_model,
                     contents=[
-                        types.Part.from_uri(file_uri=url, mime_type="video/mp4"),
+                        types.Part.from_uri(file_uri=canonical_yt_url, mime_type="video/mp4"),
                         prompt_instruction
                     ]
                 )
                 if response.text:
                     return {
-                        "url": url,
+                        "url": canonical_yt_url,
                         "type": "youtube_video_summary",
                         "model": active_model,
                         "content": response.text.strip()
                     }
             except Exception as e:
                 client_manager.report_error(key_idx, active_model, e)
-                logger.warning(f"Native YouTube parsing failed: {e}")
+                logger.warning(f"Native YouTube parsing failed on {canonical_yt_url}: {e}")
 
     try:
         headers = {
@@ -139,60 +147,3 @@ async def read_link(url: str, context: ToolExecutionContext = None) -> dict[str,
     except Exception as e:
         logger.error(f"[read_link] Failed to fetch {url}: {e}")
         return {"url": url, "error": f"Failed to load URL: {str(e)}"}
-
-@tool_registry.register(
-    name="fetch_github",
-    description=(
-        "Fetches the directory structure and full source files of any public GitHub repository.\n"
-        "- repo_url: Full GitHub URL (e.g. 'https://github.com/torvalds/linux' or 'pallets/flask')\n"
-        "- subpath: Optional folder or file filter (e.g. 'src/' or 'app.py')"
-    )
-)
-async def fetch_github(repo_url: str, subpath: str = "", context: ToolExecutionContext = None) -> dict[str, Any]:
-    clean_url = repo_url.strip().rstrip("/")
-    match = re.search(r'github\.com\/([^\/]+)\/([^\/\?#]+)', clean_url)
-    if match:
-        owner, repo = match.group(1), match.group(2)
-    elif "/" in clean_url and not clean_url.startswith("http"):
-        parts = clean_url.split("/")
-        owner, repo = parts[0], parts[1]
-    else:
-        return {"error": f"Invalid GitHub repository URL: '{repo_url}'"}
-
-    api_url = f"https://gitingest.com/api/{owner}/{repo}"
-    if subpath.strip():
-        api_url += f"?pattern={subpath.strip()}"
-
-    logger.info(f"[fetch_github] Fetching digest for {owner}/{repo} via GitIngest API...")
-    try:
-        headers = {
-            "User-Agent": "PriestyAI-DiscordBot",
-            "Accept": "application/json"
-        }
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(api_url, headers=headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                digest = data.get("digest") or data.get("content") or str(data)
-                return {
-                    "status": "success",
-                    "repo": f"{owner}/{repo}",
-                    "subpath": subpath or "root",
-                    "digest": digest[:4500]
-                }
-            else:
-                logger.warning(f"GitIngest returned status {resp.status_code}. Fallback to README scrape...")
-                readme_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/README.md"
-                r_resp = await client.get(readme_url)
-                if r_resp.status_code == 200:
-                    return {
-                        "status": "partial",
-                        "repo": f"{owner}/{repo}",
-                        "note": "Fetched README.md as fallback",
-                        "digest": r_resp.text[:3500]
-                    }
-
-    except Exception as e:
-        logger.error(f"[fetch_github] Error querying repo {owner}/{repo}: {e}")
-
-    return {"error": f"Unable to fetch repository data for '{owner}/{repo}'."}

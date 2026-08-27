@@ -6,6 +6,7 @@ import base64
 import asyncio
 import logging
 import mimetypes
+from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
@@ -56,7 +57,6 @@ async def extract_message_attachments_raw(message: discord.Message) -> tuple[lis
 
         if ref_msg and ref_msg.attachments:
             target_attachments = list(ref_msg.attachments)
-            logger.info(f"[Multimodal Reply] Ingesting {len(target_attachments)} attachment(s) from replied parent message {ref_msg.id}.")
 
     if not target_attachments:
         return parts, raw_image_bytes
@@ -87,9 +87,38 @@ async def extract_message_attachments_raw(message: discord.Message) -> tuple[lis
     return parts, raw_image_bytes
 
 def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
-    if tool_name in ["create_artifact", "update_artifact"]:
-        t = args.get("title") or args.get("filename", "Artifact")
-        return f"Packaging artifact: **{t}**..."
+    if tool_name == "agent_terminal":
+        cmd = args.get("command", "")[:30]
+        return f"Executing terminal: `{cmd}`..."
+    elif tool_name == "agent_read_file":
+        p = args.get("path", "file")
+        return f"Reading `{p}`..."
+    elif tool_name == "agent_write_file":
+        p = args.get("path", "file")
+        return f"Creating `{p}`..."
+    elif tool_name == "agent_edit_diff":
+        p = args.get("path", "file")
+        return f"Patching `{p}`..."
+    elif tool_name == "agent_list_dir":
+        sub = args.get("subpath") or "./"
+        return f"Listing `{sub}`..."
+    elif tool_name == "agent_search_web":
+        q = args.get("query", "")[:30]
+        return f'Searching web: "{q}"...'
+    elif tool_name == "agent_read_link":
+        u = args.get("url", "")[:30]
+        return f"Reading link `{u}`..."
+    elif tool_name == "agent_search_discord_history":
+        q = args.get("query", "")[:30]
+        return f'Searching Discord history: "{q}"...'
+    elif tool_name == "clone_repo":
+        repo = args.get("repo", "repository")
+        return f"Cloning `{repo}`..."
+
+    elif tool_name in ["github_repo", "fetch_github"]:
+        action = str(args.get("action", "inspect")).replace("_", " ").title()
+        path = args.get("path") or args.get("repo", "Repository")
+        return f"GitHub: {action} on `{path}`..."
     elif tool_name == "create_thread":
         t = args.get("name", "Thread")[:25]
         return f"Creating thread: **{t}**..."
@@ -108,9 +137,6 @@ def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
     elif tool_name == "search_image":
         q = args.get("query", "")[:30]
         return f"Finding image for '{q}'..."
-    elif tool_name == "fetch_github":
-        r = args.get("repo_url", "")[:30]
-        return f"Inspecting GitHub repo `{r}`..."
     elif tool_name == "create_poll":
         return "Creating Discord poll..."
     elif tool_name == "calc":
@@ -194,6 +220,11 @@ class ChatHandler:
     async def build_context_xml(channel: discord.abc.Messageable, current_user_id: int, guild: discord.Guild | None = None, author: discord.Member | discord.User | None = None, limit: int = 8) -> str:
         envelope = ['<context>']
 
+        now_utc = datetime.now(timezone.utc)
+        now_iso = now_utc.isoformat()
+        now_formatted = now_utc.strftime("%A, %B %d, %Y %H:%M:%S UTC")
+        envelope.append(f'  <temporal_context current_utc="{now_iso}" current_date="{now_formatted}" current_year="{now_utc.year}" />')
+
         if guild:
             ch_name = getattr(channel, "name", "unknown")
             ch_topic = getattr(channel, "topic", None) or "No topic set"
@@ -208,6 +239,31 @@ class ChatHandler:
         emojis_xml = ChatHandler.extract_server_emojis(guild)
         if emojis_xml:
             envelope.append(f"  {emojis_xml}")
+
+        artifacts = branch_manager.get_channel_artifacts(getattr(channel, "id", 0), limit=3)
+        if artifacts:
+            envelope.append("  <active_artifacts>")
+            for art in artifacts:
+                fn = art.get("filename", "artifact.txt")
+                title = art.get("title", fn)
+                v_num = art.get("active_version", 1)
+                versions = art.get("versions", [])
+                v_data = versions[v_num - 1] if 1 <= v_num <= len(versions) else (versions[-1] if versions else {})
+                files = v_data.get("files", [])
+                
+                if files and len(files) > 1:
+                    envelope.append(f'    <artifact identifier="{fn}" title="{title}" version="{v_num}" type="project_zip">')
+                    for f in files:
+                        f_name = f.get("filename", "file.txt")
+                        f_content = f.get("content", "")
+                        safe_f_content = f_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        envelope.append(f'      <file filename="{f_name}">\n{safe_f_content}\n      </file>')
+                    envelope.append('    </artifact>')
+                else:
+                    content = v_data.get("content", "") if v_data else (files[0].get("content", "") if files else "")
+                    safe_content = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    envelope.append(f'    <artifact identifier="{fn}" title="{title}" version="{v_num}" type="single_file">\n{safe_content}\n    </artifact>')
+            envelope.append("  </active_artifacts>")
 
         try:
             raw_history = [msg async for msg in channel.history(limit=limit)]
@@ -234,6 +290,315 @@ class ChatHandler:
 
         envelope.append('</context>')
         return "\n".join(envelope)
+
+    @classmethod
+    async def handle_followup_turn(cls, bot: discord.Client, interaction: discord.Interaction, prompt_text: str):
+        user = interaction.user
+        channel = interaction.channel
+        guild = interaction.guild
+        origin_msg = interaction.message
+
+        if is_user_banned(user.id):
+            ban_view = BannedUserNoticeView(author=user)
+            await interaction.followup.send(view=ban_view, ephemeral=True)
+            return
+
+        if not config_manager.has_user_agreed(user.id):
+            async def on_user_agreed(sub_inter: discord.Interaction):
+                await sub_inter.response.send_message("✅ Terms accepted! You can now use follow-up buttons.", ephemeral=True)
+                await cls.handle_followup_turn(bot, interaction, prompt_text)
+
+            modal = WelcomeOnboardingCardView(author=user, on_accepted_callback=on_user_agreed)
+            await interaction.followup.send(view=modal, ephemeral=True)
+            return
+
+        is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(prompt_text)
+        if is_flagged:
+            log_moderation_violation(user.id, guild.id if guild else None, flagged_cats, score)
+            if is_zero_tolerance:
+                ban_user(user.id, reason=f"Zero-tolerance violation: {', '.join(flagged_cats)}")
+                ban_view = BannedUserNoticeView(author=user)
+                await interaction.followup.send(view=ban_view, ephemeral=True)
+                return
+
+            friendly_refusal = await generate_friendly_refusal(flagged_cats)
+            await channel.send(content=friendly_refusal, reference=origin_msg, mention_author=False)
+            return
+
+        cfg = config_manager.resolve_effective_config(guild.id if guild else None, channel.id, user.id)
+        asyncio.create_task(
+            memory_manager.auto_extract_and_store_async(
+                user_id=user.id,
+                guild_id=guild.id if guild else None,
+                prompt_text=prompt_text,
+                user_memory_policy=cfg.get("user_memory_policy", "read_write"),
+                server_lore_policy=cfg.get("server_lore_policy", "read_write")
+            )
+        )
+
+        logger.info(f"[Follow-up Triggered] User {user} ({user.id}) dispatched prompt: '{prompt_text[:60]}'")
+
+        tool_context = ToolExecutionContext(
+            channel=channel,
+            guild=guild,
+            author=user,
+            bot=bot
+        )
+        tool_context.message = origin_msg
+
+        context_xml = await cls.build_context_xml(channel=channel, current_user_id=user.id, guild=guild, author=user)
+
+        response_msg: discord.Message | None = None
+        stream_dispatcher = DiscordStreamDispatcher(origin_message=origin_msg, guild=guild)
+        artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=channel.id)
+
+        accumulated_thought_buffer: list[str] = []
+        tool_call_history: list[dict[str, Any]] = []
+        active_tool_start_times: dict[str, float] = {}
+        active_model_used: str = "gemma-4-31b-it"
+
+        thinking_start_time: float = time.time()
+        answer_now_event = asyncio.Event()
+        stop_placeholder_loop = asyncio.Event()
+
+        active_witty_statuses = ["Thinking", "Consulting neural cores", "Formulating response"]
+        active_tool_subtext: str | None = None
+        placeholder_view: PlaceholderLayoutView | None = None
+        placeholder_task: asyncio.Task | None = None
+        first_content_received = False
+
+        def get_current_msg():
+            return response_msg
+
+        def get_active_subtext():
+            return active_tool_subtext
+
+        async def on_answer_now_clicked(inter: discord.Interaction):
+            nonlocal response_msg, first_content_received
+            answer_now_event.set()
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
+            first_content_received = True
+            if response_msg:
+                try:
+                    await response_msg.delete()
+                except Exception:
+                    pass
+                response_msg = None
+            stream_dispatcher.primary_message = None
+            stream_dispatcher.sent_messages.clear()
+
+        async def ensure_placeholder_spawned():
+            nonlocal placeholder_view, placeholder_task, response_msg
+            if placeholder_view is not None or first_content_received or answer_now_event.is_set():
+                return
+
+            initial_text = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
+            placeholder_view = PlaceholderLayoutView(
+                loading_text=initial_text,
+                duration_seconds=max(0, int(time.time() - thinking_start_time)),
+                is_enabled=bool(accumulated_thought_buffer or [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]),
+                on_answer_now_callback=on_answer_now_clicked,
+                thought_data={"thoughts": "".join(accumulated_thought_buffer), "tool_calls": tool_call_history, "model": active_model_used},
+                model_name=active_model_used
+            )
+
+            try:
+                response_msg = await channel.send(view=placeholder_view, reference=origin_msg, mention_author=False)
+                stream_dispatcher.bind_response_message(response_msg)
+                placeholder_task = asyncio.create_task(
+                    update_placeholder_loop(
+                        get_current_msg, placeholder_view, active_witty_statuses, get_active_subtext, thinking_start_time, stop_placeholder_loop
+                    )
+                )
+            except Exception as ex:
+                logger.warning(f"Failed to spawn placeholder: {ex}")
+
+        try:
+            async with channel.typing():
+                async for event_type, payload in ChatEngine.stream_chat(
+                    prompt=prompt_text,
+                    context_xml=context_xml,
+                    bot_user_id=bot.user.id,
+                    tool_context=tool_context,
+                    answer_now_event=answer_now_event
+                ):
+                    if event_type == "ROUTED":
+                        if payload.witty_statuses:
+                            active_witty_statuses = payload.witty_statuses
+                        if payload.thinking_level in ["HIGH", "MEDIUM", "LOW"] and not answer_now_event.is_set():
+                            await ensure_placeholder_spawned()
+
+                    elif event_type == "ACTIVE_MODEL":
+                        active_model_used = str(payload)
+                        if placeholder_view:
+                            placeholder_view.model_name = active_model_used
+
+                    elif event_type == "RECALLED_MEMORIES":
+                        count = payload.get("count", 0)
+                        tool_call_history.insert(0, {
+                            "name": "recall_memories",
+                            "args": {"count": count},
+                            "result": payload,
+                            "duration_ms": 0,
+                            "order": -1.0
+                        })
+                        if placeholder_view and not answer_now_event.is_set():
+                            placeholder_view.thought_data["tool_calls"] = tool_call_history
+                            await placeholder_view.push_live_update()
+
+                    elif event_type == "THOUGHT":
+                        if not answer_now_event.is_set():
+                            await ensure_placeholder_spawned()
+                        accumulated_thought_buffer.append(payload)
+                        if placeholder_view and not answer_now_event.is_set():
+                            placeholder_view.enable_thinking()
+                            placeholder_view.thought_data["thoughts"] = "".join(accumulated_thought_buffer)
+                            await placeholder_view.push_live_update()
+
+                    elif event_type == "TOOL_START":
+                        if not first_content_received and not answer_now_event.is_set():
+                            await ensure_placeholder_spawned()
+                        tool_name = payload.get("name", "Tool")
+                        args = payload.get("args", {})
+                        active_tool_start_times[tool_name] = time.perf_counter()
+                        active_tool_subtext = get_tool_subtext(tool_name, args)
+                        if placeholder_view and not answer_now_event.is_set():
+                            placeholder_view.enable_thinking()
+
+                    elif event_type == "TOOL_END":
+                        tool_name = payload.get("name", "Tool")
+                        start_t = active_tool_start_times.pop(tool_name, time.perf_counter())
+                        duration_ms = int((time.perf_counter() - start_t) * 1000)
+                        tool_call_history.append({
+                            "name": tool_name,
+                            "args": payload.get("args", {}),
+                            "result": payload.get("result", {}),
+                            "duration_ms": duration_ms
+                        })
+                        active_tool_subtext = None
+
+                        if tool_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
+                            img_fname = tool_context.staged_image_filename
+                            img_bytes = tool_context.staged_image_bytes
+                            stream_dispatcher.add_media_block(img_fname, img_bytes)
+                            tool_context.staged_image_bytes = None
+
+                        if tool_name in ["github_repo", "fetch_github"] and hasattr(tool_context, "staged_github_files"):
+                            for g_file in tool_context.staged_github_files:
+                                stream_dispatcher.add_raw_attachment(g_file["filename"], g_file["bytes"])
+
+                    elif event_type == "CONTENT":
+                        if not first_content_received:
+                            first_content_received = True
+                            stop_placeholder_loop.set()
+                            if placeholder_task and not placeholder_task.done():
+                                placeholder_task.cancel()
+                            if response_msg and not answer_now_event.is_set():
+                                stream_dispatcher.bind_response_message(response_msg)
+
+                        await artifact_parser.feed(payload)
+
+                    elif event_type == "ERROR":
+                        stop_placeholder_loop.set()
+                        if placeholder_task and not placeholder_task.done():
+                            placeholder_task.cancel()
+                        await stream_dispatcher.append_text(f"\n\n⚠️ {payload}")
+
+            await artifact_parser.finish()
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
+
+            final_duration = max(1, int(time.time() - thinking_start_time))
+            active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
+            has_reasoning = bool(accumulated_thought_buffer or active_tools)
+
+            modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
+
+            stored_attachments: list[dict[str, Any]] = []
+            for raw_att in stream_dispatcher.raw_attachment_buffers:
+                b64 = base64.b64encode(raw_att["bytes"]).decode("utf-8")
+                stored_attachments.append({"filename": raw_att["filename"], "data_b64": b64})
+
+            sanitized_artifacts: list[dict[str, Any]] = []
+            for art in tool_context.staged_artifacts:
+                art_bytes = art.get("data_bytes", b"")
+                art_fname = art.get("filename", "artifact.zip")
+                b64_art = base64.b64encode(art_bytes).decode("utf-8") if art_bytes else ""
+                clean_art = {k: v for k, v in art.items() if k != "data_bytes"}
+                clean_art["data_b64"] = b64_art
+                sanitized_artifacts.append(clean_art)
+
+            sent_msg = stream_dispatcher.primary_message
+            target_id = sent_msg.id if sent_msg else "temp"
+
+            await stream_dispatcher.finalize(
+                staged_artifacts=tool_context.staged_artifacts,
+                staged_components=tool_context.staged_components,
+                staged_followups=stream_dispatcher.staged_followups,
+                modals_map=modals_map,
+                thought_duration=final_duration,
+                has_thoughts=has_reasoning,
+                active_version=1,
+                total_versions=1,
+                message_id=target_id
+            )
+
+            sent_msg = stream_dispatcher.primary_message
+            if sent_msg:
+                final_text = stream_dispatcher.get_accumulated_text()
+                parsed_initial_content = apply_message_parsers(final_text, guild)
+
+                sanitized_timeline: list[dict[str, Any]] = []
+                for b in stream_dispatcher.timeline:
+                    b_copy = dict(b)
+                    if b_copy.get("type") == "artifact" and "artifact" in b_copy:
+                        art_copy = dict(b_copy["artifact"])
+                        art_copy.pop("data_bytes", None)
+                        b_copy["artifact"] = art_copy
+                    sanitized_timeline.append(b_copy)
+
+                raw_collected_thoughts = "".join(accumulated_thought_buffer)
+                sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(sent_msg.id)]
+
+                initial_v_data = {
+                    "version_idx": 1,
+                    "content": parsed_initial_content,
+                    "timeline_blocks": sanitized_timeline,
+                    "duration_seconds": final_duration,
+                    "has_thoughts": has_reasoning,
+                    "thoughts": raw_collected_thoughts,
+                    "formatted_thoughts": None,
+                    "model": active_model_used,
+                    "tool_calls": tool_call_history,
+                    "attachments": stored_attachments,
+                    "staged_components": tool_context.staged_components,
+                    "staged_artifacts": sanitized_artifacts,
+                    "staged_followups": stream_dispatcher.staged_followups,
+                    "staged_modals": tool_context.staged_modals,
+                    "message_ids": sent_msg_ids,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "status": "ready"
+                }
+                branch_manager.save_generation(
+                    message_id=sent_msg.id,
+                    channel_id=channel.id,
+                    guild_id=guild.id if guild else None,
+                    author_id=user.id,
+                    prompt_text=prompt_text,
+                    attachments=[],
+                    context_xml=context_xml,
+                    initial_version_data=initial_v_data
+                )
+
+        except Exception as e:
+            logger.exception(f"Unhandled exception in followup turn: {e}")
+        finally:
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
 
     @classmethod
     async def handle_message(cls, bot: discord.Client, message: discord.Message, force_respond: bool = False):
@@ -352,6 +717,7 @@ class ChatHandler:
         accumulated_thought_buffer: list[str] = []
         tool_call_history: list[dict[str, Any]] = []
         active_tool_start_times: dict[str, float] = {}
+        active_model_used: str = "gemma-4-31b-it"
 
         thinking_start_time: float = time.time()
         answer_now_event = asyncio.Event()
@@ -370,15 +736,35 @@ class ChatHandler:
             return active_tool_subtext
 
         async def on_answer_now_clicked(inter: discord.Interaction):
-            logger.info(f"[Answer Now Triggered] User {inter.user} requested instant response.")
+            nonlocal response_msg, first_content_received
+            logger.info(f"[Answer Now Triggered] User {inter.user} requested instant response. Deleting placeholder...")
+            
+            try:
+                if not inter.response.is_done():
+                    await inter.response.defer(ephemeral=True)
+            except Exception:
+                pass
+
             answer_now_event.set()
             stop_placeholder_loop.set()
-            if placeholder_task:
+            if placeholder_task and not placeholder_task.done():
                 placeholder_task.cancel()
+
+            first_content_received = True
+
+            if response_msg:
+                try:
+                    await response_msg.delete()
+                except Exception as ex:
+                    logger.debug(f"Failed to delete placeholder message on Answer Now: {ex}")
+                response_msg = None
+
+            stream_dispatcher.primary_message = None
+            stream_dispatcher.sent_messages.clear()
 
         async def ensure_placeholder_spawned():
             nonlocal placeholder_view, placeholder_task, response_msg
-            if placeholder_view is not None or first_content_received:
+            if placeholder_view is not None or first_content_received or answer_now_event.is_set():
                 return
 
             initial_text = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
@@ -387,7 +773,8 @@ class ChatHandler:
                 duration_seconds=max(0, int(time.time() - thinking_start_time)),
                 is_enabled=bool(accumulated_thought_buffer or [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]),
                 on_answer_now_callback=on_answer_now_clicked,
-                thought_data={"thoughts": "".join(accumulated_thought_buffer), "tool_calls": tool_call_history}
+                thought_data={"thoughts": "".join(accumulated_thought_buffer), "tool_calls": tool_call_history, "model": active_model_used},
+                model_name=active_model_used
             )
 
             try:
@@ -413,8 +800,13 @@ class ChatHandler:
                     if event_type == "ROUTED":
                         if payload.witty_statuses:
                             active_witty_statuses = payload.witty_statuses
-                        if payload.thinking_level in ["HIGH", "MEDIUM", "LOW"]:
+                        if payload.thinking_level in ["HIGH", "MEDIUM", "LOW"] and not answer_now_event.is_set():
                             await ensure_placeholder_spawned()
+
+                    elif event_type == "ACTIVE_MODEL":
+                        active_model_used = str(payload)
+                        if placeholder_view:
+                            placeholder_view.model_name = active_model_used
 
                     elif event_type == "RECALLED_MEMORIES":
                         count = payload.get("count", 0)
@@ -425,20 +817,21 @@ class ChatHandler:
                             "duration_ms": 0,
                             "order": -1.0
                         })
-                        if placeholder_view:
+                        if placeholder_view and not answer_now_event.is_set():
                             placeholder_view.thought_data["tool_calls"] = tool_call_history
                             await placeholder_view.push_live_update()
 
                     elif event_type == "THOUGHT":
-                        await ensure_placeholder_spawned()
+                        if not answer_now_event.is_set():
+                            await ensure_placeholder_spawned()
                         accumulated_thought_buffer.append(payload)
-                        if placeholder_view:
+                        if placeholder_view and not answer_now_event.is_set():
                             placeholder_view.enable_thinking()
                             placeholder_view.thought_data["thoughts"] = "".join(accumulated_thought_buffer)
                             await placeholder_view.push_live_update()
 
                     elif event_type == "TOOL_START":
-                        if not first_content_received:
+                        if not first_content_received and not answer_now_event.is_set():
                             await ensure_placeholder_spawned()
                         
                         tool_name = payload.get("name", "Tool")
@@ -446,13 +839,8 @@ class ChatHandler:
                         active_tool_start_times[tool_name] = time.perf_counter()
                         active_tool_subtext = get_tool_subtext(tool_name, args)
                         
-                        if placeholder_view:
+                        if placeholder_view and not answer_now_event.is_set():
                             placeholder_view.enable_thinking()
-
-                        if tool_name in ["create_artifact", "update_artifact"]:
-                            stream_dispatcher.add_artifact_placeholder(tool_name, args)
-                            await stream_dispatcher.flush(is_final=False, force=True)
-                            await asyncio.sleep(1.5)
 
                     elif event_type == "TOOL_END":
                         tool_name = payload.get("name", "Tool")
@@ -466,23 +854,17 @@ class ChatHandler:
                         })
                         active_tool_subtext = None
 
-                        if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
-                            last_art = tool_context.staged_artifacts[-1]
-                            stream_dispatcher.update_artifact_ready(last_art)
-                            art_bytes = last_art.get("data_bytes", b"")
-                            art_fname = last_art.get("filename", "artifact.zip")
-                            if art_bytes:
-                                stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
-                            await stream_dispatcher.flush(is_final=False)
-
-                        elif tool_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
+                        if tool_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
                             img_fname = tool_context.staged_image_filename
                             img_bytes = tool_context.staged_image_bytes
                             stream_dispatcher.add_media_block(img_fname, img_bytes)
                             tool_context.staged_image_bytes = None
-                            await stream_dispatcher.flush(is_final=False)
 
-                        if placeholder_view:
+                        if tool_name in ["github_repo", "fetch_github"] and hasattr(tool_context, "staged_github_files"):
+                            for g_file in tool_context.staged_github_files:
+                                stream_dispatcher.add_raw_attachment(g_file["filename"], g_file["bytes"])
+
+                        if placeholder_view and not answer_now_event.is_set():
                             placeholder_view.enable_thinking()
                             placeholder_view.thought_data["tool_calls"] = tool_call_history
                             await placeholder_view.push_live_update()
@@ -490,7 +872,7 @@ class ChatHandler:
                     elif event_type == "CASCADE_RESET":
                         active_tool_start_times.clear()
                         active_tool_subtext = None
-                        if placeholder_view:
+                        if placeholder_view and not answer_now_event.is_set():
                             placeholder_view.thought_data["thoughts"] = "".join(accumulated_thought_buffer)
                             placeholder_view.thought_data["tool_calls"] = tool_call_history
                             await placeholder_view.push_live_update()
@@ -499,23 +881,23 @@ class ChatHandler:
                         if not first_content_received:
                             first_content_received = True
                             stop_placeholder_loop.set()
-                            if placeholder_task:
+                            if placeholder_task and not placeholder_task.done():
                                 placeholder_task.cancel()
 
-                            if response_msg:
+                            if response_msg and not answer_now_event.is_set():
                                 stream_dispatcher.bind_response_message(response_msg)
 
                         await artifact_parser.feed(payload)
 
                     elif event_type == "ERROR":
                         stop_placeholder_loop.set()
-                        if placeholder_task:
+                        if placeholder_task and not placeholder_task.done():
                             placeholder_task.cancel()
                         await stream_dispatcher.append_text(f"\n\n⚠️ {payload}")
 
             await artifact_parser.finish()
             stop_placeholder_loop.set()
-            if placeholder_task:
+            if placeholder_task and not placeholder_task.done():
                 placeholder_task.cancel()
 
             final_duration = max(1, int(time.time() - thinking_start_time))
@@ -565,6 +947,7 @@ class ChatHandler:
             await stream_dispatcher.finalize(
                 staged_artifacts=tool_context.staged_artifacts,
                 staged_components=tool_context.staged_components,
+                staged_followups=stream_dispatcher.staged_followups,
                 modals_map=modals_map,
                 interaction_dispatcher=handle_interaction_event,
                 thought_duration=final_duration,
@@ -588,19 +971,27 @@ class ChatHandler:
                         b_copy["artifact"] = art_copy
                     sanitized_timeline.append(b_copy)
 
+                raw_collected_thoughts = "".join(accumulated_thought_buffer)
+                sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(sent_msg.id)]
+
                 initial_v_data = {
                     "version_idx": 1,
                     "content": parsed_initial_content,
                     "timeline_blocks": sanitized_timeline,
                     "duration_seconds": final_duration,
                     "has_thoughts": has_reasoning,
-                    "thoughts": "".join(accumulated_thought_buffer),
+                    "thoughts": raw_collected_thoughts,
+                    "formatted_thoughts": None,
+                    "model": active_model_used,
                     "tool_calls": tool_call_history,
                     "attachments": stored_attachments,
                     "staged_components": tool_context.staged_components,
                     "staged_artifacts": sanitized_artifacts,
+                    "staged_followups": stream_dispatcher.staged_followups,
                     "staged_modals": tool_context.staged_modals,
-                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    "message_ids": sent_msg_ids,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "status": "ready"
                 }
                 branch_manager.save_generation(
                     message_id=sent_msg.id,
@@ -617,5 +1008,5 @@ class ChatHandler:
             logger.exception(f"Unhandled exception in chat loop: {e}")
         finally:
             stop_placeholder_loop.set()
-            if placeholder_task:
+            if placeholder_task and not placeholder_task.done():
                 placeholder_task.cancel()

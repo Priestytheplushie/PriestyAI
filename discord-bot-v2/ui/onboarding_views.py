@@ -23,16 +23,18 @@ PriestyAI is an intelligent server companion, reasoning assistant, and autonomou
 
 ### 2. Acceptable Use & Prohibited Conduct
 You agree not to engage in or attempt any of the following activities:
-• Jailbreaking, prompt injection, or attempting to bypass model safety constraints.
 • Generating, requesting, or distributing NSFW, sexually explicit, graphic violent, or non-consensual content.
-• Harassment, hate speech, threats, defamation, or malicious exploitation.
-• Executing malicious, destructive, or unauthorized code within sandbox environments.
+• Severe harassment, hate speech, direct threats, defamation, or malicious exploitation.
+• Executing malicious, destructive, or unauthorized exploits within code sandbox environments.
+• Exploiting safety filters or attempting to force the generation of illegal materials.
 
 ### 3. Automated Moderation & Enforcement
-All interactions and prompts are actively monitored by automated safety guardrails and moderation filters. Engaging in policy violations, abuse, or attempts to circumvent safety mechanisms will result in immediate and permanent revocation of your access without appeal.
+All interactions are evaluated in real time by automated safety guardrails:
+• **Standard Policy Refusals:** Requests that conflict with routine safety guidelines (e.g. adult content, excessive profanity, disallowed code requests) will simply receive a polite refusal without affecting your account standing.
+• **Zero-Tolerance Violations:** Critical, severe, or illegal violations—such as distributing malware, severe targeted harassment, terrorism, or child exploitation—will result in immediate, permanent account suspension without appeal.
 
 ### 4. Data Storage & Privacy Rights
-To provide conversational continuity, memory features, and version history, PriestyAI stores your direct prompts, generated deliverables, and factual preferences in an isolated local database. 
+To provide conversational continuity, memory features, and version history, PriestyAI stores your direct prompts, generated deliverables, and factual preferences in an isolated local database.
 • Passive channel chat from third parties is never permanently stored.
 • You retain full self-service control over your data. You may inspect, modify, or permanently wipe all stored data at any time using the </data:1541122763044163665> command or opt out of memory via </config:1541093516078485646>.
 
@@ -55,7 +57,7 @@ def build_welcome_terms_modal(on_agree_callback: Callable[[discord.Interaction],
                 {
                     "label": "I agree to the Terms of Service, Safety Rules, and Moderation Policies",
                     "value": "agreed",
-                    "description": "I accept the guidelines and understand automated moderation is active.",
+                    "description": "I accept the guidelines and understand safety guardrails are active.",
                     "default": False
                 }
             ]
@@ -128,7 +130,7 @@ class WelcomeOnboardingCardView(LayoutView):
         welcome_text = (
             f"### Welcome to PriestyAI\n"
             f"Hello {self.author.mention}! Before we begin, please review our terms of service, "
-            f"safety guidelines, and automated moderation policies.\n\n"
+            f"safety guidelines, and moderation policies.\n\n"
             f"-# This message will auto-delete in 90 seconds."
         )
         container.add_item(TextDisplay(welcome_text))

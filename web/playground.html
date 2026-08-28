@@ -1,0 +1,1300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=5.0, user-scalable=yes" />
+  <title id="page-title">PriestyAI Artifact — {{FILENAME}} (v{{VERSION}})</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@vscode/codicons@0.0.36/dist/codicon.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      /* Discord Official Palette */
+      --discord-blurple: #5865f2;
+      --discord-blurple-hover: #4752c4;
+      --discord-green: #23a55a;
+      --discord-green-hover: #1f8b4c;
+      --discord-yellow: #f0b232;
+      --discord-red: #f23f43;
+      --bg-base: #313338;
+      --bg-surface: #2b2d31;
+      --bg-subtle: #1e1f22;
+      --bg-sidebar: #2b2d31;
+      --bg-item-hover: #35373c;
+      --bg-item-active: #404249;
+      --border: #3f4147;
+      --border-subtle: #232428;
+      --text-main: #dbdee1;
+      --text-header: #f2f3f5;
+      --text-muted: #949ba4;
+      --font-ui: 'gg sans', 'Noto Sans', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-code: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+    }
+    body {
+      background-color: var(--bg-base);
+      color: var(--text-main);
+      font-family: var(--font-ui);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+    header {
+      height: 48px;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      user-select: none;
+      z-index: 20;
+    }
+    .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .bot-badge {
+      background: var(--discord-blurple);
+      color: #ffffff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 5px;
+      border-radius: 4px;
+      letter-spacing: 0.5px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      line-height: 1;
+    }
+    .file-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-header);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .version-badge {
+      font-size: 10px;
+      font-weight: 600;
+      background: var(--bg-subtle);
+      color: var(--discord-green);
+      padding: 2px 7px;
+      border-radius: 12px;
+      border: 1px solid rgba(35, 165, 90, 0.3);
+      font-family: var(--font-code);
+      flex-shrink: 0;
+      transition: all 0.3s ease;
+    }
+    .header-center {
+      display: flex;
+      align-items: center;
+      background: var(--bg-subtle);
+      padding: 3px;
+      border-radius: 6px;
+      border: 1px solid var(--border-subtle);
+    }
+    .view-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 600;
+      font-family: var(--font-ui);
+      padding: 4px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+    }
+    .view-btn:hover { color: var(--text-main); }
+    .view-btn.active {
+      background: var(--discord-blurple);
+      color: #ffffff;
+    }
+    .header-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .action-btn {
+      background: var(--bg-item-hover);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 600;
+      font-family: var(--font-ui);
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+      transition: all 0.15s ease;
+    }
+    .action-btn:hover {
+      background: var(--bg-item-active);
+      color: var(--text-header);
+    }
+    .action-btn.success {
+      background: var(--discord-green);
+      border-color: var(--discord-green);
+      color: #ffffff;
+    }
+    .action-btn.success:hover {
+      background: var(--discord-green-hover);
+    }
+    .action-btn.primary {
+      background: var(--discord-blurple);
+      border-color: var(--discord-blurple);
+      color: #ffffff;
+    }
+    .action-btn.primary:hover {
+      background: var(--discord-blurple-hover);
+    }
+
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: hidden;
+    }
+    .workspace-split {
+      flex: 1;
+      display: flex;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Discord Channel-Style File Explorer Sidebar */
+    #sidebar {
+      width: 230px;
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border-subtle);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      user-select: none;
+      transition: margin-left 0.2s ease;
+      z-index: 10;
+    }
+    #sidebar.collapsed {
+      margin-left: -230px;
+    }
+    .sidebar-header {
+      height: 38px;
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .sidebar-title {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .file-tree-container {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 8px 6px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-subtle) transparent;
+    }
+    .tree-folder-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-radius: 4px;
+      margin-top: 4px;
+    }
+    .tree-folder-header:hover {
+      color: var(--text-main);
+    }
+    .tree-folder-children {
+      padding-left: 10px;
+    }
+    .tree-folder-children.collapsed {
+      display: none;
+    }
+    .tree-file-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-radius: 4px;
+      margin: 1px 0;
+      transition: all 0.1s ease;
+    }
+    .tree-file-item:hover {
+      background: var(--bg-item-hover);
+      color: var(--text-main);
+    }
+    .tree-file-item.active {
+      background: var(--bg-item-active);
+      color: #ffffff;
+      font-weight: 600;
+    }
+
+    .workspace-area {
+      flex: 1;
+      display: flex;
+      position: relative;
+      overflow: hidden;
+    }
+    .pane {
+      flex: 1;
+      height: 100%;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    
+    .tabs-bar {
+      height: 38px;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: stretch;
+      overflow-x: auto;
+      overflow-y: hidden;
+      user-select: none;
+      scrollbar-width: none;
+      padding: 0 4px;
+      gap: 2px;
+    }
+    .tabs-bar::-webkit-scrollbar { display: none; }
+    .file-tab {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 14px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-muted);
+      background: transparent;
+      cursor: pointer;
+      white-space: nowrap;
+      border-radius: 4px 4px 0 0;
+      margin-top: 4px;
+      transition: background 0.1s, color 0.1s;
+    }
+    .file-tab:hover {
+      background: var(--bg-item-hover);
+      color: var(--text-main);
+    }
+    .file-tab.active {
+      background: var(--bg-base);
+      color: #ffffff;
+      font-weight: 600;
+      border-top: 2px solid var(--discord-blurple);
+    }
+    .file-tab-icon {
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    #editor-container { flex: 1; width: 100%; height: 100%; }
+    .divider { width: 2px; background: var(--border-subtle); z-index: 5; }
+    
+    .preview-header {
+      height: 38px;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      user-select: none;
+    }
+
+    .zoom-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-subtle);
+      border-radius: 4px;
+      padding: 2px 4px;
+      margin-left: 8px;
+    }
+    .zoom-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      padding: 1px 6px;
+      border-radius: 3px;
+      line-height: 1;
+      transition: all 0.15s ease;
+    }
+    .zoom-btn:hover {
+      background: var(--bg-item-hover);
+      color: var(--text-main);
+    }
+    .zoom-level {
+      font-size: 11px;
+      font-family: var(--font-code);
+      color: var(--text-muted);
+      padding: 0 4px;
+      cursor: pointer;
+      min-width: 36px;
+      text-align: center;
+      user-select: none;
+    }
+
+    #preview-frame {
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: var(--bg-base);
+    }
+
+    /* Discord-Native Terminal Drawer */
+    #terminal-drawer {
+      height: 250px;
+      background: var(--bg-subtle);
+      border-top: 2px solid var(--border-subtle);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      transition: height 0.2s cubic-bezier(0.1, 0.9, 0.2, 1);
+      box-shadow: 0 -4px 16px rgba(0,0,0,0.3);
+    }
+    #terminal-drawer.collapsed {
+      height: 32px;
+    }
+    .terminal-header {
+      height: 32px;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      cursor: pointer;
+      user-select: none;
+    }
+    .terminal-header-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-header);
+    }
+    .term-btn-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .term-action-icon {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 3px 6px;
+      border-radius: 4px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    }
+    .term-action-icon:hover {
+      background: var(--bg-item-hover);
+      color: var(--text-header);
+    }
+    .terminal-body {
+      flex: 1;
+      padding: 8px 12px;
+      background: #1e1f22;
+      overflow: hidden;
+    }
+    .xterm {
+      height: 100%;
+    }
+
+    @media (max-width: 768px) {
+      header { padding: 0 10px; }
+      #btn-split { display: none !important; }
+      .file-name { max-width: 120px; }
+      .action-btn span:not(.codicon) { display: none; }
+      .tabs-bar { height: 32px; }
+      .file-tab { font-size: 12px; padding: 0 10px; }
+      .preview-header { font-size: 11px; height: 32px; padding: 0 10px; }
+      #sidebar {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        box-shadow: 4px 0 20px rgba(0,0,0,0.6);
+      }
+      #terminal-drawer { height: 190px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <button class="action-btn" id="btn-toggle-sidebar" onclick="toggleSidebar()" title="Toggle File Explorer">
+        <span class="codicon codicon-menu"></span>
+      </button>
+      <div class="bot-badge"><span class="codicon codicon-sparkle"></span> APP</div>
+      <div class="file-name">{{FILENAME}}</div>
+      <div class="version-badge" id="v-badge">v{{VERSION}} {{DIFF_BADGE}}</div>
+    </div>
+    <div class="header-center" id="center-controls" style="display: {{CENTER_CONTROLS_DISPLAY}};">
+      <button class="view-btn" id="btn-split" onclick="setViewMode('split')"><span class="codicon codicon-split-horizontal"></span> Split</button>
+      <button class="view-btn" id="btn-code" onclick="setViewMode('code')"><span class="codicon codicon-code"></span> Code</button>
+      <button class="view-btn active" id="btn-preview" onclick="setViewMode('preview')"><span class="codicon codicon-eye"></span> Preview</button>
+    </div>
+    <div class="header-right">
+      <button class="action-btn success" id="btn-run" onclick="runActiveFile()" title="Run Code in Terminal (Ctrl+Enter)">
+        <span class="codicon codicon-play"></span> <span>Run</span>
+      </button>
+      <button class="action-btn" id="btn-term-toggle" onclick="toggleTerminal()" title="Toggle Terminal (Ctrl+`)">
+        <span class="codicon codicon-terminal"></span> <span>Terminal</span>
+      </button>
+      <button class="action-btn" onclick="copyCode()">
+        <span class="codicon codicon-copy"></span> <span id="copy-text">Copy</span>
+      </button>
+      <button class="action-btn primary" onclick="downloadArtifact()">
+        <span class="codicon codicon-cloud-download"></span> <span>Download</span>
+      </button>
+    </div>
+  </header>
+
+  <main id="workspace">
+    <div class="workspace-split">
+      <!-- Discord Channel-Style File Explorer Sidebar -->
+      <aside id="sidebar">
+        <div class="sidebar-header">
+          <span class="sidebar-title"><span class="codicon codicon-folder"></span> Files</span>
+        </div>
+        <div class="file-tree-container" id="file-tree"></div>
+      </aside>
+
+      <div class="workspace-area">
+        <section class="pane" id="left-pane">
+          <div class="tabs-bar" id="file-tabs-bar" style="display: {{TABS_BAR_DISPLAY}};"></div>
+          <div id="editor-container"></div>
+        </section>
+
+        <div class="divider" id="pane-divider" style="display: {{DIVIDER_DISPLAY}};"></div>
+
+        <section class="pane" id="right-pane" style="display: {{RIGHT_PANE_DISPLAY}};">
+          <div class="preview-header">
+            <div style="display: flex; align-items: center; min-width: 0;">
+              <span id="preview-title">Canvas Preview</span>
+              <div class="zoom-controls" id="zoom-controls">
+                <button class="zoom-btn" onclick="adjustZoom(-0.1)" title="Zoom Out (Ctrl -)">−</button>
+                <span class="zoom-level" id="zoom-level-text" onclick="resetZoom()" title="Reset Zoom (Ctrl 0)">100%</span>
+                <button class="zoom-btn" onclick="adjustZoom(0.1)" title="Zoom In (Ctrl +)">+</button>
+              </div>
+            </div>
+          </div>
+          <iframe id="preview-frame" sandbox="allow-scripts allow-modals allow-same-origin allow-popups allow-forms"></iframe>
+        </section>
+      </div>
+    </div>
+
+    <!-- Discord-Native Terminal Drawer -->
+    <div id="terminal-drawer" class="collapsed">
+      <div class="terminal-header" onclick="toggleTerminal()">
+        <div class="terminal-header-title">
+          <span class="bot-badge" style="background:#23a55a;">EXEC</span>
+          <span>Terminal Sandbox (python / bash / pip)</span>
+        </div>
+        <div class="term-btn-group" onclick="event.stopPropagation()">
+          <button class="term-action-icon" onclick="clearTerminalDisplay()" title="Clear Console">
+            <span class="codicon codicon-clear-all"></span>
+          </button>
+          <button class="term-action-icon" onclick="toggleTerminal()" title="Minimize / Expand">
+            <span class="codicon codicon-chevron-up" id="term-chevron"></span>
+          </button>
+        </div>
+      </div>
+      <div class="terminal-body" id="xterm-container"></div>
+    </div>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
+  <script>
+    function decodeBase64Utf8(base64Str) {
+      try {
+        const binaryString = atob(base64Str);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        return new TextDecoder("utf-8").decode(bytes);
+      } catch (e) {
+        return "";
+      }
+    }
+
+    function detectLang(filename) {
+      const ext = (filename || '').split('.').pop().toLowerCase();
+      const map = {
+        'html': 'html', 'htm': 'html', 'svg': 'html',
+        'js': 'javascript', 'mjs': 'javascript', 'cjs': 'javascript',
+        'ts': 'typescript', 'tsx': 'typescript', 'jsx': 'javascript',
+        'py': 'python', 'rs': 'rust', 'go': 'go',
+        'cpp': 'cpp', 'c': 'c', 'h': 'c', 'hpp': 'cpp',
+        'java': 'java', 'sh': 'shell', 'bash': 'shell',
+        'json': 'json', 'css': 'css', 'scss': 'scss',
+        'md': 'markdown', 'markdown': 'markdown', 'sql': 'sql', 'yaml': 'yaml', 'yml': 'yaml'
+      };
+      return map[ext] || 'plaintext';
+    }
+
+    function getFileCodicon(filename) {
+      const ext = (filename || '').split('.').pop().toLowerCase();
+      const codiconMap = {
+        'html': 'codicon-file-code', 'htm': 'codicon-file-code',
+        'css': 'codicon-symbol-color', 'scss': 'codicon-symbol-color',
+        'js': 'codicon-file-code', 'jsx': 'codicon-react',
+        'ts': 'codicon-file-code', 'tsx': 'codicon-react',
+        'py': 'codicon-symbol-method',
+        'rs': 'codicon-file-binary',
+        'go': 'codicon-file-code',
+        'json': 'codicon-json',
+        'md': 'codicon-markdown', 'markdown': 'codicon-markdown',
+        'svg': 'codicon-file-media',
+        'zip': 'codicon-file-zip'
+      };
+      return codiconMap[ext] || 'codicon-file';
+    }
+
+    function getRunCommand(filename) {
+      const ext = (filename || '').split('.').pop().toLowerCase();
+      if (ext === 'py') return 'python ' + filename;
+      if (ext === 'js' || ext === 'mjs' || ext === 'cjs') return 'node ' + filename;
+      if (ext === 'ts') return 'npx -y tsx ' + filename;
+      if (ext === 'sh' || ext === 'bash') return 'sh ' + filename;
+      if (ext === 'rs') return 'rustc ' + filename + ' -o app && ./app';
+      if (ext === 'go') return 'go run ' + filename;
+      if (ext === 'cpp') return 'g++ ' + filename + ' -o app && ./app';
+      if (ext === 'c') return 'gcc ' + filename + ' -o app && ./app';
+      return 'python ' + filename;
+    }
+
+    const ARTIFACT_ID = "{{ARTIFACT_ID}}";
+    let currentVersion = parseInt("{{VERSION}}", 10) || 1;
+    const RAW_FILES_B64 = "{{RAW_FILES_B64}}";
+    let projectFiles = JSON.parse(decodeBase64Utf8(RAW_FILES_B64) || "[]");
+    let ARTIFACT_FILENAME = "{{FILENAME}}";
+    let IS_MULTI_FILE = projectFiles.length > 1 || ARTIFACT_FILENAME.endsWith('.zip');
+    let IS_PREVIEWABLE = {{IS_PREVIEWABLE_BOOL}};
+
+    let currentEditor = null;
+    let activeFileIndex = 0;
+    let renderDebounceTimer = null;
+    let currentDocZoom = 1.0;
+    let currentMode = 'code';
+
+    // xterm.js Discord Terminal
+    let term = null;
+    let fitAddon = null;
+    let termSocket = null;
+    let isTermOpen = false;
+
+    function initTerminal(autoExecuteCmd) {
+      if (!term) {
+        const container = document.getElementById('xterm-container');
+        term = new Terminal({
+          cursorBlink: true,
+          fontFamily: "'JetBrains Mono', 'Consolas', 'Courier New', monospace",
+          fontSize: 12.5,
+          lineHeight: 1.35,
+          letterSpacing: 0.5,
+          theme: {
+            background: '#1e1f22',
+            foreground: '#dbdee1',
+            cursor: '#5865f2',
+            cursorAccent: '#ffffff',
+            selectionBackground: 'rgba(88, 101, 242, 0.4)',
+            black: '#1e1f22',
+            red: '#f23f43',
+            green: '#23a55a',
+            yellow: '#f0b232',
+            blue: '#5865f2',
+            magenta: '#eb459e',
+            cyan: '#00aff4',
+            white: '#f2f3f5',
+            brightBlack: '#4e5058',
+            brightRed: '#f23f43',
+            brightGreen: '#57f287',
+            brightYellow: '#fee75c',
+            brightBlue: '#5865f2',
+            brightMagenta: '#eb459e',
+            brightCyan: '#00aff4',
+            brightWhite: '#ffffff'
+          }
+        });
+        fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(container);
+        fitAddon.fit();
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = protocol + '//' + window.location.host + '/ws/terminal/' + ARTIFACT_ID;
+        
+        try {
+          termSocket = new WebSocket(wsUrl);
+          termSocket.onopen = function() {
+            if (autoExecuteCmd) {
+              setTimeout(function() {
+                if (termSocket && termSocket.readyState === WebSocket.OPEN) {
+                  termSocket.send(autoExecuteCmd + '\r');
+                }
+              }, 400);
+            }
+          };
+          termSocket.onmessage = function(ev) {
+            term.write(ev.data);
+          };
+          termSocket.onclose = function() {
+            term.write('\r\n\x1b[38;2;242;63;67m[Session Disconnected]\x1b[0m\r\n');
+          };
+          term.onData(function(data) {
+            if (termSocket && termSocket.readyState === WebSocket.OPEN) {
+              termSocket.send(data);
+            }
+          });
+        } catch (e) {
+          term.write('\r\nFailed to connect to interactive terminal.\r\n');
+        }
+      } else if (autoExecuteCmd && termSocket && termSocket.readyState === WebSocket.OPEN) {
+        termSocket.send(autoExecuteCmd + '\r');
+      }
+    }
+
+    function toggleTerminal() {
+      const drawer = document.getElementById('terminal-drawer');
+      const chevron = document.getElementById('term-chevron');
+      isTermOpen = !isTermOpen;
+
+      if (isTermOpen) {
+        drawer.classList.remove('collapsed');
+        chevron.classList.replace('codicon-chevron-up', 'codicon-chevron-down');
+        initTerminal();
+        setTimeout(function() {
+          if (fitAddon) fitAddon.fit();
+          if (term) term.focus();
+        }, 220);
+      } else {
+        drawer.classList.add('collapsed');
+        chevron.classList.replace('codicon-chevron-down', 'codicon-chevron-up');
+      }
+    }
+
+    function clearTerminalDisplay() {
+      if (term) {
+        term.clear();
+      }
+    }
+
+    function runActiveFile() {
+      const activeFile = projectFiles[activeFileIndex] || { filename: ARTIFACT_FILENAME };
+      const runCmd = getRunCommand(activeFile.filename);
+
+      if (!isTermOpen) {
+        const drawer = document.getElementById('terminal-drawer');
+        const chevron = document.getElementById('term-chevron');
+        drawer.classList.remove('collapsed');
+        chevron.classList.replace('codicon-chevron-up', 'codicon-chevron-down');
+        isTermOpen = true;
+        initTerminal(runCmd);
+        setTimeout(function() {
+          if (fitAddon) fitAddon.fit();
+          if (term) term.focus();
+        }, 220);
+      } else {
+        initTerminal(runCmd);
+        if (term) term.focus();
+      }
+    }
+
+    function toggleSidebar() {
+      const sb = document.getElementById('sidebar');
+      sb.classList.toggle('collapsed');
+      if (currentEditor) {
+        setTimeout(function() { currentEditor.layout(); }, 220);
+      }
+    }
+
+    function buildFileTreeData(files) {
+      const root = { name: '', isDir: true, children: {}, files: [] };
+      files.forEach(function(f, idx) {
+        const parts = (f.filename || '').split('/');
+        let curr = root;
+        for (let i = 0; i < parts.length - 1; i++) {
+          const dir = parts[i];
+          if (!curr.children[dir]) {
+            curr.children[dir] = { name: dir, isDir: true, children: {}, files: [] };
+          }
+          curr = curr.children[dir];
+        }
+        curr.files.push({ name: parts[parts.length - 1], fileIndex: idx, file: f });
+      });
+      return root;
+    }
+
+    function renderFileTree() {
+      const container = document.getElementById('file-tree');
+      container.innerHTML = '';
+
+      if (!IS_MULTI_FILE && projectFiles.length <= 1) {
+        document.getElementById('sidebar').classList.add('collapsed');
+        document.getElementById('btn-toggle-sidebar').style.display = 'none';
+        return;
+      }
+
+      document.getElementById('btn-toggle-sidebar').style.display = 'flex';
+      if (window.innerWidth <= 768) {
+        document.getElementById('sidebar').classList.add('collapsed');
+      }
+
+      const treeData = buildFileTreeData(projectFiles);
+
+      function renderNode(node, targetEl) {
+        Object.keys(node.children).sort().forEach(function(dirName) {
+          const dirNode = node.children[dirName];
+          const folderWrapper = document.createElement('div');
+
+          const header = document.createElement('div');
+          header.className = 'tree-folder-header';
+          header.innerHTML = '<span class="codicon codicon-chevron-down"></span><span class="codicon codicon-folder"></span><span>' + dirName + '</span>';
+
+          const childrenEl = document.createElement('div');
+          childrenEl.className = 'tree-folder-children';
+
+          header.onclick = function() {
+            childrenEl.classList.toggle('collapsed');
+            const chevron = header.querySelector('.codicon-chevron-down, .codicon-chevron-right');
+            const fIcon = header.querySelector('.codicon-folder-opened, .codicon-folder');
+            if (childrenEl.classList.contains('collapsed')) {
+              chevron.classList.replace('codicon-chevron-down', 'codicon-chevron-right');
+              fIcon.classList.replace('codicon-folder-opened', 'codicon-folder');
+            } else {
+              chevron.classList.replace('codicon-chevron-right', 'codicon-chevron-down');
+              fIcon.classList.replace('codicon-folder', 'codicon-folder-opened');
+            }
+          };
+
+          folderWrapper.appendChild(header);
+          folderWrapper.appendChild(childrenEl);
+          targetEl.appendChild(folderWrapper);
+
+          renderNode(dirNode, childrenEl);
+        });
+
+        node.files.sort(function(a, b) { return a.name.localeCompare(b.name); }).forEach(function(fItem) {
+          const fileEl = document.createElement('div');
+          fileEl.className = 'tree-file-item ' + (fItem.fileIndex === activeFileIndex ? 'active' : '');
+          fileEl.innerHTML = '<span class="codicon ' + getFileCodicon(fItem.name) + '"></span><span>' + fItem.name + '</span>';
+          fileEl.onclick = function() { switchFileTab(fItem.fileIndex); };
+          targetEl.appendChild(fileEl);
+        });
+      }
+
+      renderNode(treeData, container);
+    }
+
+    function isMarkdownFile(fname) {
+      const lower = (fname || '').toLowerCase();
+      return lower.endsWith('.md') || lower.endsWith('.markdown');
+    }
+
+    function setDocZoom(zoom) {
+      currentDocZoom = Math.min(2.5, Math.max(0.5, Math.round(zoom * 10) / 10));
+      const zoomText = document.getElementById('zoom-level-text');
+      if (zoomText) {
+        zoomText.innerText = Math.round(currentDocZoom * 100) + '%';
+      }
+      
+      const iframe = document.getElementById('preview-frame');
+      if (iframe) {
+        try {
+          if (iframe.contentDocument && iframe.contentDocument.body) {
+            iframe.contentDocument.body.style.zoom = currentDocZoom;
+          }
+        } catch (e) {}
+      }
+    }
+
+    function adjustZoom(delta) {
+      setDocZoom(currentDocZoom + delta);
+    }
+
+    function resetZoom() {
+      setDocZoom(1.0);
+    }
+
+    window.addEventListener('keydown', function(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        runActiveFile();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+        e.preventDefault();
+        toggleTerminal();
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
+        e.preventDefault();
+        adjustZoom(0.1);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '-') {
+        e.preventDefault();
+        adjustZoom(-0.1);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '0') {
+        e.preventDefault();
+        resetZoom();
+      }
+    });
+
+    if (window.marked) {
+      marked.use({
+        gfm: true,
+        breaks: true,
+        renderer: {
+          code(token) {
+            const text = token.text || '';
+            const lang = token.lang || '';
+            const validLang = !!(lang && window.hljs && hljs.getLanguage(lang));
+            const highlighted = validLang 
+              ? hljs.highlight(text, { language: lang }).value 
+              : (window.hljs ? hljs.highlightAuto(text).value : text);
+            return '<pre><code class="hljs ' + (validLang ? lang : '') + '">' + highlighted + '<' + '/code><' + '/pre>';
+          }
+        }
+      });
+    }
+
+    function preprocessGfmAlerts(md) {
+      if (!md) return '';
+      const alertRegex = /^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*\n((?:^>[^\n]*\n?)*)/gim;
+      const iconMap = {
+        'NOTE': 'ℹ️',
+        'TIP': '💡',
+        'IMPORTANT': '📌',
+        'WARNING': '⚠️',
+        'CAUTION': '🛑'
+      };
+
+      return md.replace(alertRegex, function(match, alertType, body) {
+        const type = alertType.toUpperCase();
+        const icon = iconMap[type] || '💡';
+        const cleanBody = body.replace(/^>\s?/gm, '').trim();
+        return '\n<div class="markdown-alert markdown-alert-' + type.toLowerCase() + '">\n<div class="markdown-alert-title"><span class="alert-icon">' + icon + '</span> ' + (type.charAt(0) + type.slice(1).toLowerCase()) + '</div>\n\n' + cleanBody + '\n</div>\n\n';
+      });
+    }
+
+    function renderMarkdownTemplate(parsedMd) {
+      const zoomVal = currentDocZoom;
+      return '<!DOCTYPE html>\n' +
+'<html>\n' +
+'<head>\n' +
+'  <meta charset="utf-8">\n' +
+'  <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.5, maximum-scale=5.0, user-scalable=yes">\n' +
+'  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.5.1/github-markdown-dark.min.css">\n' +
+'  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">\n' +
+'  <' + 'style>\n' +
+'    html, body {\n' +
+'      background-color: #313338 !important;\n' +
+'      color: #dbdee1 !important;\n' +
+'      margin: 0;\n' +
+'      padding: 24px;\n' +
+'      box-sizing: border-box;\n' +
+'      font-family: "gg sans", "Noto Sans", "Inter", -apple-system, BlinkMacSystemFont, sans-serif;\n' +
+'      zoom: ' + zoomVal + ';\n' +
+'      touch-action: pan-x pan-y pinch-zoom;\n' +
+'    }\n' +
+'    .markdown-body {\n' +
+'      background-color: #313338 !important;\n' +
+'      color: #dbdee1 !important;\n' +
+'      max-width: 880px;\n' +
+'      margin: 0 auto;\n' +
+'      line-height: 1.6;\n' +
+'      font-size: 14px;\n' +
+'    }\n' +
+'    h1, h2, h3, h4, h5, h6 {\n' +
+'      color: #f2f3f5 !important;\n' +
+'      border-bottom: 1px solid #3f4147 !important;\n' +
+'      font-weight: 700;\n' +
+'    }\n' +
+'    pre {\n' +
+'      background-color: #2b2d31 !important;\n' +
+'      border: 1px solid #1e1f22 !important;\n' +
+'      border-radius: 8px;\n' +
+'      padding: 16px;\n' +
+'      overflow: auto;\n' +
+'    }\n' +
+'    code {\n' +
+'      font-family: "JetBrains Mono", Consolas, monospace !important;\n' +
+'    }\n' +
+'    table {\n' +
+'      border-collapse: collapse;\n' +
+'      width: 100%;\n' +
+'      margin: 16px 0;\n' +
+'    }\n' +
+'    th, td {\n' +
+'      border: 1px solid #3f4147;\n' +
+'      padding: 8px 12px;\n' +
+'    }\n' +
+'    th {\n' +
+'      background-color: #2b2d31;\n' +
+'    }\n' +
+'    .markdown-alert {\n' +
+'      padding: 12px 16px;\n' +
+'      margin-bottom: 16px;\n' +
+'      border-left: 4px solid;\n' +
+'      border-radius: 6px;\n' +
+'      background-color: #2b2d31;\n' +
+'    }\n' +
+'    .markdown-alert-title {\n' +
+'      display: flex;\n' +
+'      align-items: center;\n' +
+'      gap: 6px;\n' +
+'      font-weight: 700;\n' +
+'      font-size: 13px;\n' +
+'      margin-bottom: 6px !important;\n' +
+'    }\n' +
+'    .markdown-alert p:last-child { margin-bottom: 0; }\n' +
+'    .markdown-alert.markdown-alert-note { border-left-color: #5865f2; }\n' +
+'    .markdown-alert.markdown-alert-note .markdown-alert-title { color: #5865f2; }\n' +
+'    .markdown-alert.markdown-alert-tip { border-left-color: #23a55a; }\n' +
+'    .markdown-alert.markdown-alert-tip .markdown-alert-title { color: #23a55a; }\n' +
+'    .markdown-alert.markdown-alert-important { border-left-color: #eb459e; }\n' +
+'    .markdown-alert.markdown-alert-important .markdown-alert-title { color: #eb459e; }\n' +
+'    .markdown-alert.markdown-alert-warning { border-left-color: #f0b232; }\n' +
+'    .markdown-alert.markdown-alert-warning .markdown-alert-title { color: #f0b232; }\n' +
+'    .markdown-alert.markdown-alert-caution { border-left-color: #f23f43; }\n' +
+'    .markdown-alert.markdown-alert-caution .markdown-alert-title { color: #f23f43; }\n' +
+'  <' + '/style>\n' +
+'</head>\n' +
+'<body class="markdown-body">\n' +
+parsedMd + '\n' +
+'<' + '/body>\n' +
+'<' + '/html>';
+    }
+
+    function getBundledHtml() {
+      if (!IS_PREVIEWABLE) return '';
+
+      const currentFile = projectFiles[activeFileIndex];
+      if (currentFile && isMarkdownFile(currentFile.filename)) {
+        const rawContent = currentFile.content || '';
+        const preprocessed = preprocessGfmAlerts(rawContent);
+        const parsedMd = window.marked ? marked.parse(preprocessed) : preprocessed;
+        return renderMarkdownTemplate(parsedMd);
+      }
+
+      let htmlFile = null;
+      if (currentFile && ((currentFile.filename || '').toLowerCase().endsWith('.html') || (currentFile.filename || '').toLowerCase().endsWith('.htm'))) {
+        htmlFile = currentFile;
+      } else {
+        htmlFile = projectFiles.find(function(f) {
+          const fn = (f.filename || '').toLowerCase();
+          return fn === 'index.html' || fn.endsWith('/index.html');
+        }) || projectFiles.find(function(f) { 
+          const fn = (f.filename || '').toLowerCase();
+          return fn.endsWith('.html') || fn.endsWith('.htm'); 
+        });
+      }
+
+      if (htmlFile) {
+        let htmlCode = htmlFile.content || '';
+
+        projectFiles.forEach(function(f) {
+          if ((f.filename || '').toLowerCase().endsWith('.css')) {
+            const escaped = f.filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const linkRegex = new RegExp('<link[^>]*href=["\'](?:./)?' + escaped + '["\'][^>]*>', 'gi');
+            if (linkRegex.test(htmlCode)) {
+              htmlCode = htmlCode.replace(linkRegex, '<' + 'style>\n/* Inlined ' + f.filename + ' */\n' + f.content + '\n<' + '/style>');
+            } else if (htmlCode.includes('</' + 'head>')) {
+              htmlCode = htmlCode.replace('</' + 'head>', '<' + 'style>\n/* Inlined ' + f.filename + ' */\n' + f.content + '\n<' + '/style></' + 'head>');
+            }
+          }
+        });
+
+        projectFiles.forEach(function(f) {
+          const fn = (f.filename || '').toLowerCase();
+          if (fn.endsWith('.js') && !fn.endsWith('.min.js')) {
+            const escaped = f.filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const scriptRegex = new RegExp('<script[^>]*src=["\'](?:./)?' + escaped + '["\'][^>]*>\\s*<' + '\\/script>', 'gi');
+            if (scriptRegex.test(htmlCode)) {
+              htmlCode = htmlCode.replace(scriptRegex, '<' + 'script>\n/* Inlined ' + f.filename + ' */\n' + f.content + '\n<' + '/script>');
+            } else if (htmlCode.includes('</' + 'body>')) {
+              htmlCode = htmlCode.replace('</' + 'body>', '<' + 'script>\n/* Inlined ' + f.filename + ' */\n' + f.content + '\n<' + '/script></' + 'body>');
+            }
+          }
+        });
+
+        return htmlCode;
+      }
+
+      let mdFile = projectFiles.find(function(f) { return isMarkdownFile(f.filename); });
+      if (mdFile) {
+        const rawContent = mdFile.content || '';
+        const preprocessed = preprocessGfmAlerts(rawContent);
+        const parsedMd = window.marked ? marked.parse(preprocessed) : preprocessed;
+        return renderMarkdownTemplate(parsedMd);
+      }
+
+      let svgFile = projectFiles.find(function(f) { return (f.filename || '').toLowerCase().endsWith('.svg'); });
+      if (svgFile) {
+        return svgFile.content || '';
+      }
+
+      return '';
+    }
+
+    function updateLiveIframe() {
+      if (!IS_PREVIEWABLE) return;
+      const iframe = document.getElementById('preview-frame');
+      if (iframe) {
+        const bundledHtml = getBundledHtml();
+        if (bundledHtml) {
+          iframe.srcdoc = bundledHtml;
+          iframe.onload = function() {
+            try {
+              if (iframe.contentDocument && iframe.contentDocument.body) {
+                iframe.contentDocument.body.style.zoom = currentDocZoom;
+              }
+            } catch (e) {}
+          };
+        }
+      }
+    }
+
+    function setViewMode(mode) {
+      currentMode = mode;
+      document.querySelectorAll('.view-btn').forEach(function(b) { b.classList.remove('active'); });
+      const activeBtn = document.getElementById('btn-' + mode);
+      if (activeBtn) activeBtn.classList.add('active');
+
+      const left = document.getElementById('left-pane');
+      const right = document.getElementById('right-pane');
+      const divider = document.getElementById('pane-divider');
+
+      if (!IS_PREVIEWABLE || mode === 'code') {
+        left.style.display = 'flex';
+        right.style.display = 'none';
+        divider.style.display = 'none';
+      } else if (mode === 'split') {
+        left.style.display = 'flex';
+        right.style.display = 'flex';
+        divider.style.display = 'block';
+      } else if (mode === 'preview') {
+        left.style.display = 'none';
+        right.style.display = 'flex';
+        divider.style.display = 'none';
+      }
+
+      if (currentEditor) {
+        setTimeout(function() { currentEditor.layout(); }, 50);
+      }
+    }
+
+    function copyCode() {
+      if (!currentEditor) return;
+      navigator.clipboard.writeText(currentEditor.getValue());
+      const label = document.getElementById('copy-text');
+      label.innerText = 'Copied!';
+      setTimeout(function() { label.innerText = 'Copy'; }, 1500);
+    }
+
+    async function downloadArtifact() {
+      if (!currentEditor) return;
+      if (IS_MULTI_FILE && window.JSZip) {
+        const zip = new JSZip();
+        projectFiles.forEach(function(f) {
+          zip.file(f.filename, f.content);
+        });
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(zipBlob);
+        a.download = ARTIFACT_FILENAME.endsWith('.zip') ? ARTIFACT_FILENAME : (ARTIFACT_FILENAME.split('.')[0] + '.zip');
+        a.click();
+      } else {
+        const activeFile = projectFiles[activeFileIndex] || { filename: ARTIFACT_FILENAME, content: currentEditor.getValue() };
+        const blob = new Blob([activeFile.content], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = activeFile.filename;
+        a.click();
+      }
+    }
+
+    function renderFileTabs() {
+      const tabsBar = document.getElementById('file-tabs-bar');
+      tabsBar.innerHTML = '';
+
+      if (projectFiles.length > 1) {
+        tabsBar.style.display = 'flex';
+        projectFiles.forEach(function(file, index) {
+          const tab = document.createElement('div');
+          tab.className = 'file-tab ' + (index === activeFileIndex ? 'active' : '');
+          tab.innerHTML = '<span class="file-tab-icon codicon ' + getFileCodicon(file.filename) + '"></span><span>' + file.filename + '</span>';
+          tab.onclick = function() { switchFileTab(index); };
+          tabsBar.appendChild(tab);
+        });
+      } else {
+        tabsBar.style.display = 'none';
+      }
+    }
+
+    function switchFileTab(index) {
+      if (index < 0 || index >= projectFiles.length || !currentEditor) return;
+      activeFileIndex = index;
+      renderFileTabs();
+      renderFileTree();
+
+      const targetFile = projectFiles[index];
+      currentEditor.setModel(targetFile.model);
+      
+      const prevTitle = document.getElementById('preview-title');
+      if (prevTitle) {
+        prevTitle.innerText = isMarkdownFile(targetFile.filename) ? "Document Preview" : "Canvas Preview";
+      }
+
+      if (IS_PREVIEWABLE) {
+        updateLiveIframe();
+      }
+    }
+
+    function initMonacoModels() {
+      projectFiles.forEach(function(file) {
+        const lang = detectLang(file.filename);
+        if (file.model) {
+          file.model.dispose();
+        }
+        if (window.monaco && monaco.editor) {
+          file.model = monaco.editor.createModel(file.content, lang);
+          file.model.onDidChangeContent(function() {
+            file.content = file.model.getValue();
+            if (IS_PREVIEWABLE) {
+              clearTimeout(renderDebounceTimer);
+              renderDebounceTimer = setTimeout(updateLiveIframe, 250);
+            }
+          });
+        }
+      });
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+      if (!IS_PREVIEWABLE) {
+        setViewMode('code');
+      } else {
+        const firstFileName = projectFiles[0] ? projectFiles[0].filename : ARTIFACT_FILENAME;
+        if (isMarkdownFile(firstFileName)) {
+          setViewMode('preview');
+        } else if (window.innerWidth > 768) {
+          setViewMode('split');
+        } else {
+          setViewMode('preview');
+        }
+        updateLiveIframe();
+      }
+      renderFileTree();
+    });
+
+    require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs' } });
+    require(['vs/editor/editor.main'], function () {
+      monaco.editor.defineTheme('discord-dark', {
+        base: 'vs-dark',
+        inherit: true,
+        rules: [
+          { token: '', foreground: 'dbdee1', background: '313338' },
+          { token: 'comment', foreground: '949ba4', fontStyle: 'italic' },
+          { token: 'keyword', foreground: '5865f2' },
+          { token: 'keyword.control', foreground: 'eb459e' },
+          { token: 'operator', foreground: 'f0b232' },
+          { token: 'identifier', foreground: '57f287' },
+          { token: 'type', foreground: '00aff4' },
+          { token: 'class', foreground: '00aff4' },
+          { token: 'function', foreground: '5865f2' },
+          { token: 'string', foreground: '57f287' },
+          { token: 'number', foreground: 'f0b232' }
+        ],
+        colors: {
+          'editor.background': '#313338',
+          'editor.foreground': '#dbdee1',
+          'editor.lineHighlightBackground': '#35373c',
+          'editorLineNumber.foreground': '#80848e',
+          'editorLineNumber.activeForeground': '#f2f3f5',
+          'editorIndentGuide.background': '#3f4147',
+          'editorSelectionBackground': '#5865f233',
+          'editorCursor.foreground': '#5865f2'
+        }
+      });
+
+      initMonacoModels();
+
+      if (projectFiles.length > 1) {
+        renderFileTabs();
+      }
+
+      const initialModel = projectFiles[0] ? projectFiles[0].model : null;
+
+      currentEditor = monaco.editor.create(document.getElementById('editor-container'), {
+        model: initialModel,
+        theme: 'discord-dark',
+        automaticLayout: true,
+        minimap: { enabled: false },
+        fontSize: 13,
+        lineHeight: 21,
+        fontFamily: "'JetBrains Mono', Consolas, monospace",
+        bracketPairColorization: { enabled: true },
+        renderLineHighlight: 'all',
+        padding: { top: 12, bottom: 12 },
+        scrollBeyondLastLine: false,
+        smoothScrolling: true
+      });
+
+      if (IS_PREVIEWABLE) {
+        updateLiveIframe();
+      }
+    });
+  </script>
+</body>
+</html>

@@ -2,6 +2,7 @@ import io
 import re
 import time
 import uuid
+import json
 import base64
 import logging
 import asyncio
@@ -21,11 +22,67 @@ from handlers.stream_handler import (
     cleanup_sibling_messages,
     ChatMessageLayoutView
 )
+from handlers.chat_handler import (
+    format_placeholder_content,
+    get_tool_subtext,
+    update_placeholder_loop,
+    extract_message_attachments_raw
+)
+from ui.thought_container import PlaceholderLayoutView
 from parsers.artifact_parser import ArtifactStreamParser
 from tools.registry import ToolExecutionContext
 from ui.modals import DynamicModalV2
+from ui.onboarding_views import BannedUserNoticeView
+from core.moderation import (
+    check_moderation,
+    log_moderation_violation,
+    is_user_banned,
+    ban_user,
+    generate_friendly_refusal
+)
 
 logger = logging.getLogger("PriestyAI.Commands.ContextMenus")
+
+DEFAULT_RETRY_STATUSES = [
+    "Retrying with fresh neural synapses",
+    "Actually reading the prompt this time",
+    "Refactoring the previous approach",
+    "Consulting deeper databanks",
+    "Brewing a better response",
+    "Polishing the output to perfection"
+]
+
+async def generate_retry_witty_statuses(prompt: str, version_idx: int) -> list[str]:
+    client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite")
+    if not client:
+        return DEFAULT_RETRY_STATUSES
+
+    gen_prompt = (
+        f"Original user prompt: \"{prompt[:300]}\"\n"
+        f"The user clicked Retry to generate Version {version_idx}.\n"
+        f"Generate 5 funny, sarcastic, witty 3-5 word loading messages specifically about re-attempting or improving this answer.\n"
+        f"Output ONLY a JSON array of strings, e.g. [\"Trying without hallucinating\", \"Actually checking documentation\", ...]"
+    )
+
+    try:
+        res = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=active_model,
+                contents=gen_prompt
+            ),
+            timeout=2.0
+        )
+        if res.text:
+            cleaned = res.text.strip()
+            if cleaned.startswith("```"):
+                cleaned = re.sub(r"^```[a-zA-Z]*\n|\n```$", "", cleaned).strip()
+            arr = json.loads(cleaned)
+            if isinstance(arr, list) and arr:
+                return [str(s).strip() for s in arr if str(s).strip()]
+    except Exception as e:
+        logger.debug(f"Failed to generate retry witty statuses: {e}")
+
+    return DEFAULT_RETRY_STATUSES
 
 def build_retry_placeholder_layout(
     status_text: str,
@@ -38,7 +95,7 @@ def build_retry_placeholder_layout(
     view.add_item(discord.ui.Separator(visible=True))
 
     thought_btn = discord.ui.Button(
-        label="🧠 Thought for <1s",
+        label="🧠 Thought for 1s",
         style=discord.ButtonStyle.secondary,
         custom_id=f"gen_thought_{message_id}_{target_version}"
     )
@@ -66,6 +123,163 @@ def build_retry_placeholder_layout(
     return view
 
 def setup_context_menus(tree: app_commands.CommandTree):
+
+    @tree.context_menu(name="Run as Prompt")
+    @app_commands.allowed_installs(guilds=True, users=True)
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    async def run_as_prompt_context_menu(interaction: discord.Interaction, message: discord.Message):
+        if is_user_banned(interaction.user.id):
+            ban_view = BannedUserNoticeView(author=interaction.user)
+            await interaction.response.send_message(view=ban_view, ephemeral=True)
+            return
+
+        extracted_text = extract_text_from_v2_message(message)
+        clean_prompt = re.sub(rf'<@!?{interaction.client.user.id}>', '', extracted_text).strip()
+        
+        attachment_parts, raw_image_bytes = await extract_message_attachments_raw(message)
+        if not clean_prompt and not attachment_parts:
+            await interaction.response.send_message(content="❌ The selected message contains no readable text or media prompt.", ephemeral=True)
+            return
+
+        if not clean_prompt:
+            clean_prompt = "Analyze the attached content."
+
+        is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(clean_prompt, raw_image_bytes)
+        if is_flagged:
+            log_moderation_violation(interaction.user.id, interaction.guild_id, flagged_cats, score)
+            if is_zero_tolerance:
+                ban_user(interaction.user.id, reason=f"Zero-tolerance violation: {', '.join(flagged_cats)}")
+                ban_view = BannedUserNoticeView(author=interaction.user)
+                await interaction.response.send_message(view=ban_view, ephemeral=True)
+                return
+
+            refusal_text = await generate_friendly_refusal(flagged_cats)
+            await interaction.response.send_message(content=refusal_text, ephemeral=True)
+            return
+
+        try:
+            await interaction.response.defer(ephemeral=False)
+            await interaction.delete_original_response()
+        except Exception:
+            pass
+
+        multimodal_prompt: list[Any] = []
+        if attachment_parts:
+            multimodal_prompt.extend(attachment_parts)
+        multimodal_prompt.append(clean_prompt)
+
+        tool_context = ToolExecutionContext(
+            channel=interaction.channel,
+            guild=interaction.guild,
+            author=interaction.user,
+            bot=interaction.client,
+            input_image_bytes=raw_image_bytes[0] if raw_image_bytes else None
+        )
+        tool_context.message = message
+
+        stream_dispatcher = DiscordStreamDispatcher(origin_message=message, guild=interaction.guild)
+        artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
+
+        accumulated_thoughts = []
+        tool_call_history = []
+        active_tool_start_times = {}
+        active_model_used = "gemma-4-31b-it"
+
+        start_time = time.time()
+
+        try:
+            async with message.channel.typing():
+                async for event_type, payload in ChatEngine.stream_chat(
+                    prompt=multimodal_prompt,
+                    context_xml="<context></context>",
+                    bot_user_id=interaction.client.user.id,
+                    tool_context=tool_context
+                ):
+                    if event_type == "ACTIVE_MODEL":
+                        active_model_used = str(payload)
+
+                    elif event_type == "RECALLED_MEMORIES":
+                        count = payload.get("count", 0)
+                        tool_call_history.insert(0, {
+                            "name": "recall_memories",
+                            "args": {"count": count},
+                            "result": payload,
+                            "duration_ms": 0,
+                            "order": -1.0
+                        })
+
+                    elif event_type == "THOUGHT":
+                        accumulated_thoughts.append(payload)
+
+                    elif event_type == "TOOL_START":
+                        tool_name = payload.get("name", "Tool")
+                        args = payload.get("args", {})
+                        active_tool_start_times[tool_name] = time.perf_counter()
+                        if tool_name in ["create_artifact", "update_artifact"]:
+                            stream_dispatcher.add_artifact_placeholder(tool_name, args)
+
+                    elif event_type == "TOOL_END":
+                        tool_name = payload.get("name", "Tool")
+                        st = active_tool_start_times.pop(tool_name, time.perf_counter())
+                        dur_ms = int((time.perf_counter() - st) * 1000)
+                        tool_call_history.append({
+                            "name": tool_name,
+                            "args": payload.get("args", {}),
+                            "result": payload.get("result", {}),
+                            "duration_ms": dur_ms
+                        })
+
+                        if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
+                            last_art = tool_context.staged_artifacts[-1]
+                            stream_dispatcher.update_artifact_ready(last_art)
+                            art_bytes = last_art.get("data_bytes", b"")
+                            art_fname = last_art.get("filename", "artifact.zip")
+                            if art_bytes:
+                                stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
+
+                        elif tool_name in ["search_image", "search_gif", "generate_image", "edit_image", "execute_code"] and tool_context.staged_image_bytes:
+                            img_fname = tool_context.staged_image_filename
+                            img_bytes = tool_context.staged_image_bytes
+                            stream_dispatcher.add_media_block(img_fname, img_bytes)
+                            tool_context.staged_image_bytes = None
+
+                        elif tool_name in ["github_repo", "fetch_github"] and hasattr(tool_context, "staged_github_files"):
+                            for g_file in tool_context.staged_github_files:
+                                stream_dispatcher.add_raw_attachment(g_file["filename"], g_file["bytes"])
+
+                    elif event_type == "CONTENT":
+                        await artifact_parser.feed(payload)
+
+            await artifact_parser.finish()
+
+            final_duration = max(1, int(time.time() - start_time))
+            active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
+            has_reasoning = bool(accumulated_thoughts or active_tools)
+
+            modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
+
+            for raw_att in stream_dispatcher.raw_attachment_buffers:
+                pass
+
+            for art in tool_context.staged_artifacts:
+                art_bytes = art.get("data_bytes", b"")
+                art_fname = art.get("filename", "artifact.zip")
+                if art_bytes:
+                    stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
+
+            await stream_dispatcher.finalize(
+                staged_artifacts=tool_context.staged_artifacts,
+                staged_components=tool_context.staged_components,
+                staged_followups=stream_dispatcher.staged_followups,
+                modals_map=modals_map,
+                thought_duration=final_duration,
+                has_thoughts=has_reasoning,
+                active_version=1,
+                total_versions=1
+            )
+
+        except Exception as e:
+            logger.exception(f"Run as Prompt error: {e}")
 
     @tree.context_menu(name="Branch")
     @app_commands.allowed_installs(guilds=True, users=True)
@@ -183,8 +397,8 @@ def setup_context_menus(tree: app_commands.CommandTree):
                     "version_idx": 1,
                     "content": apply_message_parsers(extracted_bot_text, message.guild),
                     "timeline_blocks": [{"type": "text", "content": extracted_bot_text}],
-                    "duration_seconds": 0,
-                    "has_thoughts": False,
+                    "duration_seconds": 1,
+                    "has_thoughts": True,
                     "thoughts": "",
                     "formatted_thoughts": None,
                     "model": "gemma-4-31b-it",
@@ -231,13 +445,17 @@ def setup_context_menus(tree: app_commands.CommandTree):
                 asyncio.create_task(cleanup_sibling_messages(message.channel, sibling_ids))
 
         new_version_idx = len(existing_versions) + 1
+        prompt = gen_record.get("prompt_text", "")
+        context_xml = gen_record.get("context_xml", "<context></context>")
+
+        retry_statuses = await generate_retry_witty_statuses(prompt, new_version_idx)
 
         in_progress_v_data = {
             "version_idx": new_version_idx,
-            "content": f"{LOADING_EMOJI} *Generating version {new_version_idx}...*",
+            "content": f"{LOADING_EMOJI} *{retry_statuses[0]}...*",
             "timeline_blocks": [],
-            "duration_seconds": 0,
-            "has_thoughts": False,
+            "duration_seconds": 1,
+            "has_thoughts": True,
             "thoughts": "",
             "formatted_thoughts": None,
             "tool_calls": [],
@@ -252,26 +470,12 @@ def setup_context_menus(tree: app_commands.CommandTree):
         branch_manager.add_retry_version(root_msg_id, in_progress_v_data)
         branch_manager.set_active_version(root_msg_id, new_version_idx)
 
-        in_place_view = build_retry_placeholder_layout(
-            status_text=f"Generating version {new_version_idx}",
-            target_version=new_version_idx,
-            total_versions=new_version_idx,
-            message_id=root_msg_id
-        )
-        try:
-            await root_msg.edit(view=in_place_view)
-        except Exception as ex:
-            logger.warning(f"Failed to set initial retry in-place view: {ex}")
-
         tool_context = ToolExecutionContext(
             channel=message.channel,
             guild=message.guild,
             author=interaction.user,
             bot=interaction.client
         )
-
-        prompt = gen_record.get("prompt_text", "")
-        context_xml = gen_record.get("context_xml", "<context></context>")
 
         accumulated_thoughts = []
         tool_call_history = []
@@ -287,16 +491,47 @@ def setup_context_menus(tree: app_commands.CommandTree):
         artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
 
         start_t = time.time()
+        stop_placeholder_loop = asyncio.Event()
+        answer_now_event = asyncio.Event()
+        first_content_received = False
+        active_tool_subtext = None
+
+        def get_current_msg():
+            return root_msg
+
+        def get_active_subtext():
+            return active_tool_subtext
+
+        placeholder_view = PlaceholderLayoutView(
+            loading_text=format_placeholder_content(retry_statuses[0], active_tool_subtext),
+            duration_seconds=1,
+            is_enabled=True,
+            thought_data={"thoughts": "", "tool_calls": [], "model": active_model_used},
+            model_name=active_model_used
+        )
+
+        try:
+            await root_msg.edit(view=placeholder_view)
+        except Exception as ex:
+            logger.warning(f"Failed to set initial retry placeholder view: {ex}")
+
+        placeholder_task = asyncio.create_task(
+            update_placeholder_loop(
+                get_current_msg, placeholder_view, retry_statuses, get_active_subtext, start_t, stop_placeholder_loop
+            )
+        )
 
         try:
             async for event_type, payload in ChatEngine.stream_chat(
                 prompt=prompt,
                 context_xml=context_xml,
                 bot_user_id=interaction.client.user.id,
-                tool_context=tool_context
+                tool_context=tool_context,
+                answer_now_event=answer_now_event
             ):
                 if event_type == "ACTIVE_MODEL":
                     active_model_used = str(payload)
+                    placeholder_view.model_name = active_model_used
 
                 elif event_type == "RECALLED_MEMORIES":
                     count = payload.get("count", 0)
@@ -307,14 +542,18 @@ def setup_context_menus(tree: app_commands.CommandTree):
                         "duration_ms": 0,
                         "order": -1.0
                     })
+                    placeholder_view.thought_data["tool_calls"] = tool_call_history
 
                 elif event_type == "THOUGHT":
                     accumulated_thoughts.append(payload)
+                    placeholder_view.enable_thinking()
+                    placeholder_view.thought_data["thoughts"] = "".join(accumulated_thoughts)
 
                 elif event_type == "TOOL_START":
                     tool_name = payload.get("name", "Tool")
                     args = payload.get("args", {})
                     active_tool_start_times[tool_name] = time.perf_counter()
+                    active_tool_subtext = get_tool_subtext(tool_name, args)
                     if tool_name in ["create_artifact", "update_artifact"]:
                         stream_dispatcher.add_artifact_placeholder(tool_name, args)
 
@@ -323,7 +562,9 @@ def setup_context_menus(tree: app_commands.CommandTree):
                     st = active_tool_start_times.pop(tool_name, time.perf_counter())
                     dur_ms = int((time.perf_counter() - st) * 1000)
                     tool_call_history.append({"name": tool_name, "args": payload.get("args", {}), "result": payload.get("result", {}), "duration_ms": dur_ms})
-                    
+                    active_tool_subtext = None
+                    placeholder_view.thought_data["tool_calls"] = tool_call_history
+
                     if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
                         last_art = tool_context.staged_artifacts[-1]
                         stream_dispatcher.update_artifact_ready(last_art)
@@ -332,7 +573,7 @@ def setup_context_menus(tree: app_commands.CommandTree):
                         if art_bytes:
                             stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
 
-                    elif tool_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
+                    elif tool_name in ["search_image", "search_gif", "generate_image", "edit_image", "execute_code"] and tool_context.staged_image_bytes:
                         img_fname = tool_context.staged_image_filename
                         img_bytes = tool_context.staged_image_bytes
                         stream_dispatcher.add_media_block(img_fname, img_bytes)
@@ -343,12 +584,22 @@ def setup_context_menus(tree: app_commands.CommandTree):
                             stream_dispatcher.add_raw_attachment(g_file["filename"], g_file["bytes"])
 
                 elif event_type == "CONTENT":
+                    if not first_content_received:
+                        first_content_received = True
+                        stop_placeholder_loop.set()
+                        if placeholder_task and not placeholder_task.done():
+                            placeholder_task.cancel()
+
                     await artifact_parser.feed(payload)
 
             await artifact_parser.finish()
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
 
             dur_sec = max(1, int(time.time() - start_t))
-            has_thoughts = bool(accumulated_thoughts or tool_call_history)
+            active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
+            has_thoughts = bool(accumulated_thoughts or active_tools)
             final_content = stream_dispatcher.get_accumulated_text()
             parsed_final_content = apply_message_parsers(final_content, interaction.guild)
 
@@ -414,6 +665,9 @@ def setup_context_menus(tree: app_commands.CommandTree):
             )
 
         except Exception as e:
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
             logger.exception(f"Retry error: {e}")
             await interaction.followup.send(content=f"⚠️ Retry generation failed: `{e}`", ephemeral=True)
 
@@ -436,7 +690,7 @@ def setup_context_menus(tree: app_commands.CommandTree):
 
         prompt_txt = gen_record.get("prompt_text", "*Empty prompt*")
         author_id = gen_record.get("author_id", "0")
-        dur = v_data.get("duration_seconds", 0)
+        dur = max(1, v_data.get("duration_seconds", 1))
 
         card_text = (
             f"### Prompt Inspector (Version {active_idx}/{len(versions)})\n"

@@ -146,7 +146,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                         if art_bytes:
                             stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
 
-                    elif t_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
+                    elif t_name in ["search_image", "search_gif", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
                         img_fname = tool_context.staged_image_filename
                         img_bytes = tool_context.staged_image_bytes
                         stream_dispatcher.add_media_block(img_fname, img_bytes)

@@ -86,7 +86,12 @@ class ServerIdentityDashboardView(LayoutView):
         )
         container.add_item(header_section)
 
-        container.add_item(MediaGallery(discord.MediaGalleryItem(avatar_url)))
+        gallery_items = [discord.MediaGalleryItem(avatar_url)]
+        banner_attr = getattr(member, "banner", None)
+        if banner_attr and hasattr(banner_attr, "url") and banner_attr.url:
+            gallery_items.append(discord.MediaGalleryItem(banner_attr.url))
+
+        container.add_item(MediaGallery(*gallery_items))
 
         info_text = (
             f"**Display Nickname:** `{nick}`\n"
@@ -97,13 +102,13 @@ class ServerIdentityDashboardView(LayoutView):
         edit_bio_btn = Button(label="Edit Name & Bio", style=discord.ButtonStyle.primary, custom_id="btn_cfg_edit_identity")
         edit_bio_btn.callback = self._on_edit_bio_clicked
 
-        avatar_btn = Button(label="Upload Avatar", style=discord.ButtonStyle.secondary, custom_id="btn_cfg_upload_avatar")
-        avatar_btn.callback = self._on_upload_avatar_clicked
+        avatar_banner_btn = Button(label="Upload Avatar & Banner", style=discord.ButtonStyle.secondary, custom_id="btn_cfg_upload_avatar_banner")
+        avatar_banner_btn.callback = self._on_upload_avatar_banner_clicked
 
         reset_btn = Button(label="Reset to Default ↺", style=discord.ButtonStyle.danger, custom_id="btn_cfg_reset_identity")
         reset_btn.callback = self._on_reset_identity_clicked
 
-        container.add_item(ActionRow(edit_bio_btn, avatar_btn, reset_btn))
+        container.add_item(ActionRow(edit_bio_btn, avatar_banner_btn, reset_btn))
         self.add_item(container)
 
     async def _on_edit_bio_clicked(self, interaction: discord.Interaction):
@@ -156,39 +161,82 @@ class ServerIdentityDashboardView(LayoutView):
         )
         await interaction.response.send_modal(modal)
 
-    async def _on_upload_avatar_clicked(self, interaction: discord.Interaction):
+    async def _on_upload_avatar_banner_clicked(self, interaction: discord.Interaction):
         fields = [
             {
                 "type": "file_upload",
                 "custom_id": "avatar_file",
                 "label": "Server Avatar Image",
                 "description": "Upload a PNG or JPG to set as PriestyAI's server profile picture",
-                "required": True,
+                "required": False,
+                "max_values": 1
+            },
+            {
+                "type": "file_upload",
+                "custom_id": "banner_file",
+                "label": "Server Banner Image",
+                "description": "Upload a PNG or JPG to set as PriestyAI's server profile banner",
+                "required": False,
                 "max_values": 1
             }
         ]
 
         async def on_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
-            files = data.get("avatar_file", [])
-            if files and isinstance(files, list):
-                f_obj = files[0]
-                url = f_obj.get("url") if isinstance(f_obj, dict) else None
-                if url:
-                    try:
-                        async with aiohttp.ClientSession() as session:
+            avatar_files = data.get("avatar_file", [])
+            banner_files = data.get("banner_file", [])
+
+            avatar_bytes = None
+            banner_bytes = None
+
+            async with aiohttp.ClientSession() as session:
+                if avatar_files and isinstance(avatar_files, list):
+                    f_obj = avatar_files[0]
+                    url = f_obj.get("url") if isinstance(f_obj, dict) else None
+                    if url:
+                        try:
                             async with session.get(url) as resp:
                                 if resp.status == 200:
-                                    img_bytes = await resp.read()
-                                    await self.guild.me.edit(avatar=img_bytes)
-                    except Exception as e:
-                        logger.warning(f"Failed to update guild avatar: {e}")
+                                    avatar_bytes = await resp.read()
+                        except Exception as e:
+                            logger.warning(f"Failed to download avatar image: {e}")
+
+                if banner_files and isinstance(banner_files, list):
+                    b_obj = banner_files[0]
+                    b_url = b_obj.get("url") if isinstance(b_obj, dict) else None
+                    if b_url:
+                        try:
+                            async with session.get(b_url) as resp:
+                                if resp.status == 200:
+                                    banner_bytes = await resp.read()
+                        except Exception as e:
+                            logger.warning(f"Failed to download banner image: {e}")
+
+            edit_kwargs = {}
+            if avatar_bytes is not None:
+                edit_kwargs["avatar"] = avatar_bytes
+            if banner_bytes is not None:
+                edit_kwargs["banner"] = banner_bytes
+
+            if edit_kwargs:
+                try:
+                    await self.guild.me.edit(**edit_kwargs)
+                except TypeError:
+                    if "avatar" in edit_kwargs:
+                        try:
+                            await self.guild.me.edit(avatar=edit_kwargs["avatar"])
+                        except Exception as e:
+                            logger.warning(f"Failed to update guild avatar: {e}")
+                    if "banner" in edit_kwargs:
+                        logger.warning("Guild member banner editing is not supported on this library build.")
+                except Exception as e:
+                    logger.warning(f"Failed to update guild avatar/banner: {e}")
 
             self._build_dashboard()
             await sub_inter.response.edit_message(view=self)
 
         modal = DynamicModalV2(
-            title="Upload Server Avatar",
-            custom_id="modal_avatar_upload",
+            title="Upload Server Avatar & Banner",
+            custom_id="modal_avatar_banner_upload",
             fields_schema=fields,
             on_submit_callback=on_submit
         )
@@ -197,6 +245,11 @@ class ServerIdentityDashboardView(LayoutView):
     async def _on_reset_identity_clicked(self, interaction: discord.Interaction):
         try:
             await self.guild.me.edit(nick=None, avatar=None)
+        except Exception:
+            pass
+
+        try:
+            await self.guild.me.edit(banner=None)
         except Exception:
             pass
 
@@ -241,7 +294,8 @@ SETTING_HELP_TEXTS = {
         "• **Server Nickname:** Overrides the bot's display name inside this guild.\n"
         "• **Server Bio:** Sets a custom description of what PriestyAI does in this server (max 400 chars).\n"
         "• **Server Avatar:** Uploads an avatar image specific to this guild without altering the global bot avatar.\n"
-        "• **Reset:** Restores the bot's default global name, avatar, and bio."
+        "• **Server Banner:** Uploads a banner image specific to this guild's profile.\n"
+        "• **Reset:** Restores the bot's default global name, avatar, banner, and bio."
     ),
     "system_prompt": (
         "### System Prompt\n"
@@ -338,7 +392,7 @@ class ConfigHelpView(LayoutView):
         select_options = [
             discord.SelectOption(label="System Prompt", value="system_prompt", description="Custom instructions, behavior rules, and persona overrides"),
             discord.SelectOption(label="AI Channels", value="ai_channels", description="Designate channels for automatic AI conversation without mentions"),
-            discord.SelectOption(label="Server Identity", value="server_identity", description="Server nickname, bio, and custom guild avatar"),
+            discord.SelectOption(label="Server Identity", value="server_identity", description="Server nickname, bio, avatar, and server banner"),
             discord.SelectOption(label="Memory", value="memory", description="Personal facts memory and shared server lore policies"),
             discord.SelectOption(label="Permissions", value="permissions", description="Access control, blacklists, whitelists, and bypass roles"),
             discord.SelectOption(label="User Persona", value="user_persona", description="Preferred name, coding background, and response preferences"),

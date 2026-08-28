@@ -82,7 +82,7 @@ def build_agent_create_modal(default_user_id: int | str, on_submit: Callable) ->
             "label": "Context Files",
             "description": "Upload specs, datasets, or reference files",
             "required": False,
-            "max_values": 5
+            "max_values": 10
         }
     ]
 
@@ -100,7 +100,7 @@ def build_agent_new_task_modal(session_id: str, on_submit: Callable) -> DynamicM
             "content": (
                 f"# {OCTICONS_MAP['oct_checklist']} Start Next Agent Task\n"
                 "Plan and execute another research or engineering task inside the current workspace.\n\n"
-                "-# 💡 Existing workspace files, git history, and container environment are preserved."
+                "-# 💡 Existing workspace files, git history, and prior research whitepapers are preserved."
             )
         },
         {
@@ -147,18 +147,30 @@ def build_agent_header_layout(status_message: str, duration_seconds: int = 1, se
         style=discord.ButtonStyle.secondary,
         custom_id=f"gen_thought_agent_{session_id}"
     )
+
+    stop_btn = Button(
+        label="Stop Agent",
+        style=discord.ButtonStyle.danger,
+        custom_id=f"agent_stop_{session_id}"
+    )
+
     view.add_item(text_item)
-    view.add_item(ActionRow(thought_btn))
+    view.add_item(ActionRow(thought_btn, stop_btn))
     return view
 
-def build_agent_completed_header_layout(duration_seconds: int, session_id: str, phase: str = "planning") -> LayoutView:
+def build_agent_completed_header_layout(duration_seconds: int, session_id: str, phase: str = "planning", was_stopped: bool = False) -> LayoutView:
     view = LayoutView(timeout=900)
     time_str = f"{max(1, duration_seconds)}s"
 
-    if phase == "execution":
-        text_content = f"{OCTICONS_MAP['oct_check']} Worked for `{time_str}`"
+    if was_stopped:
+        status_badge = "(Stopped)"
     else:
-        text_content = f"{OCTICONS_MAP['oct_checklist']} Planned for `{time_str}`"
+        status_badge = ""
+
+    if phase == "execution":
+        text_content = f"{OCTICONS_MAP['oct_check']} Worked for `{time_str}` {status_badge}".strip()
+    else:
+        text_content = f"{OCTICONS_MAP['oct_checklist']} Planned for `{time_str}` {status_badge}".strip()
 
     view_btn = Button(
         label="View ↗",
@@ -196,7 +208,7 @@ def format_agent_step_summary(tool_name: str, args: dict[str, Any], additions: i
         return f"{OCTICONS_MAP['oct_link']} Read link **`{u}`**"
     elif tool_name == "agent_search_discord_history":
         q = args.get("query", "")[:35]
-        return f"{OCTICONS_MAP['oct_search']} Searched Discord history **\"{q}\"**"
+        return f'{OCTICONS_MAP["oct_search"]} Searched Discord history **"{q}"**'
     elif tool_name == "clone_repo":
         repo = args.get("repo", "repository")
         return f"{OCTICONS_MAP['oct_repo']} Cloned repository **`{repo}`**"
@@ -614,8 +626,8 @@ class AgentFinalDeliverableView(LayoutView):
 
         self.add_item(Separator(visible=True))
         completion_text = (
-            f"{OCTICONS_MAP['oct_check']} **Agent Execution Completed!** Deliverables are saved in workspace.\n"
-            f"-# This thread is now open for normal collaborative chat."
+            f"{OCTICONS_MAP['oct_check']} **Agent Task Completed!** Deliverables are saved in workspace.\n"
+            f"-# Click **New Task** to assign another task in this workspace, or continue chatting."
         )
         self.add_item(TextDisplay(completion_text))
 

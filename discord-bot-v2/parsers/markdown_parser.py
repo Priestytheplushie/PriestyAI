@@ -12,11 +12,11 @@ DFM_EMOJI_MAP = {
 }
 
 ALERT_METADATA = {
-    "NOTE": {"emoji": DFM_EMOJI_MAP["gfm_note"], "title": "Note"},
-    "TIP": {"emoji": DFM_EMOJI_MAP["gfm_tip"], "title": "Tip"},
-    "IMPORTANT": {"emoji": DFM_EMOJI_MAP["gfm_important"], "title": "Important"},
-    "WARNING": {"emoji": DFM_EMOJI_MAP["gfm_warning"], "title": "Warning"},
-    "CAUTION": {"emoji": DFM_EMOJI_MAP["gfm_caution"], "title": "Caution"},
+    "NOTE": {"emoji": DFM_EMOJI_MAP["gfm_note"], "title": "Note", "color": 0x1f6feb},
+    "TIP": {"emoji": DFM_EMOJI_MAP["gfm_tip"], "title": "Tip", "color": 0x238636},
+    "IMPORTANT": {"emoji": DFM_EMOJI_MAP["gfm_important"], "title": "Important", "color": 0x8957e5},
+    "WARNING": {"emoji": DFM_EMOJI_MAP["gfm_warning"], "title": "Warning", "color": 0xd29922},
+    "CAUTION": {"emoji": DFM_EMOJI_MAP["gfm_caution"], "title": "Caution", "color": 0xda3633},
 }
 
 ALERT_REGEX = r'^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*\n((?:^>[^\n]*\n?)*)'
@@ -146,7 +146,7 @@ def parse_alerts_inline(text: str) -> str:
     def replace_alert(match):
         alert_type = match.group(1).upper()
         raw_body = match.group(2)
-        meta = ALERT_METADATA.get(alert_type, {"emoji": DFM_EMOJI_MAP["gfm_note"], "title": alert_type.title()})
+        meta = ALERT_METADATA.get(alert_type, {"emoji": DFM_EMOJI_MAP["gfm_note"], "title": alert_type.title(), "color": 0x1f6feb})
         emoji = meta["emoji"]
         title = meta["title"]
 
@@ -179,12 +179,13 @@ def parse_dfm_structures_to_blocks(text: str) -> list[dict[str, Any]]:
         body_lines = [re.sub(r'^>\s?', '', line) for line in raw_body.splitlines()]
         body_content = "\n".join(body_lines).strip()
 
-        meta = ALERT_METADATA.get(alert_type, {"emoji": "💡", "title": alert_type.title()})
+        meta = ALERT_METADATA.get(alert_type, {"emoji": "💡", "title": alert_type.title(), "color": 0x1f6feb})
         blocks.append({
             "type": "alert",
             "alert_type": alert_type,
             "emoji": meta["emoji"],
             "title": meta["title"],
+            "color": meta.get("color", 0x1f6feb),
             "content": body_content
         })
 

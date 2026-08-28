@@ -30,7 +30,11 @@ from core.moderation import (
     is_user_banned,
     ban_user
 )
-from handlers.stream_handler import DiscordStreamDispatcher, apply_message_parsers
+from handlers.stream_handler import (
+    DiscordStreamDispatcher,
+    apply_message_parsers,
+    build_v2_message_layout
+)
 from tools.registry import ToolExecutionContext
 from ui.thought_container import PlaceholderLayoutView
 from ui.onboarding_views import WelcomeOnboardingCardView, BannedUserNoticeView
@@ -75,7 +79,7 @@ async def extract_message_attachments_raw(message: discord.Message) -> tuple[lis
 
             try:
                 async with session.get(attachment.url) as resp:
-                    if resp.status_code == 200:
+                    if resp.status == 200:
                         raw_data = await resp.read()
                         part = types.Part.from_bytes(data=raw_data, mime_type=mime_type)
                         parts.append(part)
@@ -137,12 +141,18 @@ def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
     elif tool_name == "search_image":
         q = args.get("query", "")[:30]
         return f"Finding image for '{q}'..."
+    elif tool_name == "search_gif":
+        q = args.get("query", "")[:30]
+        return f"Finding GIF for '{q}'..."
+    elif tool_name == "edit_image":
+        p = args.get("prompt", "")[:30]
+        return f"Editing image('{p}')..."
     elif tool_name == "create_poll":
         return "Creating Discord poll..."
     elif tool_name == "calc":
         return "Computing math..."
     elif tool_name == "generate_image":
-        return "Rendering artwork..."
+        return "Rendering artwork with local diffusion..."
     elif tool_name == "ask_expert":
         return "Consulting deep reasoning expert..."
     elif tool_name == "add_component":
@@ -297,6 +307,50 @@ class ChatHandler:
         channel = interaction.channel
         guild = interaction.guild
         origin_msg = interaction.message
+
+        selected_idx = None
+        if interaction.data and "custom_id" in interaction.data:
+            c_id = interaction.data["custom_id"]
+            if c_id.startswith("fup:"):
+                parts = c_id.split(":")
+                if len(parts) >= 3 and parts[2].isdigit():
+                    selected_idx = int(parts[2])
+
+        if origin_msg:
+            try:
+                gen = branch_manager.get_generation(origin_msg.id)
+                if gen:
+                    active_v = gen.get("active_version", 1)
+                    versions = gen.get("versions", [])
+                    if 1 <= active_v <= len(versions):
+                        v_data = versions[active_v - 1]
+                        staged_fups = v_data.get("staged_followups", [])
+                        if staged_fups:
+                            for idx, fup in enumerate(staged_fups):
+                                fup["disabled"] = True
+                                if (selected_idx is not None and idx == selected_idx) or (fup.get("prompt") == prompt_text):
+                                    fup["selected"] = True
+                                else:
+                                    fup["selected"] = False
+
+                            branch_manager.update_version_data(origin_msg.id, active_v, v_data)
+
+                            updated_view = build_v2_message_layout(
+                                guild=guild,
+                                timeline_blocks=v_data.get("timeline_blocks"),
+                                staged_components=v_data.get("staged_components"),
+                                staged_artifacts=v_data.get("staged_artifacts"),
+                                staged_followups=staged_fups,
+                                modals_map={m["modal_id"]: m for m in v_data.get("staged_modals", [])},
+                                thought_duration=v_data.get("duration_seconds", 0),
+                                has_thoughts=v_data.get("has_thoughts", False),
+                                active_version=active_v,
+                                total_versions=len(versions),
+                                message_id=origin_msg.id
+                            )
+                            await origin_msg.edit(view=updated_view)
+            except Exception as e:
+                logger.debug(f"Failed to update followup buttons on origin message: {e}")
 
         if is_user_banned(user.id):
             ban_view = BannedUserNoticeView(author=user)
@@ -479,7 +533,7 @@ class ChatHandler:
                         })
                         active_tool_subtext = None
 
-                        if tool_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
+                        if tool_name in ["search_image", "search_gif", "generate_image", "edit_image", "execute_code"] and tool_context.staged_image_bytes:
                             img_fname = tool_context.staged_image_filename
                             img_bytes = tool_context.staged_image_bytes
                             stream_dispatcher.add_media_block(img_fname, img_bytes)
@@ -704,7 +758,8 @@ class ChatHandler:
             channel=message.channel,
             guild=message.guild,
             author=message.author,
-            bot=bot
+            bot=bot,
+            input_image_bytes=raw_image_bytes[0] if raw_image_bytes else None
         )
         tool_context.message = message
 
@@ -854,7 +909,7 @@ class ChatHandler:
                         })
                         active_tool_subtext = None
 
-                        if tool_name in ["search_image", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
+                        if tool_name in ["search_image", "search_gif", "generate_image", "edit_image", "execute_code"] and tool_context.staged_image_bytes:
                             img_fname = tool_context.staged_image_filename
                             img_bytes = tool_context.staged_image_bytes
                             stream_dispatcher.add_media_block(img_fname, img_bytes)

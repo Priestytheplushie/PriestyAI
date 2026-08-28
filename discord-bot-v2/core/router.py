@@ -15,7 +15,7 @@ logger = logging.getLogger("PriestyAI.Router")
 
 class RouteDecision(BaseModel):
     target_model: str = Field(
-        description="Chosen model: 'gemma-4-31b-it' (Dense Coding/Math), 'gemma-4-26b-a4b-it' (Fast MoE General), 'gemini-3.5-flash-lite' (Instant Utility), or 'gemini-3.7-flash' (Flagship Deep Analysis)"
+        description="Chosen model: 'gemini-3.5-flash-lite' (Instant Utility / Image / Video / Edits), 'gemma-4-26b-a4b-it' (Fast MoE General), 'gemma-4-31b-it' (Dense Coding/Math), or 'gemini-3.7-flash' (Flagship Deep Analysis)"
     )
     thinking_level: str = Field(
         description="Reasoning level: 'MINIMAL', 'LOW', 'MEDIUM', or 'HIGH'"
@@ -32,11 +32,13 @@ Analyze the user's message, attached media, and context to select the most optim
 
 ROUTING HIERARCHY & COMPLEXITY PRINCIPLES:
 
-1. INSTANT / UTILITY / VISUAL ROUTE -> target_model: "gemini-3.5-flash-lite" | thinking_level: "MINIMAL" or "LOW"
-   - Image lookups, picture searches, and visual requests ("show me a picture of...", "what does X look like?").
-   - Direct image generation requests ("draw me a...", "generate an artwork of...").
+1. INSTANT / UTILITY / VISUAL & MEDIA ROUTE -> target_model: "gemini-3.5-flash-lite" | thinking_level: "MINIMAL" (or "LOW")
+   - Image Editing & Stylizing ("edit this image", "turn this into a sketch", "make this 3D", "anime-fy this", "apply watercolor style").
+   - Video & Animation Creation ("animate this", "make a video of...", "create a gif of...", "animate this thinking animation").
+   - Image Generation ("draw me a...", "generate an artwork of...", "paint a picture of...").
+   - Real-World Image Lookups ("show me a picture of...", "what does X look like?").
    - Short conversational banter, greetings, simple trivia, translations, or quick utility questions.
-   - Goal: Instant execution without latency or wasting API tokens on unnecessary deep reasoning.
+   - CRITICAL DIRECTIVE: For all visual tools (edit_image, create_video, generate_image, search_image), you MUST select "gemini-3.5-flash-lite" with "MINIMAL" thinking so the tool executes immediately without spending 15+ seconds overthinking.
 
 2. FAST WORKHORSE ROUTE (MoE) -> target_model: "gemma-4-26b-a4b-it" | thinking_level: "MEDIUM" or "HIGH"
    - Standard conversational reasoning, long document explanations, science/general knowledge, short scripting, and fast agentic queries.
@@ -50,6 +52,7 @@ ROUTING HIERARCHY & COMPLEXITY PRINCIPLES:
 
 4. FLAGSHIP SPECIALIST ROUTE -> target_model: "gemini-3.7-flash" | thinking_level: "HIGH"
    - Complex full-scale multi-file software projects, deep architectural system design, heavy video/audio analysis, or advanced escalated verification.
+   - NEVER route simple image generation, image editing, or animation prompts to 3.7-flash.
 
 Witty Statuses:
 Generate exactly 5 to 7 dynamic, humorous, query-specific 3-5 word phrases relevant to the topic.
@@ -60,6 +63,13 @@ class Router:
     async def route(user_prompt: str, context_summary: str = "", has_media: bool = False) -> RouteDecision:
         media_context = f"\n[MEDIA ATTACHMENTS PRESENT: {has_media}]" if has_media else ""
         payload = f"Context:\n{context_summary}{media_context}\n\nUser Query:\n{user_prompt}"
+
+        prompt_lower = user_prompt.lower()
+        is_visual_tool_intent = any(kw in prompt_lower for kw in [
+            "animate", "animation", "make a gif", "create video", "make video",
+            "edit image", "turn this into", "sketch", "draw", "generate image",
+            "make this 3d", "anime-fy", "pixel art", "show me a picture", "find an image"
+        ])
 
         for router_model in [ROUTER_PRIMARY, ROUTER_FALLBACK]:
             client, key_idx, active_model = client_manager.get_client_for_model(router_model)
@@ -87,6 +97,11 @@ class Router:
                     decision_data = json.loads(response.text)
                     decision = RouteDecision(**decision_data)
                     
+                    if is_visual_tool_intent and decision.target_model in ["gemini-3.7-flash", "gemini-3.6-flash"]:
+                        logger.info(f"[Router Override] Visual tool intent detected. Overriding '{decision.target_model}' to 'gemini-3.5-flash-lite' (MINIMAL).")
+                        decision.target_model = "gemini-3.5-flash-lite"
+                        decision.thinking_level = "MINIMAL"
+
                     if has_media and "gemma" in decision.target_model:
                         logger.warning(f"[Router Override] '{decision.target_model}' selected with rich media. Ensuring 'gemini-3.5-flash' fallback for audio/video stability.")
                         decision.target_model = "gemini-3.5-flash"
@@ -102,11 +117,11 @@ class Router:
                 client_manager.report_error(key_idx, active_model, Exception(err_desc))
                 logger.warning(f"Router attempt failed on {active_model} (Key #{key_idx}): {err_desc}")
 
-        fallback_model = "gemini-3.5-flash-lite" if has_media else WORKHORSE_MOE_MODEL
+        fallback_model = "gemini-3.5-flash-lite" if (has_media or is_visual_tool_intent) else WORKHORSE_MOE_MODEL
         logger.warning(f"Router fallback activated: Using safe route '{fallback_model}'.")
         return RouteDecision(
             target_model=fallback_model,
-            thinking_level="MEDIUM" if "gemma" in fallback_model else "MINIMAL",
+            thinking_level="MINIMAL" if is_visual_tool_intent else ("MEDIUM" if "gemma" in fallback_model else "MINIMAL"),
             witty_statuses=[
                 "Herding digital sheep",
                 "Warming up synaptic cores",

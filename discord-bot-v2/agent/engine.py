@@ -4,6 +4,7 @@ import json
 import time
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any
 import discord
 from google.genai import types
@@ -33,6 +34,7 @@ from agent.views import (
 from agent.tools import agent_list_dir
 from core.client_manager import client_manager
 from core.branch_manager import branch_manager
+from core.config_manager import config_manager
 from parsers.artifact_parser import ArtifactStreamParser
 from handlers.stream_handler import DiscordStreamDispatcher
 from tools.registry import tool_registry, ToolExecutionContext
@@ -212,10 +214,14 @@ class AgentEngine:
             "Finalizing research summary and citations"
         ]
 
-        instruction = """Analyze this agent prompt. Classify the task into:
+        now_utc = datetime.now(timezone.utc)
+        current_year_str = str(now_utc.year)
+
+        instruction = f"""Analyze this agent prompt. Real-world year is {current_year_str}.
+Classify the task into:
 - task_type: "research" (deep research, comparisons, market study, report writing), "coding" (software development, bug fixes, refactoring), or "hybrid" (researching libraries/APIs first, then implementing in repo).
 Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSON:
-{"title": "Title Here", "task_type": "coding"|"research"|"hybrid", "statuses": ["status 1", "status 2", ...]}"""
+{{"title": "Title Here", "task_type": "coding"|"research"|"hybrid", "statuses": ["status 1", "status 2", ...]}}"""
 
         attempted_keys = set()
         for attempt in range(client_manager.key_count):
@@ -279,6 +285,18 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         session_id = session["session_id"]
         prompt = feedback or session["initial_prompt"]
 
+        abort_event = session_manager.get_abort_event(session_id)
+        session_manager.clear_abort_event(session_id)
+
+        tasks_history = session.get("tasks_history", [])
+        is_new_task = len(tasks_history) > 0
+
+        if is_new_task:
+            _, _, dynamic_task_type = await cls.bootstrap_thread_meta(prompt)
+            session_manager.update_session(session_id, task_type=dynamic_task_type)
+            session["task_type"] = dynamic_task_type
+            logger.info(f"[AgentPlanning] Multi-Task #{len(tasks_history) + 1} dynamically classified as: '{dynamic_task_type}'")
+
         logger.info(f"[AgentPlanning] Starting planning turn for session #{session_id} in thread {thread.id}...")
 
         tool_context = ToolExecutionContext(
@@ -310,7 +328,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             while not stop_header_loop.is_set():
                 try:
                     await asyncio.sleep(1.0)
-                    if stop_header_loop.is_set():
+                    if stop_header_loop.is_set() or abort_event.is_set():
                         break
                     elapsed = max(1, int(time.time() - t_start))
                     if elapsed % 4 == 0:
@@ -327,7 +345,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         step_counter = 0
 
         repo_url = session.get("repo_url", "").strip()
-        if repo_url:
+        if repo_url and not is_new_task:
             await session_manager.ensure_workspace_cloned(session)
             step_counter += 1
             repo_name = repo_url.split("/")[-1].replace(".git", "")
@@ -355,12 +373,45 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         if extracted_urls:
             priority_links_xml = "\n  <user_priority_sources>\n" + "\n".join([f'    <source url="{u}" priority="CRITICAL_READ_FIRST"/>' for u in extracted_urls]) + "\n  </user_priority_sources>"
 
+        completed_tasks_xml = ""
+        if tasks_history:
+            task_items = []
+            for t_item in tasks_history:
+                dels_str = ", ".join(t_item.get("deliverables", [])) or "None"
+                task_items.append(
+                    f"    <task id=\"{t_item.get('task_num', 1)}\" type=\"{t_item.get('task_type', 'general')}\">\n"
+                    f"      <objective>{t_item.get('objective', '')}</objective>\n"
+                    f"      <summary>{t_item.get('summary', '')}</summary>\n"
+                    f"      <deliverables>{dels_str}</deliverables>\n"
+                    f"    </task>"
+                )
+            completed_tasks_xml = "\n  <completed_tasks>\n" + "\n".join(task_items) + "\n  </completed_tasks>"
+
+        thread_chat_xml = ""
+        try:
+            raw_t_msgs = [m async for m in thread.history(limit=10)]
+            raw_t_msgs.reverse()
+            chat_items = []
+            for tm in raw_t_msgs:
+                if not tm.author.bot and tm.clean_content:
+                    chat_items.append(f"    <chat_message user=\"{tm.author.display_name}\">{tm.clean_content[:300]}</chat_message>")
+            if chat_items:
+                thread_chat_xml = "\n  <thread_discussion>\n" + "\n".join(chat_items) + "\n  </thread_discussion>"
+        except Exception:
+            pass
+
+        now_utc = datetime.now(timezone.utc)
+        current_date_str = now_utc.strftime("%A, %B %d, %Y %H:%M:%S")
+        current_year_str = str(now_utc.year)
+
         initial_context_payload = (
+            f"<temporal_context current_utc=\"{now_utc.isoformat()}\" current_date=\"{current_date_str}\" current_year=\"{current_year_str}\" />\n"
             f"<agent_workspace>\n"
             f"  <objective>{prompt}</objective>\n"
             f"  <task_type>{session.get('task_type', 'general')}</task_type>\n"
+            f"  <task_number>{len(tasks_history) + 1}</task_number>\n"
             f"  <workspace_root>./</workspace_root>\n"
-            f"  <files_indexed total='{len(file_list)}'>\n{file_list_summary}\n  </files_indexed>{priority_links_xml}\n"
+            f"  <files_indexed total='{len(file_list)}'>\n{file_list_summary}\n  </files_indexed>{priority_links_xml}{completed_tasks_xml}{thread_chat_xml}\n"
             f"</agent_workspace>\n\n"
             f"Execute your planning turn. Scope the requirements and draft the plan artifact (`research_plan.md` or `plan.md`). If user URLs are present in <user_priority_sources>, call `agent_read_link` on them FIRST."
         )
@@ -369,9 +420,16 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             types.Content(role="user", parts=[types.Part(text=initial_context_payload)])
         ]
 
+        resolved_cfg = config_manager.resolve_effective_config(
+            thread.guild.id if thread.guild else None,
+            getattr(thread, "parent_id", thread.id),
+            int(session["creator_id"])
+        )
+        disabled_tools_set = set(resolved_cfg.get("disabled_tools", []))
+
         all_tools = set(tool_registry._tools.keys())
         has_repo = bool(session.get("repo_url")) or session.get("task_type") in ["coding", "hybrid"]
-        allowed_tools = set(PLANNING_ALLOWED_TOOLS)
+        allowed_tools = {t for t in PLANNING_ALLOWED_TOOLS if t not in disabled_tools_set}
         if not has_repo:
             allowed_tools.discard("github_repo")
 
@@ -385,8 +443,20 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         candidate_models = ["gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.5-flash-lite", "gemini-3.5-flash"]
         active_model_pinned = None
 
+        formatted_planning_instruction = (
+            AGENT_PLANNING_SYSTEM_INSTRUCTION
+            .replace("{current_date}", current_date_str)
+            .replace("{current_year}", current_year_str)
+        )
+
+        was_aborted = False
+
         try:
             for tool_turn in range(25):
+                if abort_event.is_set():
+                    was_aborted = True
+                    break
+
                 stream_success = False
                 model_parts = []
                 fcalls = []
@@ -395,8 +465,16 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                 models_to_try = [active_model_pinned] if active_model_pinned else candidate_models
 
                 for model_cand in models_to_try:
+                    if abort_event.is_set():
+                        was_aborted = True
+                        break
+
                     attempted_keys = set()
                     while True:
+                        if abort_event.is_set():
+                            was_aborted = True
+                            break
+
                         client, key_idx, active_model = client_manager.get_client_for_model(model_cand, exclude_keys=attempted_keys)
                         if not client or key_idx in attempted_keys:
                             break
@@ -404,7 +482,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                         attempted_keys.add(key_idx)
                         try:
                             config = types.GenerateContentConfig(
-                                system_instruction=AGENT_PLANNING_SYSTEM_INSTRUCTION,
+                                system_instruction=formatted_planning_instruction,
                                 thinking_config=types.ThinkingConfig(thinking_level="HIGH", include_thoughts=True),
                                 tools=tool_declarations,
                                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -421,6 +499,9 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                             fcalls.clear()
 
                             async for chunk in stream:
+                                if abort_event.is_set():
+                                    was_aborted = True
+                                    break
                                 if chunk.candidates and chunk.candidates[0].content:
                                     for p in chunk.candidates[0].content.parts:
                                         model_parts.append(p)
@@ -433,6 +514,9 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                                         elif p.function_call:
                                             fcalls.append(p.function_call)
 
+                            if was_aborted:
+                                break
+
                             stream_success = True
                             active_model_pinned = active_model
                             break
@@ -443,8 +527,11 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                             active_model_pinned = None
                             continue
 
-                    if stream_success:
+                    if stream_success or was_aborted:
                         break
+
+                if was_aborted:
+                    break
 
                 if not stream_success:
                     logger.warning("[AgentPlanning] Rate limit encountered. Silently backing off 4s...")
@@ -459,11 +546,18 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
                 fres_parts = []
                 for fc in fcalls:
+                    if abort_event.is_set():
+                        was_aborted = True
+                        break
+
                     f_name = fc.name
                     f_args = dict(fc.args) if fc.args else {}
 
                     st_time = time.perf_counter()
-                    result = await tool_registry.execute(f_name, f_args, tool_context)
+                    if f_name in disabled_tools_set:
+                        result = {"error": f"Tool '{f_name}' is disabled by server policy."}
+                    else:
+                        result = await tool_registry.execute(f_name, f_args, tool_context)
                     dur_ms = int((time.perf_counter() - st_time) * 1000)
 
                     step_counter += 1
@@ -481,6 +575,9 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
                     fres_parts.append(types.Part(function_response=types.FunctionResponse(name=f_name, response=result)))
 
+                if was_aborted:
+                    break
+
                 turn_contents.append(types.Content(role="user", parts=fres_parts))
 
             await artifact_parser.finish()
@@ -496,11 +593,16 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             final_dur = max(1, int(time.time() - t_start))
             session_manager.save_session_thoughts(session_id, "".join(accumulated_thoughts), active_thought_record["tool_calls"], final_dur)
 
-            completed_header = build_agent_completed_header_layout(final_dur, session_id, phase="planning")
+            completed_header = build_agent_completed_header_layout(final_dur, session_id, phase="planning", was_stopped=was_aborted)
             try:
                 await header_msg.edit(view=completed_header)
             except Exception as ex:
                 logger.warning(f"Failed to update final header: {ex}")
+
+            if was_aborted:
+                session_manager.update_session(session_id, state="stopped")
+                await thread.send(content="🛑 **Agent planning stopped.** All workspace files remain intact.")
+                return
 
             raw_text = stream_dispatcher.get_accumulated_text()
             questions = parse_agent_questions_from_text(raw_text)
@@ -592,6 +694,9 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         session_id = session["session_id"]
         session_manager.update_session(session_id, state="executing")
 
+        abort_event = session_manager.get_abort_event(session_id)
+        session_manager.clear_abort_event(session_id)
+
         tool_context = ToolExecutionContext(
             channel=thread,
             guild=thread.guild,
@@ -627,7 +732,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             while not stop_exec_loop.is_set():
                 try:
                     await asyncio.sleep(1.0)
-                    if stop_exec_loop.is_set():
+                    if stop_exec_loop.is_set() or abort_event.is_set():
                         break
                     elapsed = max(1, int(time.time() - t_exec_start))
                     if elapsed % 4 == 0:
@@ -650,21 +755,49 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                     approved_plan_text = versions[-1].get("content", "") if versions else ""
                     break
 
+        resolved_cfg = config_manager.resolve_effective_config(
+            thread.guild.id if thread.guild else None,
+            getattr(thread, "parent_id", thread.id),
+            int(session["creator_id"])
+        )
+        disabled_tools_set = set(resolved_cfg.get("disabled_tools", []))
+
         all_tools = set(tool_registry._tools.keys())
         has_repo = bool(session.get("repo_url")) or session.get("task_type") in ["coding", "hybrid"]
-        allowed_tools = set(EXECUTION_ALLOWED_TOOLS)
+        allowed_tools = {t for t in EXECUTION_ALLOWED_TOOLS if t not in disabled_tools_set}
         if not has_repo:
             allowed_tools.discard("github_repo")
 
         exec_disabled = list(all_tools - allowed_tools)
         tool_declarations = tool_registry.get_tool_declarations(disabled_tools=exec_disabled)
 
+        now_utc = datetime.now(timezone.utc)
+        current_date_str = now_utc.strftime("%A, %B %d, %Y %H:%M:%S")
+        current_year_str = str(now_utc.year)
+
+        tasks_history = session.get("tasks_history", [])
+        completed_tasks_xml = ""
+        if tasks_history:
+            task_items = []
+            for t_item in tasks_history:
+                dels_str = ", ".join(t_item.get("deliverables", [])) or "None"
+                task_items.append(
+                    f"    <task id=\"{t_item.get('task_num', 1)}\" type=\"{t_item.get('task_type', 'general')}\">\n"
+                    f"      <objective>{t_item.get('objective', '')}</objective>\n"
+                    f"      <summary>{t_item.get('summary', '')}</summary>\n"
+                    f"      <deliverables>{dels_str}</deliverables>\n"
+                    f"    </task>"
+                )
+            completed_tasks_xml = "\n  <completed_tasks>\n" + "\n".join(task_items) + "\n  </completed_tasks>"
+
         exec_prompt = (
+            f"<temporal_context current_utc=\"{now_utc.isoformat()}\" current_date=\"{current_date_str}\" current_year=\"{current_year_str}\" />\n"
             f"<agent_execution_context>\n"
             f"  <objective>{session['initial_prompt']}</objective>\n"
             f"  <task_type>{session.get('task_type', 'general')}</task_type>\n"
+            f"  <task_number>{len(tasks_history) + 1}</task_number>\n"
             f"  <workspace_root>./</workspace_root>\n"
-            f"  <approved_plan>\n{approved_plan_text}\n  </approved_plan>\n"
+            f"  <approved_plan>\n{approved_plan_text}\n  </approved_plan>{completed_tasks_xml}\n"
             f"</agent_execution_context>\n\n"
             f"Begin Phase 2 execution. If this is a research task, execute multi-hop searches and call `agent_read_link` on at least 3-6 primary sources, then compile the final `<artifact filename=\"report.html\">` deliverable as a technical whitepaper. When finished, conclude with `<finalize_artifact />`."
         )
@@ -682,8 +815,20 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=thread.id)
         active_model_pinned = None
 
+        formatted_exec_instruction = (
+            AGENT_EXECUTION_SYSTEM_INSTRUCTION
+            .replace("{current_date}", current_date_str)
+            .replace("{current_year}", current_year_str)
+        )
+
+        was_aborted = False
+
         try:
             for tool_turn in range(35):
+                if abort_event.is_set():
+                    was_aborted = True
+                    break
+
                 stream_success = False
                 model_parts = []
                 fcalls = []
@@ -693,8 +838,16 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                 models_to_try = [active_model_pinned] if active_model_pinned else candidate_models
 
                 for model_cand in models_to_try:
+                    if abort_event.is_set():
+                        was_aborted = True
+                        break
+
                     attempted_keys = set()
                     while True:
+                        if abort_event.is_set():
+                            was_aborted = True
+                            break
+
                         client, key_idx, active_model = client_manager.get_client_for_model(model_cand, exclude_keys=attempted_keys)
                         if not client or key_idx in attempted_keys:
                             break
@@ -702,7 +855,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                         attempted_keys.add(key_idx)
                         try:
                             config = types.GenerateContentConfig(
-                                system_instruction=AGENT_EXECUTION_SYSTEM_INSTRUCTION,
+                                system_instruction=formatted_exec_instruction,
                                 thinking_config=types.ThinkingConfig(thinking_level="HIGH", include_thoughts=True),
                                 tools=tool_declarations,
                                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -720,6 +873,9 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                             full_text = ""
 
                             async for chunk in stream:
+                                if abort_event.is_set():
+                                    was_aborted = True
+                                    break
                                 if chunk.candidates and chunk.candidates[0].content:
                                     for p in chunk.candidates[0].content.parts:
                                         model_parts.append(p)
@@ -733,6 +889,9 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                                         elif p.function_call:
                                             fcalls.append(p.function_call)
 
+                            if was_aborted:
+                                break
+
                             stream_success = True
                             active_model_pinned = active_model
                             break
@@ -743,8 +902,11 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                             active_model_pinned = None
                             continue
 
-                    if stream_success:
+                    if stream_success or was_aborted:
                         break
+
+                if was_aborted:
+                    break
 
                 if not stream_success:
                     logger.warning("[AgentExecution] Rate limit encountered. Silently backing off 4s...")
@@ -765,6 +927,10 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
                 fres_parts = []
                 for fc in fcalls:
+                    if abort_event.is_set():
+                        was_aborted = True
+                        break
+
                     f_name = fc.name
                     f_args = dict(fc.args) if fc.args else {}
 
@@ -777,7 +943,10 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                         )
 
                     st_time = time.perf_counter()
-                    result = await tool_registry.execute(f_name, f_args, tool_context)
+                    if f_name in disabled_tools_set:
+                        result = {"error": f"Tool '{f_name}' is disabled by server policy."}
+                    else:
+                        result = await tool_registry.execute(f_name, f_args, tool_context)
                     dur_ms = int((time.perf_counter() - st_time) * 1000)
 
                     step_counter += 1
@@ -798,6 +967,9 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
                     fres_parts.append(types.Part(function_response=types.FunctionResponse(name=f_name, response=result)))
 
+                if was_aborted:
+                    break
+
                 turn_contents.append(types.Content(role="user", parts=fres_parts))
 
             await artifact_parser.finish()
@@ -813,11 +985,16 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             final_exec_dur = max(1, int(time.time() - t_exec_start))
             session_manager.save_session_thoughts(session_id, "".join(accumulated_exec_thoughts), active_exec_thought_record["tool_calls"], final_exec_dur)
 
-            completed_exec_header = build_agent_completed_header_layout(final_exec_dur, session_id, phase="execution")
+            completed_exec_header = build_agent_completed_header_layout(final_exec_dur, session_id, phase="execution", was_stopped=was_aborted)
             try:
                 await exec_header_msg.edit(view=completed_exec_header)
             except Exception:
                 pass
+
+            if was_aborted:
+                session_manager.update_session(session_id, state="stopped")
+                await thread.send(content="🛑 **Agent execution stopped.** All workspace files remain intact.")
+                return
 
             session_manager.update_session(session_id, state="completed")
 
@@ -851,6 +1028,24 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             if not citations:
                 report_content = deliverable_artifact.get("content", "") if deliverable_artifact else ""
                 citations = extract_citations_from_html_or_markdown(report_content) or session.get("citations", [])
+
+            deliverable_names = []
+            if deliverable_artifact:
+                deliverable_names.append(deliverable_artifact.get("filename", "deliverable"))
+            if created_files:
+                for cf in created_files:
+                    if cf not in deliverable_names:
+                        deliverable_names.append(cf)
+
+            task_num = len(tasks_history) + 1
+            session_manager.record_completed_task(
+                session_id=session_id,
+                task_num=task_num,
+                objective=session.get("initial_prompt", ""),
+                task_type=session.get("task_type", "general"),
+                summary=clean_summary[:400],
+                deliverables=deliverable_names[:6]
+            )
 
             final_view = AgentFinalDeliverableView(
                 summary_text=clean_summary,

@@ -52,6 +52,7 @@ def normalize_repo_url(repo_input: str) -> tuple[str, str, str]:
 class AgentSessionManager:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
+        self._abort_events: dict[str, asyncio.Event] = {}
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -82,6 +83,7 @@ class AgentSessionManager:
                     is_coding_task INTEGER DEFAULT 1,
                     task_type TEXT DEFAULT 'general',
                     citations_json TEXT DEFAULT '[]',
+                    tasks_history_json TEXT DEFAULT '[]',
                     thread_title TEXT DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_active_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -129,11 +131,31 @@ class AgentSessionManager:
                     cursor.execute("ALTER TABLE agent_sessions ADD COLUMN task_type TEXT DEFAULT 'general'")
                 if "citations_json" not in columns:
                     cursor.execute("ALTER TABLE agent_sessions ADD COLUMN citations_json TEXT DEFAULT '[]'")
+                if "tasks_history_json" not in columns:
+                    cursor.execute("ALTER TABLE agent_sessions ADD COLUMN tasks_history_json TEXT DEFAULT '[]'")
                 if "thread_title" not in columns:
                     cursor.execute("ALTER TABLE agent_sessions ADD COLUMN thread_title TEXT DEFAULT ''")
 
             conn.commit()
         logger.info(f"[AgentSessionManager] Storage configured at '{AGENT_WORKSPACES_ROOT}'")
+
+    def get_abort_event(self, session_id: str) -> asyncio.Event:
+        if session_id not in self._abort_events:
+            self._abort_events[session_id] = asyncio.Event()
+        return self._abort_events[session_id]
+
+    def trigger_abort(self, session_id: str) -> bool:
+        if session_id in self._abort_events:
+            self._abort_events[session_id].set()
+            logger.info(f"[AgentSession] Triggered abort signal for session #{session_id}")
+            return True
+        return False
+
+    def clear_abort_event(self, session_id: str):
+        if session_id in self._abort_events:
+            self._abort_events[session_id].clear()
+        else:
+            self._abort_events[session_id] = asyncio.Event()
 
     def create_session(
         self,
@@ -163,8 +185,8 @@ class AgentSessionManager:
                     session_id, thread_id, channel_id, guild_id,
                     creator_id, collaborators_json, repo_url, initial_prompt,
                     state, active_plan_version, workspace_path, witty_statuses_json,
-                    is_coding_task, task_type, citations_json, thread_title
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planning', 1, ?, ?, ?, ?, '[]', ?)
+                    is_coding_task, task_type, citations_json, tasks_history_json, thread_title
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planning', 1, ?, ?, ?, ?, '[]', '[]', ?)
             """, (
                 session_id,
                 str(thread_id),
@@ -182,6 +204,7 @@ class AgentSessionManager:
             ))
             conn.commit()
 
+        self.clear_abort_event(session_id)
         logger.info(f"[AgentSession] Created session #{session_id} (Title: '{thread_title}') for thread {thread_id}")
         return self.get_session_by_id(session_id)
 
@@ -195,6 +218,7 @@ class AgentSessionManager:
                 d["collaborators"] = json.loads(d.get("collaborators_json") or "[]")
                 d["witty_statuses"] = json.loads(d.get("witty_statuses_json") or "[]")
                 d["citations"] = json.loads(d.get("citations_json") or "[]")
+                d["tasks_history"] = json.loads(d.get("tasks_history_json") or "[]")
                 return d
         return None
 
@@ -208,6 +232,7 @@ class AgentSessionManager:
                 d["collaborators"] = json.loads(d.get("collaborators_json") or "[]")
                 d["witty_statuses"] = json.loads(d.get("witty_statuses_json") or "[]")
                 d["citations"] = json.loads(d.get("citations_json") or "[]")
+                d["tasks_history"] = json.loads(d.get("tasks_history_json") or "[]")
                 return d
         return None
 
@@ -218,6 +243,7 @@ class AgentSessionManager:
 
         session.update(kwargs)
         citations_json = json.dumps(kwargs.get("citations", session.get("citations", [])))
+        tasks_history_json = json.dumps(kwargs.get("tasks_history", session.get("tasks_history", [])))
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -225,7 +251,7 @@ class AgentSessionManager:
                 UPDATE agent_sessions
                 SET state = ?, active_plan_version = ?, container_id = ?,
                     last_plan_message_id = ?, header_message_id = ?,
-                    citations_json = ?, thread_title = ?, last_active_at = CURRENT_TIMESTAMP
+                    citations_json = ?, tasks_history_json = ?, task_type = ?, thread_title = ?, last_active_at = CURRENT_TIMESTAMP
                 WHERE session_id = ?
             """, (
                 session.get("state", "planning"),
@@ -234,10 +260,38 @@ class AgentSessionManager:
                 session.get("last_plan_message_id", ""),
                 session.get("header_message_id", ""),
                 citations_json,
+                tasks_history_json,
+                session.get("task_type", "general"),
                 session.get("thread_title", ""),
                 session_id
             ))
             conn.commit()
+
+    def record_completed_task(
+        self,
+        session_id: str,
+        task_num: int,
+        objective: str,
+        task_type: str,
+        summary: str,
+        deliverables: list[str]
+    ):
+        session = self.get_session_by_id(session_id)
+        if not session:
+            return
+
+        history = session.get("tasks_history", [])
+        history.append({
+            "task_num": task_num,
+            "objective": objective.strip(),
+            "task_type": task_type,
+            "summary": summary.strip()[:600],
+            "deliverables": deliverables,
+            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        })
+
+        self.update_session(session_id, tasks_history=history)
+        logger.info(f"[AgentSession] Recorded completed task #{task_num} for session #{session_id} ({len(deliverables)} deliverable(s))")
 
     def is_collaborator(self, session: dict[str, Any], user_id: str | int, member_or_perms: Any = None) -> bool:
         uid = str(user_id)

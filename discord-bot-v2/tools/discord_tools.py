@@ -294,16 +294,16 @@ async def read_message_history(limit: int = 10, channel_id: str = "", context: T
     name="search_channel_history",
     description="Searches recent channel messages matching a specific keyword or query."
 )
-async def search_channel_history(query: str, limit: int = 25, channel_id: str = "", context: ToolExecutionContext = None) -> dict[str, Any]:
+async def search_channel_history(query: str = "", limit: int = 25, channel_id: str = "", context: ToolExecutionContext = None) -> dict[str, Any]:
     target_channel = await _resolve_channel(channel_id, context)
     if not target_channel or not isinstance(target_channel, (discord.TextChannel, discord.Thread)):
         return {"error": "Channel does not support search."}
 
     matched = []
-    q_lower = query.lower()
+    q_lower = query.lower().strip()
     try:
         async for m in target_channel.history(limit=min(limit, 50)):
-            if q_lower in m.clean_content.lower():
+            if not q_lower or q_lower in m.clean_content.lower():
                 matched.append({
                     "id": str(m.id),
                     "author": m.author.name,

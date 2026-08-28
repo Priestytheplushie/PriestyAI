@@ -11,6 +11,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("PriestyAI.Config")
 
+logging.getLogger("google_genai.models").setLevel(logging.ERROR)
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise ValueError("DISCORD_TOKEN environment variable is missing from .env")
@@ -36,12 +38,20 @@ if not GEMINI_API_KEYS:
 
 logger.info(f"Loaded {len(GEMINI_API_KEYS)} Gemini API key(s) into active rotation pool.")
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+
+if GROQ_API_KEY:
+    logger.info("Groq Cloud integration online (300+ tok/s).")
+if OPENROUTER_API_KEY:
+    logger.info("OpenRouter free tier integration online.")
+
 FLAGSHIP_MODELS = [
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3-flash",
-    "gemini-2.5-flash"
 ]
 
 LITE_MODELS = [

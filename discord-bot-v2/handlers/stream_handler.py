@@ -39,6 +39,17 @@ logger = logging.getLogger("PriestyAI.StreamHandler")
 
 MAX_V2_MESSAGE_TEXT_BUDGET = 3500
 
+def create_accented_container(color: int | None = None) -> Container:
+    if color is not None:
+        try:
+            return Container(accent_color=color)
+        except TypeError:
+            try:
+                return Container(accent_colour=color)
+            except TypeError:
+                pass
+    return Container()
+
 async def cleanup_sibling_messages(channel: discord.abc.Messageable, sibling_ids: list[str | int]):
     for mid in sibling_ids:
         try:
@@ -228,7 +239,8 @@ def build_v2_message_layout(
                                 if s_idx < len(sections) - 1 and len(elements) < 32:
                                     elements.append(Separator(visible=True))
                         elif d_block["type"] == "alert":
-                            alert_container = Container()
+                            alert_color = d_block.get("color", 0x1f6feb)
+                            alert_container = create_accented_container(alert_color)
                             alert_header = f"{d_block['emoji']} **{d_block['title']}**"
                             alert_body = apply_message_parsers(d_block["content"], guild)
                             alert_container.add_item(TextDisplay(alert_header))
@@ -238,7 +250,8 @@ def build_v2_message_layout(
                 idx += 1
 
             elif b_type == "alert":
-                alert_container = Container()
+                alert_color = block.get("color", 0x1f6feb)
+                alert_container = create_accented_container(alert_color)
                 alert_header = f"{block.get('emoji', '💡')} **{block.get('title', 'Alert')}**"
                 alert_body = apply_message_parsers(block.get("content", ""), guild)
                 alert_container.add_item(TextDisplay(alert_header))
@@ -285,7 +298,8 @@ def build_v2_message_layout(
                     if s_idx < len(sections) - 1 and len(elements) < 32:
                         elements.append(Separator(visible=True))
             elif d_block["type"] == "alert":
-                alert_container = Container()
+                alert_color = d_block.get("color", 0x1f6feb)
+                alert_container = create_accented_container(alert_color)
                 alert_header = f"{d_block['emoji']} **{d_block['title']}**"
                 alert_body = apply_message_parsers(d_block["content"], guild)
                 alert_container.add_item(TextDisplay(alert_header))
@@ -474,9 +488,13 @@ def build_v2_message_layout(
         for idx, fup in enumerate(staged_followups[:3]):
             fup_label = fup.get("label", "Follow-up")[:80]
             is_fup_disabled = bool(fup.get("disabled", False)) or is_live_stream
+            is_selected = bool(fup.get("selected", False))
+
+            btn_style = discord.ButtonStyle.success if is_selected else discord.ButtonStyle.secondary
+
             btn = Button(
                 label=fup_label,
-                style=discord.ButtonStyle.secondary,
+                style=btn_style,
                 custom_id=f"fup:{target_mid}:{idx}",
                 disabled=is_fup_disabled
             )
@@ -561,7 +579,8 @@ class DiscordStreamDispatcher:
             self.staged_followups.append({
                 "label": label.strip()[:80],
                 "prompt": prompt.strip(),
-                "disabled": False
+                "disabled": False,
+                "selected": False
             })
 
     def add_artifact_placeholder(self, tool_name: str, args: dict[str, Any]):

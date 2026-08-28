@@ -20,6 +20,7 @@ from agent.views import AgentStepInspectorView, build_agent_new_task_modal
 from agent.constants import OCTICONS_MAP
 from handlers.chat_handler import ChatHandler
 from commands import setup_commands, build_retry_placeholder_layout
+from commands.generate import model_catalog
 from handlers.stream_handler import (
     build_v2_message_layout,
     apply_message_parsers,
@@ -50,6 +51,7 @@ class PriestyBot(discord.Client):
         asyncio.create_task(searxng_client.ensure_running())
         asyncio.create_task(playground_server.start())
         asyncio.create_task(session_manager.prune_stale_workspaces())
+        asyncio.create_task(model_catalog.ensure_initialized())
 
         setup_commands(self.tree)
         try:
@@ -170,9 +172,10 @@ class PriestyBot(discord.Client):
         async def resolve_attachment_url(filename: str, message_id_val: str | int) -> str | None:
             target_msg = interaction.message
             if not target_msg or not target_msg.attachments:
-                if interaction.channel and message_id_val and str(message_id_val) not in ("0", "temp"):
+                mid_str = str(message_id_val).strip() if message_id_val is not None else ""
+                if interaction.channel and mid_str.isdigit() and mid_str not in ("0", "temp"):
                     try:
-                        target_msg = await interaction.channel.fetch_message(int(message_id_val))
+                        target_msg = await interaction.channel.fetch_message(int(mid_str))
                     except Exception:
                         target_msg = None
 
@@ -216,8 +219,8 @@ class PriestyBot(discord.Client):
                                 staged_artifacts=v_data.get("staged_artifacts", []),
                                 staged_followups=fups,
                                 modals_map=mod_map,
-                                thought_duration=v_data.get("duration_seconds", 0),
-                                has_thoughts=v_data.get("has_thoughts", False),
+                                thought_duration=max(1, v_data.get("duration_seconds", 1)),
+                                has_thoughts=v_data.get("has_thoughts", True),
                                 active_version=active_v,
                                 total_versions=len(versions),
                                 message_id=root_id,
@@ -387,8 +390,8 @@ class PriestyBot(discord.Client):
                             staged_arts = v_data.get("staged_artifacts", [])
                             staged_fups = v_data.get("staged_followups", [])
                             staged_mods = v_data.get("staged_modals", [])
-                            dur = v_data.get("duration_seconds", 0)
-                            has_t = v_data.get("has_thoughts", False)
+                            dur = max(1, v_data.get("duration_seconds", 1))
+                            has_t = v_data.get("has_thoughts", True)
                             mod_map = {m["modal_id"]: m for m in staged_mods}
 
                             for art in staged_arts:
@@ -508,8 +511,8 @@ class PriestyBot(discord.Client):
                     await interaction.response.edit_message(view=generating_view)
                     return
 
-                dur = target_version_data.get("duration_seconds", 0)
-                has_t = target_version_data.get("has_thoughts", False)
+                dur = max(1, target_version_data.get("duration_seconds", 1))
+                has_t = target_version_data.get("has_thoughts", True)
                 v_content = target_version_data.get("content", "")
                 raw_timeline = target_version_data.get("timeline_blocks") or ([{"type": "text", "content": v_content}] if v_content else [])
                 staged_comps = target_version_data.get("staged_components", [])
@@ -525,7 +528,7 @@ class PriestyBot(discord.Client):
                     if b64:
                         raw = base64.b64decode(b64)
                         fname = att.get("filename", "file.bin")
-                        if fname.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                        if fname.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
                             img_name = fname
                         files.append(discord.File(io.BytesIO(raw), filename=fname))
 
@@ -637,6 +640,7 @@ class PriestyBot(discord.Client):
                         raw_thoughts = v_data.get("thoughts", "")
                         formatted_thoughts = v_data.get("formatted_thoughts")
                         model_name = v_data.get("model")
+                        dur_sec = max(1, v_data.get("duration_seconds", 1))
 
                         files = []
                         for att in v_data.get("attachments", []):
@@ -650,17 +654,21 @@ class PriestyBot(discord.Client):
                             raw_thoughts=raw_thoughts,
                             formatted_thoughts=formatted_thoughts,
                             tool_calls=v_data.get("tool_calls", []),
-                            duration_seconds=v_data.get("duration_seconds", 0),
+                            duration_seconds=dur_sec,
                             is_thinking=(v_data.get("status") == "generating"),
                             message_id=root_id,
                             version_idx=v_idx,
                             model_name=model_name
                         )
-                        if files:
-                            await interaction.response.send_message(view=container, files=files, ephemeral=True)
-                        else:
-                            await interaction.response.send_message(view=container, ephemeral=True)
-                        return
+                        try:
+                            if files:
+                                await interaction.response.send_message(view=container, files=files, ephemeral=True)
+                            else:
+                                await interaction.response.send_message(view=container, ephemeral=True)
+                            return
+                        except Exception as ex:
+                            logger.warning(f"Failed to open thought container: {ex}")
+                            return
 
             await interaction.response.send_message(content="❌ Thoughts unavailable for this version.", ephemeral=True)
             return
@@ -687,7 +695,7 @@ class PriestyBot(discord.Client):
                 container = ThoughtContainerView(
                     raw_thoughts=t_data.get("thoughts", "") or "Researching workspace and analyzing repository architecture...",
                     tool_calls=t_data.get("tool_calls", []),
-                    duration_seconds=t_data.get("duration_seconds", 1),
+                    duration_seconds=max(1, t_data.get("duration_seconds", 1)),
                     is_thinking=False,
                     model_name="gemma-4-31b-it"
                 )
@@ -695,6 +703,22 @@ class PriestyBot(discord.Client):
                 return
 
             await interaction.response.send_message(content="❌ Reasoning details unavailable for this session.", ephemeral=True)
+            return
+
+        if custom_id.startswith("agent_stop_"):
+            session_id = custom_id.replace("agent_stop_", "")
+            session = session_manager.get_session_by_id(session_id)
+            if not session:
+                await interaction.response.send_message(content="❌ Agent session not found.", ephemeral=True)
+                return
+
+            perms = getattr(interaction.user, "guild_permissions", None)
+            if not session_manager.is_collaborator(session, interaction.user.id, perms):
+                await interaction.response.send_message(content="❌ Only session collaborators can stop the agent.", ephemeral=True)
+                return
+
+            session_manager.trigger_abort(session_id)
+            await interaction.response.send_message(content=f"⏹️ **Stopping Agent:** Signal received from {interaction.user.mention}. Halting after current step...", ephemeral=False)
             return
 
         if custom_id.startswith("agent_new_task_"):
@@ -719,6 +743,7 @@ class PriestyBot(discord.Client):
 
                 thread = interaction.channel
                 if isinstance(thread, discord.Thread):
+                    session_manager.clear_abort_event(session_id)
                     session_manager.update_session(session_id, state="planning")
                     await thread.send(content=f"{OCTICONS_MAP['oct_checklist']} **New Task Started by {interaction.user.mention}:**\n> {next_prompt}")
                     asyncio.create_task(AgentEngine.start_planning_turn(thread, session, feedback=next_prompt))

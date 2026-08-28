@@ -160,9 +160,11 @@ async def github_repo(
 
             content_b64 = data.get("content", "")
             try:
-                raw_bytes = base64.b64decode(content_b64)
+                clean_b64 = re.sub(r'[\r\n\s]+', '', content_b64)
+                raw_bytes = base64.b64decode(clean_b64)
                 raw_text = raw_bytes.decode("utf-8", errors="replace")
-            except Exception:
+            except Exception as b64_err:
+                logger.warning(f"Failed to decode base64 file content for {effective_path}: {b64_err}")
                 raw_bytes = b""
                 raw_text = "(Binary file or unreadable encoding)"
 
@@ -353,7 +355,8 @@ async def github_repo(
             if readme_resp.status_code == 200:
                 try:
                     r_b64 = readme_resp.json().get("content", "")
-                    readme_text = base64.b64decode(r_b64).decode("utf-8", errors="replace")[:3000]
+                    clean_r_b64 = re.sub(r'[\r\n\s]+', '', r_b64)
+                    readme_text = base64.b64decode(clean_r_b64).decode("utf-8", errors="replace")[:3000]
                 except Exception:
                     pass
 
@@ -373,7 +376,8 @@ async def github_repo(
                         if man_resp.status_code == 200:
                             try:
                                 man_b64 = man_resp.json().get("content", "")
-                                man_txt = base64.b64decode(man_b64).decode("utf-8", errors="replace")[:1200]
+                                clean_man_b64 = re.sub(r'[\r\n\s]+', '', man_b64)
+                                man_txt = base64.b64decode(clean_man_b64).decode("utf-8", errors="replace")[:1200]
                                 manifest_content += f"\n**{manifest_name}:**\n```text\n{man_txt}\n```\n"
                             except Exception:
                                 pass

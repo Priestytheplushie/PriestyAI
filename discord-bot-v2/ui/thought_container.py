@@ -37,8 +37,10 @@ TOOL_META_MAP = {
     "create_poll": ("📊", "Created Poll"),
     "calc": ("🔢", "Math Calculator"),
     "search_image": ("🖼️", "Image Search"),
+    "search_gif": ("🎞️", "GIF Search"),
+    "edit_image": ("🎨", "Edit Image"),
     "ask_expert": ("🧠", "Deep Reasoning"),
-    "generate_image": ("🎨", "Image Generation"),
+    "generate_image": ("🎨", "Generate Image"),
     "create_artifact": ("📦", "Created Artifact"),
     "update_artifact": ("🔄", "Updated Artifact"),
     "create_thread": ("🧵", "Thread Created"),
@@ -144,6 +146,12 @@ def format_tool_display_text(tool_name: str, args: dict[str, Any], result: dict[
         t = result.get("title") if isinstance(result, dict) else None
         label_text = f"**{t[:28]}**" if t else f"`{q}`"
         return f"🖼️ Found **Image** ({label_text}) {time_tag}".strip()
+    elif tool_name == "search_gif":
+        q = args.get("query", "")[:30]
+        return f"🎞️ Found **GIF** (`{q}`) {time_tag}".strip()
+    elif tool_name == "edit_image":
+        p = args.get("prompt", "")[:30]
+        return f"🎨 **Edit Image** (`{p}`) {time_tag}".strip()
     elif tool_name == "create_poll":
         q = args.get("question", "")[:25]
         return f"📊 Created **Poll** (`{q}`)".strip()
@@ -261,6 +269,10 @@ class ToolInspectorView(LayoutView):
             header_line = f"🧠 **Recalled Memories** ({count} Active)"
         elif name == "search_image":
             header_line = "🖼️ **Visual Image Search & Attachment**"
+        elif name == "search_gif":
+            header_line = "🎞️ **Animated GIF Search & Attachment**"
+        elif name == "edit_image":
+            header_line = "🎨 **Local Image Editing**"
         elif name == "calc":
             header_line = "🔢 **Math Calculation**"
         elif name == "create_poll":
@@ -404,6 +416,30 @@ class ToolInspectorView(LayoutView):
 
             container.add_item(TextDisplay("\n".join(lines)))
 
+        elif name == "search_gif":
+            query = args.get("query", "")
+            title = result.get("title") or args.get("caption") or "Animated GIF"
+            source = result.get("source", "Web")
+            img_url = result.get("image_url", "#")
+            size_b = result.get("size_bytes", 0)
+
+            lines = [
+                f"**Search Query:** `{query}`",
+                f"**Selected Asset:** `{title}`",
+                f"**Host Source:** `{source}`",
+                f"**Direct Link:** [🔗 Open Original GIF]({img_url})"
+            ]
+            if size_b:
+                lines.append(f"**Attached Size:** `{size_b / 1024:.1f} KB`")
+
+            container.add_item(TextDisplay("\n".join(lines)))
+
+        elif name == "edit_image":
+            prompt = args.get("prompt", "")
+            strength = args.get("strength", 0.52)
+            model = result.get("model", "DreamShaper-8-LCM")
+            container.add_item(TextDisplay(f"**Prompt:** *{prompt}*\n**Model:** `{model}`\n**Transformation Strength:** `{strength}`"))
+
         elif name == "calc":
             expr = args.get("expression", "")
             res = result.get("result", "")
@@ -411,9 +447,9 @@ class ToolInspectorView(LayoutView):
 
         elif name == "generate_image":
             prompt = args.get("prompt", "")
-            dims = result.get("dimensions", "1024x1024")
-            url = result.get("image_url", "")
-            container.add_item(TextDisplay(f"**Prompt:** *{prompt}*\n**Dimensions:** `{dims}`\n**URL:** [Direct Link]({url})"))
+            dims = result.get("dimensions", "512x512")
+            model = result.get("model", "DreamShaper-8-LCM")
+            container.add_item(TextDisplay(f"**Prompt:** *{prompt}*\n**Dimensions:** `{dims}`\n**Model:** `{model}`"))
 
         elif name == "create_poll":
             q = args.get("question", "")
@@ -586,7 +622,7 @@ class ThoughtContainerView(LayoutView):
         self.raw_thoughts = raw_thoughts
         self.formatted_thoughts = formatted_thoughts
         self.tool_calls = tool_calls
-        self.duration_seconds = duration_seconds
+        self.duration_seconds = max(1, duration_seconds) if duration_seconds > 0 else 1
         self.is_thinking = is_thinking
         self.model_name = (model_name or "").lower().strip()
 
@@ -703,12 +739,14 @@ class ThoughtContainerView(LayoutView):
 
         container = Container()
 
+        time_display = f"({self.duration_seconds}s)"
+
         if self.is_thinking:
-            header_text = f"<:thinking:1540750574851723385> **Thinking...** `({self.duration_seconds}s)`"
+            header_text = f"<:thinking:1540750574851723385> **Thinking...** `{time_display}`"
             container.add_item(TextDisplay(header_text))
         else:
             if self.is_raw_mode:
-                header_text = f"<:thinking:1540750574851723385> **Raw Thoughts** `({self.duration_seconds}s)`"
+                header_text = f"<:thinking:1540750574851723385> **Raw Thoughts** `{time_display}`"
                 if self.show_toggle:
                     toggle_btn = Button(
                         label="Formatting..." if self.is_formatting else "Format",
@@ -722,7 +760,7 @@ class ThoughtContainerView(LayoutView):
                 else:
                     container.add_item(TextDisplay(header_text))
             else:
-                header_text = f"<:thinking:1540750574851723385> **Thoughts** `({self.duration_seconds}s)`"
+                header_text = f"<:thinking:1540750574851723385> **Thoughts** `{time_display}`"
                 if self.show_toggle:
                     toggle_btn = Button(
                         label="View Raw",
@@ -934,7 +972,7 @@ class PlaceholderLayoutView(LayoutView):
     ):
         super().__init__(timeout=900)
         self.loading_text = loading_text
-        self.duration_seconds = duration_seconds
+        self.duration_seconds = max(1, duration_seconds) if duration_seconds > 0 else 0
         self.is_enabled = is_enabled
         self.on_answer_now_callback = on_answer_now_callback
         self.thought_data = thought_data or {"thoughts": "", "tool_calls": []}
@@ -977,7 +1015,7 @@ class PlaceholderLayoutView(LayoutView):
 
     def update_state(self, loading_text: str, duration_seconds: int):
         self.loading_text = loading_text
-        self.duration_seconds = duration_seconds
+        self.duration_seconds = max(1, duration_seconds) if duration_seconds > 0 else 0
         self.text_display.content = self.loading_text
         self.thinking_btn.label = f"🧠 Thinking for {self.duration_seconds}s..."
         self.thinking_btn.disabled = not self.is_enabled
@@ -995,7 +1033,7 @@ class PlaceholderLayoutView(LayoutView):
             self.active_container.raw_thoughts = raw_thoughts
             self.active_container.formatted_thoughts = raw_thoughts
             self.active_container.tool_calls = tool_calls
-            self.active_container.duration_seconds = self.duration_seconds
+            self.active_container.duration_seconds = max(1, self.duration_seconds)
             return
 
         if self.update_lock.locked():
@@ -1008,7 +1046,7 @@ class PlaceholderLayoutView(LayoutView):
                 self.active_container.raw_thoughts = raw_thoughts
                 self.active_container.formatted_thoughts = raw_thoughts
                 self.active_container.tool_calls = tool_calls
-                self.active_container.duration_seconds = self.duration_seconds
+                self.active_container.duration_seconds = max(1, self.duration_seconds)
                 self.active_container.is_thinking = True
                 self.active_container.show_toggle = False
                 self.active_container._refresh_content()
@@ -1038,7 +1076,7 @@ class PlaceholderLayoutView(LayoutView):
             raw_thoughts=raw_thoughts,
             formatted_thoughts=raw_thoughts,
             tool_calls=tool_calls,
-            duration_seconds=self.duration_seconds,
+            duration_seconds=max(1, self.duration_seconds),
             is_thinking=True,
             show_toggle=False,
             parent_view=self,
@@ -1066,7 +1104,7 @@ class ThinkingButtonView(View):
         model_name: str | None = None
     ):
         super().__init__(timeout=900)
-        self.duration_seconds = duration_seconds
+        self.duration_seconds = max(1, duration_seconds) if duration_seconds > 0 else 1
         self.is_thinking = is_thinking
         self.is_enabled = is_enabled
         self.thought_data = thought_data or {"thoughts": "", "formatted_thoughts": None, "tool_calls": []}
@@ -1077,7 +1115,7 @@ class ThinkingButtonView(View):
         self.is_inspecting: bool = False
         self.update_lock = asyncio.Lock()
 
-        time_str = f"{duration_seconds}s" if duration_seconds > 0 else "<1s"
+        time_str = f"{self.duration_seconds}s"
         self.button = Button(
             label=f"🧠 Thought for {time_str}",
             style=discord.ButtonStyle.secondary,
@@ -1088,9 +1126,9 @@ class ThinkingButtonView(View):
         self.add_item(self.button)
 
     def update_label(self, seconds: int, is_thinking: bool = False):
-        self.duration_seconds = seconds
+        self.duration_seconds = max(1, seconds) if seconds > 0 else 1
         self.is_thinking = is_thinking
-        time_str = f"{seconds}s" if seconds > 0 else "<1s"
+        time_str = f"{self.duration_seconds}s"
         self.button.label = f"🧠 Thought for {time_str}"
         self.button.disabled = False
 
@@ -1111,33 +1149,20 @@ class ThinkingButtonView(View):
                 model_name=self.model_name
             )
             self.active_interaction = interaction
-            self.is_inspecting = False
-
             try:
-                await interaction.response.send_message(
-                    view=self.active_container,
-                    ephemeral=True
-                )
-            except Exception as ex:
-                logger.debug(f"Thinking button click error: {ex}")
-            return
-
-        self.active_container = ThoughtContainerView(
-            raw_thoughts=raw_thoughts,
-            formatted_thoughts=formatted_thoughts,
-            tool_calls=tool_calls,
-            duration_seconds=self.duration_seconds,
-            is_thinking=False,
-            parent_view=self,
-            model_name=self.model_name
-        )
-        self.active_interaction = interaction
-        self.is_inspecting = False
-
-        try:
-            await interaction.response.send_message(
-                view=self.active_container,
-                ephemeral=True
+                await interaction.response.send_message(view=self.active_container, ephemeral=True)
+            except Exception:
+                pass
+        else:
+            container = ThoughtContainerView(
+                raw_thoughts=raw_thoughts,
+                formatted_thoughts=formatted_thoughts,
+                tool_calls=tool_calls,
+                duration_seconds=self.duration_seconds,
+                is_thinking=False,
+                model_name=self.model_name
             )
-        except Exception as ex:
-            logger.debug(f"Thinking button click error: {ex}")
+            try:
+                await interaction.response.send_message(view=container, ephemeral=True)
+            except Exception:
+                pass

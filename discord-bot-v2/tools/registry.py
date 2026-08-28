@@ -17,6 +17,7 @@ class ToolExecutionContext:
     staged_components: list[Any] = field(default_factory=list)
     staged_modals: list[Any] = field(default_factory=list)
     staged_artifacts: list[Any] = field(default_factory=list)
+    input_image_bytes: bytes | None = None
     staged_image_bytes: bytes | None = None
     staged_image_filename: str = "generated_image.png"
     active_thread: Any | None = None

@@ -1,4 +1,5 @@
 import difflib
+import time
 import logging
 from typing import Any, Callable
 import discord
@@ -13,11 +14,12 @@ from discord.ui import (
     Button,
     Select
 )
-from agent.constants import OCTICONS_MAP, BETA_EMOJI
+from agent.constants import OCTICONS_MAP, BETA_EMOJI, GITHUB_APP_INSTALL_URL
 from ui.modals import DynamicModalV2
 from ui.artifact_views import get_file_icon, build_artifact_components_for_message
 from handlers.stream_handler import apply_message_parsers
 from config.settings import LOADING_EMOJI
+from parsers.markdown_parser import DFM_EMOJI_MAP
 
 logger = logging.getLogger("PriestyAI.Agent.Views")
 
@@ -126,6 +128,78 @@ def build_agent_new_task_modal(session_id: str, on_submit: Callable) -> DynamicM
     return DynamicModalV2(
         title="Next Agent Task",
         custom_id=f"modal_agent_new_task_{session_id}",
+        fields_schema=fields,
+        on_submit_callback=on_submit
+    )
+
+def build_agent_signoff_modal(
+    session_id: str,
+    prefilled_commit_message: str,
+    is_creator: bool,
+    total_collaborators: int,
+    on_submit: Callable
+) -> DynamicModalV2:
+    fields = [
+        {
+            "type": "text_display",
+            "content": (
+                "# Sign off on Commit\n"
+                "Approve this branch and commit message to proceed with creating the Pull Request.\n\n"
+                "• **Git Attribution:** Enter your Git Name and Email to receive `Co-authored-by` credit on GitHub.\n"
+                "• **Anonymous Approval:** Leave Git Name and Email blank to approve the commit without git attribution."
+            )
+        },
+        {
+            "type": "text_input",
+            "custom_id": "commit_message",
+            "label": "Commit Message",
+            "description": "Review or customize the git commit message",
+            "style": "paragraph",
+            "value": prefilled_commit_message.strip() or "feat: implement requested changes",
+            "required": True,
+            "max_length": 1500
+        },
+        {
+            "type": "text_input",
+            "custom_id": "git_name",
+            "label": "Git Author Name",
+            "description": "Your name for git commit attribution (Optional)",
+            "placeholder": "e.g. Alex Rivers",
+            "style": "short",
+            "required": False,
+            "max_length": 100
+        },
+        {
+            "type": "text_input",
+            "custom_id": "git_email",
+            "label": "Git Author Email",
+            "description": "Your GitHub email address for commit credit (Optional)",
+            "placeholder": "e.g. alex.rivers@example.com",
+            "style": "short",
+            "required": False,
+            "max_length": 150
+        }
+    ]
+
+    if is_creator and total_collaborators > 1:
+        fields.append({
+            "type": "checkbox_group",
+            "custom_id": "force_push",
+            "label": "Creator Override",
+            "description": "Session creator option to publish immediately",
+            "options": [
+                {
+                    "label": "Force publish branch immediately without waiting for other collaborators",
+                    "value": "force",
+                    "default": False
+                }
+            ],
+            "required": False
+        })
+
+    return DynamicModalV2(
+        title="Sign off on Commit",
+        custom_id=f"modal_agent_signoff_{session_id}",
         fields_schema=fields,
         on_submit_callback=on_submit
     )
@@ -327,6 +401,202 @@ class AgentStepInspectorView(LayoutView):
             arg_lines = "\n".join([f"• **{k}**: `{v}`" for k, v in args.items()]) or "*None*"
             container.add_item(TextDisplay(f"**Parameters:**\n{arg_lines}\n\n**Result:**\n```json\n{str(result)[:2500]}\n```"))
 
+        self.add_item(container)
+
+class AgentSignOffStepView(LayoutView):
+    def __init__(self, user_name: str, user_id: str | int, session_id: str, is_anonymous: bool = False):
+        super().__init__(timeout=None)
+        self.user_name = user_name
+        self.user_id = str(user_id)
+        self.session_id = session_id
+        self.is_anonymous = is_anonymous
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        ts_now = int(time.time())
+        anon_tag = " *(Anonymous)*" if self.is_anonymous else ""
+        text_content = f"{OCTICONS_MAP['oct_check']} **{self.user_name}** signed off on this commit{anon_tag} • <t:{ts_now}:R>"
+        view_btn = Button(
+            label="View ↗",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"agent_signoff_view:{self.session_id}:{self.user_id}"
+        )
+        self.add_item(Section(TextDisplay(text_content), accessory=view_btn))
+
+class AgentSignOffInspectorView(LayoutView):
+    def __init__(self, signoff_data: dict[str, Any]):
+        super().__init__(timeout=300)
+        self.signoff_data = signoff_data
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        container = Container()
+
+        user_name = self.signoff_data.get("user_name", "Collaborator")
+        is_anon = self.signoff_data.get("is_anonymous", False)
+        git_name = self.signoff_data.get("git_name", "")
+        git_email = self.signoff_data.get("git_email", "")
+        commit_msg = self.signoff_data.get("commit_message", "")
+        signed_at = self.signoff_data.get("signed_at", int(time.time()))
+
+        container.add_item(TextDisplay(f"# Sign-off Details: {user_name}"))
+        container.add_item(Separator(visible=True))
+
+        if is_anon or not (git_name and git_email):
+            attr_text = "• **Attribution:** Anonymous Approval *(No git co-author credit requested)*"
+        else:
+            attr_text = f"• **Git Co-Author:** `{git_name} <{git_email}>`"
+
+        info_block = (
+            f"{attr_text}\n"
+            f"• **Signed At:** <t:{signed_at}:F> (<t:{signed_at}:R>)\n\n"
+            f"### Approved Commit Message:\n"
+            f"```text\n{commit_msg or '(Default commit message)'}\n```"
+        )
+        container.add_item(TextDisplay(info_block))
+        self.add_item(container)
+
+class AgentReadyForReviewView(LayoutView):
+    def __init__(
+        self,
+        session: dict[str, Any],
+        pr_data: dict[str, Any],
+        is_installed: bool = True
+    ):
+        super().__init__(timeout=None)
+        self.session = session
+        self.pr_data = pr_data
+        self.is_installed = is_installed
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        container = Container()
+
+        session_id = self.session["session_id"]
+        branch_name = self.pr_data.get("branch_name", "priestyai/feature-update")
+        pr_desc = self.pr_data.get("pr_body", "Code changes ready for review.")
+        diff_stats = self.pr_data.get("diff_stats", {})
+        adds = diff_stats.get("additions", 0)
+        dels = diff_stats.get("deletions", 0)
+        file_count = diff_stats.get("total_files", len(self.pr_data.get("changed_files", [])))
+
+        diff_stat_str = f"{file_count} file(s) changed (+{adds} -{dels})"
+
+        header_block = (
+            f"### {OCTICONS_MAP['oct_branch']} Ready for Review!\n"
+            f"```txt\n{branch_name}\n```\n"
+            f"{pr_desc[:600]}"
+        )
+        container.add_item(TextDisplay(header_block))
+
+        if not self.is_installed:
+            container.add_item(Separator(visible=True))
+            warning_text = (
+                f"{DFM_EMOJI_MAP['gfm_warning']} **GitHub App Not Installed**\n"
+                f"PriestyAI needs repository access to push branches and open Pull Requests.\n"
+                f"-# {LOADING_EMOJI} Listening for installation..."
+            )
+            install_btn = Button(
+                label="Install App ↗",
+                style=discord.ButtonStyle.link,
+                url=GITHUB_APP_INSTALL_URL
+            )
+            container.add_item(Section(TextDisplay(warning_text), accessory=install_btn))
+
+            container.add_item(Separator(visible=True))
+            disabled_publish = Button(
+                label="Publish Branch",
+                style=discord.ButtonStyle.primary,
+                disabled=True,
+                custom_id=f"agent_publish_pr_disabled_{session_id}"
+            )
+            container.add_item(Section(TextDisplay(f"-# {diff_stat_str}"), accessory=disabled_publish))
+        else:
+            container.add_item(Separator(visible=True))
+
+            collabs = self.session.get("collaborators", [])
+            signoffs = self.session.get("signoffs", {})
+            total_collabs = max(1, len(collabs))
+            current_signoffs = len(signoffs)
+
+            if total_collabs == 1:
+                if current_signoffs == 0:
+                    btn_label = "Sign-off & Publish"
+                    btn_style = discord.ButtonStyle.primary
+                    btn_emoji = OCTICONS_MAP["oct_check"]
+                    custom_id = f"agent_signoff:{session_id}"
+                    status_tag = diff_stat_str
+                else:
+                    btn_label = "Publish Branch"
+                    btn_style = discord.ButtonStyle.success
+                    btn_emoji = OCTICONS_MAP["oct_pr"]
+                    custom_id = f"agent_publish_pr:{session_id}"
+                    status_tag = f"{diff_stat_str} • Signed off"
+            else:
+                if current_signoffs >= total_collabs:
+                    btn_label = "Publish Branch"
+                    btn_style = discord.ButtonStyle.success
+                    btn_emoji = OCTICONS_MAP["oct_pr"]
+                    custom_id = f"agent_publish_pr:{session_id}"
+                    status_tag = f"{diff_stat_str} • All sign-offs complete"
+                else:
+                    btn_label = f"Sign-off ({current_signoffs}/{total_collabs})"
+                    btn_style = discord.ButtonStyle.primary
+                    btn_emoji = OCTICONS_MAP["oct_check"]
+                    custom_id = f"agent_signoff:{session_id}"
+                    status_tag = diff_stat_str
+
+            action_btn = Button(
+                label=btn_label,
+                style=btn_style,
+                emoji=btn_emoji,
+                custom_id=custom_id
+            )
+            container.add_item(Section(TextDisplay(f"-# {status_tag}"), accessory=action_btn))
+
+        self.add_item(container)
+
+class AgentPRPublishedView(LayoutView):
+    def __init__(
+        self,
+        pr_number: int,
+        pr_title: str,
+        pr_url: str,
+        branch_name: str,
+        co_authors: list[str]
+    ):
+        super().__init__(timeout=None)
+        self.pr_number = pr_number
+        self.pr_title = pr_title
+        self.pr_url = pr_url
+        self.branch_name = branch_name
+        self.co_authors = co_authors
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        container = Container()
+
+        co_authors_str = ", ".join(self.co_authors) if self.co_authors else "PriestyAI[bot]"
+
+        body_text = (
+            f"### {OCTICONS_MAP['oct_pr']} Pull Request Created! #{self.pr_number}\n"
+            f"**[{self.pr_title}]({self.pr_url})**\n\n"
+            f"**Branch:** {OCTICONS_MAP['oct_branch']} `{self.branch_name}`\n"
+            f"**Co-Authors:** {co_authors_str}\n\n"
+            f"-# Published to GitHub • Review and merge on GitHub."
+        )
+        container.add_item(TextDisplay(body_text))
+
+        pr_link_btn = Button(
+            label="Open Pull Request ↗",
+            style=discord.ButtonStyle.link,
+            url=self.pr_url
+        )
+        container.add_item(ActionRow(pr_link_btn))
         self.add_item(container)
 
 class AgentQuestionView(LayoutView):

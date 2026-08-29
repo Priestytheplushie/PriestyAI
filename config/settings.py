@@ -24,6 +24,19 @@ if GITHUB_TOKEN:
 else:
     logger.warning("GITHUB_TOKEN not found in .env. GitHub tool will run in unauthenticated mode (60 req/hr).")
 
+GITHUB_APP_ID = os.getenv("GITHUB_APP_ID", "").strip()
+GITHUB_APP_PRIVATE_KEY_PATH = os.getenv("GITHUB_APP_PRIVATE_KEY_PATH", "github_app.pem").strip()
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()
+SMEE_URL = os.getenv("SMEE_URL", "").strip()
+
+if GITHUB_APP_ID and os.path.exists(GITHUB_APP_PRIVATE_KEY_PATH):
+    logger.info(f"GitHub App integration online (App ID: {GITHUB_APP_ID}, Key: {GITHUB_APP_PRIVATE_KEY_PATH}).")
+else:
+    logger.warning("GitHub App credentials not fully configured. Pull Request publishing will require App configuration.")
+
+GITHUB_APP_BOT_NAME = "PriestyAI[bot]"
+GITHUB_APP_BOT_EMAIL = f"{GITHUB_APP_ID}+priestyai[bot]@users.noreply.github.com" if GITHUB_APP_ID else "priestyai[bot]@users.noreply.github.com"
+
 GEMINI_API_KEYS: list[str] = []
 primary_key = os.getenv("GEMINI_API_KEY")
 if primary_key:

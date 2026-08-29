@@ -20,6 +20,7 @@ from core.thought_stream import standardize_thoughts_text, format_thoughts_with_
 from ui.artifact_views import get_file_icon
 from core.branch_manager import branch_manager
 from agent.constants import OCTICONS_MAP
+from parsers.markdown_parser import DFM_EMOJI_MAP
 
 logger = logging.getLogger("PriestyAI.ThoughtUI")
 
@@ -964,12 +965,15 @@ class PlaceholderLayoutView(LayoutView):
         is_enabled: bool = False,
         on_answer_now_callback: Callable | None = None,
         thought_data: dict[str, Any] | None = None,
-        model_name: str | None = None
+        model_name: str | None = None,
+        is_quiz: bool = False
     ):
         super().__init__(timeout=900)
         self.loading_text = loading_text
         self.duration_seconds = max(1, duration_seconds) if duration_seconds > 0 else 0
         self.is_enabled = is_enabled
+        self.is_quiz = is_quiz
+        self.is_spoiler_bypassed = False
         self.on_answer_now_callback = on_answer_now_callback
         self.thought_data = thought_data or {"thoughts": "", "tool_calls": []}
         self.model_name = (model_name or (self.thought_data.get("model") if self.thought_data else "")).lower()
@@ -1020,16 +1024,20 @@ class PlaceholderLayoutView(LayoutView):
         if not self.active_container or not self.active_interaction:
             return
 
+        raw_thoughts = self.thought_data.get("thoughts", "")
+        tool_calls = self.thought_data.get("tool_calls", [])
+        self.active_container.raw_thoughts = raw_thoughts
+        self.active_container.formatted_thoughts = raw_thoughts
+        self.active_container.tool_calls = tool_calls
+        self.active_container.duration_seconds = max(1, self.duration_seconds)
+
+        if (self.is_quiz or self.thought_data.get("is_quiz")) and not self.is_spoiler_bypassed:
+            return
+
         if self.is_inspecting or self.active_container.is_inspecting_tool or self.active_container.is_paginating:
             return
 
         if self.active_container.current_page > 0 or (time.time() - getattr(self.active_container, "last_user_action_time", 0.0)) < 2.0:
-            raw_thoughts = self.thought_data.get("thoughts", "")
-            tool_calls = self.thought_data.get("tool_calls", [])
-            self.active_container.raw_thoughts = raw_thoughts
-            self.active_container.formatted_thoughts = raw_thoughts
-            self.active_container.tool_calls = tool_calls
-            self.active_container.duration_seconds = max(1, self.duration_seconds)
             return
 
         if self.update_lock.locked():
@@ -1037,12 +1045,6 @@ class PlaceholderLayoutView(LayoutView):
 
         async with self.update_lock:
             try:
-                raw_thoughts = self.thought_data.get("thoughts", "")
-                tool_calls = self.thought_data.get("tool_calls", [])
-                self.active_container.raw_thoughts = raw_thoughts
-                self.active_container.formatted_thoughts = raw_thoughts
-                self.active_container.tool_calls = tool_calls
-                self.active_container.duration_seconds = max(1, self.duration_seconds)
                 self.active_container.is_thinking = True
                 self.active_container.show_toggle = False
                 self.active_container._refresh_content()
@@ -1081,6 +1083,31 @@ class PlaceholderLayoutView(LayoutView):
         self.active_interaction = interaction
         self.is_inspecting = False
 
+        if (self.is_quiz or self.thought_data.get("is_quiz")) and not self.is_spoiler_bypassed:
+            warning_view = LayoutView(timeout=300)
+            warning_text = (
+                f"{DFM_EMOJI_MAP['gfm_warning']} **Quiz Spoilers**\n"
+                "This thought process contains the AI's internal reasoning and answer key for the quiz.\n"
+                "Opening it before finishing may spoil the questions and answers."
+            )
+            warning_view.add_item(TextDisplay(warning_text))
+            warning_view.add_item(Separator(visible=True))
+
+            async def on_show_anyway(sub_inter: discord.Interaction):
+                self.is_spoiler_bypassed = True
+                self.active_container._refresh_content()
+                await sub_inter.response.edit_message(view=self.active_container)
+
+            show_btn = Button(label="Show Anyway", style=discord.ButtonStyle.danger)
+            show_btn.callback = on_show_anyway
+            warning_view.add_item(ActionRow(show_btn))
+
+            try:
+                await interaction.response.send_message(view=warning_view, ephemeral=True)
+            except Exception as ex:
+                logger.debug(f"Placeholder thought click error: {ex}")
+            return
+
         try:
             await interaction.response.send_message(
                 view=self.active_container,
@@ -1088,77 +1115,3 @@ class PlaceholderLayoutView(LayoutView):
             )
         except Exception as ex:
             logger.debug(f"Placeholder thought click error: {ex}")
-
-class ThinkingButtonView(View):
-    def __init__(
-        self,
-        duration_seconds: int = 0,
-        is_thinking: bool = False,
-        is_enabled: bool = True,
-        thought_data: dict[str, Any] | None = None,
-        model_name: str | None = None
-    ):
-        super().__init__(timeout=900)
-        self.duration_seconds = max(1, duration_seconds) if duration_seconds > 0 else 1
-        self.is_thinking = is_thinking
-        self.is_enabled = is_enabled
-        self.thought_data = thought_data or {"thoughts": "", "formatted_thoughts": None, "tool_calls": []}
-        self.model_name = (model_name or (self.thought_data.get("model") if self.thought_data else "")).lower()
-        
-        self.active_container: ThoughtContainerView | None = None
-        self.active_interaction: discord.Interaction | None = None
-        self.is_inspecting: bool = False
-        self.update_lock = asyncio.Lock()
-
-        time_str = f"{self.duration_seconds}s"
-        self.button = Button(
-            label=f"🧠 Thought for {time_str}",
-            style=discord.ButtonStyle.secondary,
-            custom_id="priesty_final_thought_btn",
-            disabled=not self.is_enabled
-        )
-        self.button.callback = self._on_button_click
-        self.add_item(self.button)
-
-    def update_label(self, seconds: int, is_thinking: bool = False):
-        self.duration_seconds = max(1, seconds) if seconds > 0 else 1
-        self.is_thinking = is_thinking
-        time_str = f"{self.duration_seconds}s"
-        self.button.label = f"🧠 Thought for {time_str}"
-        self.button.disabled = False
-
-    async def _on_button_click(self, interaction: discord.Interaction):
-        raw_thoughts = self.thought_data.get("thoughts", "")
-        formatted_thoughts = self.thought_data.get("formatted_thoughts")
-        tool_calls = self.thought_data.get("tool_calls", [])
-
-        if self.is_thinking:
-            self.active_container = ThoughtContainerView(
-                raw_thoughts=raw_thoughts,
-                formatted_thoughts=raw_thoughts,
-                tool_calls=tool_calls,
-                duration_seconds=self.duration_seconds,
-                is_thinking=True,
-                show_toggle=False,
-                parent_view=self,
-                model_name=self.model_name
-            )
-            self.active_interaction = interaction
-            try:
-                await interaction.response.send_message(view=self.active_container, ephemeral=True)
-            except Exception:
-                pass
-        else:
-            container = ThoughtContainerView(
-                raw_thoughts=raw_thoughts,
-                formatted_thoughts=formatted_thoughts,
-                tool_calls=tool_calls,
-                duration_seconds=self.duration_seconds,
-                is_thinking=False,
-                show_toggle=True,
-                model_name=self.model_name
-            )
-            try:
-                await interaction.response.send_message(view=container, ephemeral=True)
-            except Exception:
-                pass

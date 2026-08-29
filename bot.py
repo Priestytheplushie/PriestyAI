@@ -18,9 +18,21 @@ from core.poll_manager import poll_manager
 from core.searxng_client import searxng_client
 from core.playground_server import playground_server
 from core.screenshot_service import screenshot_service
-from agent.session_manager import session_manager
+from core.smee_service import smee_service
+from core.github_app_client import github_app_client
+from agent.session_manager import session_manager, normalize_repo_url
+from agent.git_manager import git_manager
 from agent.engine import AgentEngine
-from agent.views import AgentStepInspectorView, AgentFinalDeliverableView, build_agent_new_task_modal
+from agent.views import (
+    AgentStepInspectorView,
+    AgentFinalDeliverableView,
+    AgentReadyForReviewView,
+    AgentSignOffStepView,
+    AgentSignOffInspectorView,
+    AgentPRPublishedView,
+    build_agent_new_task_modal,
+    build_agent_signoff_modal
+)
 from agent.constants import OCTICONS_MAP
 from handlers.chat_handler import ChatHandler
 from commands import setup_commands, build_retry_placeholder_layout
@@ -36,7 +48,11 @@ from handlers.stream_handler import (
 from ui.thought_container import ThoughtContainerView
 from ui.context_views import BranchTranscriptView
 from ui.artifact_views import build_code_preview_modal, build_artifact_open_modal, prepare_artifact_download_payload
-from ui.quiz_views import QuizActiveStepperView
+from ui.quiz_views import (
+    QuizActiveStepperView,
+    QuizScoreSummaryView,
+    build_quiz_spoiler_warning_view
+)
 from ui.onboarding_views import build_welcome_terms_modal, BannedUserNoticeView
 from core.moderation import is_user_banned
 from google.genai import types
@@ -60,9 +76,12 @@ class PriestyBot(discord.Client):
     async def setup_hook(self):
         asyncio.create_task(searxng_client.ensure_running())
         asyncio.create_task(playground_server.start())
+        asyncio.create_task(smee_service.start())
         asyncio.create_task(screenshot_service.start())
         asyncio.create_task(session_manager.prune_stale_workspaces())
         asyncio.create_task(model_catalog.ensure_initialized())
+
+        smee_service.register_listener(self._on_github_webhook_event)
 
         setup_commands(self.tree)
         try:
@@ -71,7 +90,37 @@ class PriestyBot(discord.Client):
         except Exception as e:
             logger.error(f"[CommandTree] Failed to sync application commands: {e}")
 
+    async def _on_github_webhook_event(self, event_type: str, payload: dict[str, Any]):
+        if event_type in ["installation", "installation_repositories"]:
+            action = payload.get("action", "")
+            if action in ["created", "added"]:
+                repos = payload.get("repositories_added") or payload.get("repositories", [])
+                for repo_info in repos:
+                    full_name = repo_info.get("full_name", "")
+                    if not full_name:
+                        continue
+                    parts = full_name.split("/")
+                    if len(parts) == 2:
+                        owner, repo_name = parts
+                        active_sessions = session_manager.get_active_sessions_for_repo(owner, repo_name)
+                        for sess in active_sessions:
+                            rev_mid = sess.get("review_message_id")
+                            th_id = sess.get("thread_id")
+                            pr_data = sess.get("github_pr_data", {})
+                            if rev_mid and th_id and pr_data:
+                                try:
+                                    channel = self.get_channel(int(th_id)) or await self.fetch_channel(int(th_id))
+                                    if channel:
+                                        msg = await channel.fetch_message(int(rev_mid))
+                                        if msg:
+                                            new_rev_view = AgentReadyForReviewView(session=sess, pr_data=pr_data, is_installed=True)
+                                            await msg.edit(view=new_rev_view)
+                                            logger.info(f"[GitHubWebhook] Automatically unlocked Review card #{rev_mid} on thread {th_id}")
+                                except Exception as ex:
+                                    logger.debug(f"[GitHubWebhook] Failed to update review message: {ex}")
+
     async def close(self):
+        await smee_service.stop()
         await screenshot_service.stop()
         await playground_server.stop()
         await super().close()
@@ -278,10 +327,58 @@ class PriestyBot(discord.Client):
                                 break
 
                 if quiz_data and quiz_data.get("questions"):
+                    total_q = len(quiz_data["questions"])
+                    past_attempt = branch_manager.get_quiz_attempt(quiz_id, interaction.user.id)
+
+                    if past_attempt and past_attempt.get("is_completed", 0) == 1:
+                        summary_view = QuizScoreSummaryView(
+                            quiz_data=quiz_data,
+                            user=interaction.user,
+                            score=past_attempt.get("score", 0),
+                            total_questions=past_attempt.get("total_questions", total_q),
+                            skipped=past_attempt.get("skipped", 0),
+                            answers=past_attempt.get("answers", {}),
+                            headline=past_attempt.get("headline", "Solid progress! Keep up the good work."),
+                            strengths=past_attempt.get("strengths", []),
+                            focus_areas=past_attempt.get("focus_areas", []),
+                            message_id=msg_id
+                        )
+                        await interaction.response.send_message(view=summary_view, ephemeral=True)
+                        return
+
+                    saved_answers = past_attempt.get("answers", {}) if past_attempt else {}
+                    start_idx = past_attempt.get("current_idx", 0) if past_attempt else 0
+
+                    async def on_progress_cb(cur_idx, ans):
+                        branch_manager.save_quiz_attempt_progress(
+                            quiz_id=quiz_id,
+                            user_id=interaction.user.id,
+                            current_idx=cur_idx,
+                            answers=ans,
+                            total_questions=total_q
+                        )
+
+                    async def on_finish_save_cb(sc, tot, sk, head, ans, st, foc):
+                        branch_manager.finalize_quiz_attempt(
+                            quiz_id=quiz_id,
+                            user_id=interaction.user.id,
+                            score=sc,
+                            total_questions=tot,
+                            skipped=sk,
+                            headline=head,
+                            answers=ans,
+                            strengths=st,
+                            focus_areas=foc
+                        )
+
                     stepper_view = QuizActiveStepperView(
                         quiz_data=quiz_data,
                         user=interaction.user,
-                        message_id=msg_id
+                        message_id=msg_id,
+                        saved_answers=saved_answers,
+                        initial_idx=start_idx,
+                        on_progress_callback=on_progress_cb,
+                        on_finish_callback=on_finish_save_cb
                     )
                     await interaction.response.send_message(view=stepper_view, ephemeral=True)
                     return
@@ -755,7 +852,10 @@ class PriestyBot(discord.Client):
             return
 
         if custom_id.startswith("gen_thought_") and not custom_id.startswith("gen_thought_agent_"):
-            parts = custom_id.replace("gen_thought_", "").split("_")
+            is_forced = custom_id.startswith("gen_thought_force_")
+            clean_id = custom_id.replace("gen_thought_force_", "") if is_forced else custom_id.replace("gen_thought_", "")
+            parts = clean_id.split("_")
+
             if len(parts) >= 2:
                 msg_id = parts[0]
                 v_idx = int(parts[1]) if parts[1].isdigit() else 1
@@ -765,6 +865,20 @@ class PriestyBot(discord.Client):
                     versions = gen.get("versions", [])
                     if 1 <= v_idx <= len(versions):
                         v_data = versions[v_idx - 1]
+
+                        has_quiz_block = False
+                        for block in v_data.get("timeline_blocks", []):
+                            if block.get("type") == "quiz":
+                                has_quiz_block = True
+                                break
+
+                        if (has_quiz_block or v_data.get("is_quiz")) and not is_forced:
+                            warning_card = build_quiz_spoiler_warning_view(root_id, v_idx)
+                            if interaction.response.is_done():
+                                await interaction.followup.send(view=warning_card, ephemeral=True)
+                            else:
+                                await interaction.response.send_message(view=warning_card, ephemeral=True)
+                            return
 
                         raw_thoughts = v_data.get("thoughts", "")
                         formatted_thoughts = v_data.get("formatted_thoughts")
@@ -793,15 +907,24 @@ class PriestyBot(discord.Client):
                         )
                         try:
                             if files:
-                                await interaction.response.send_message(view=container, files=files, ephemeral=True)
+                                if interaction.response.is_done():
+                                    await interaction.followup.send(view=container, files=files, ephemeral=True)
+                                else:
+                                    await interaction.response.send_message(view=container, files=files, ephemeral=True)
                             else:
-                                await interaction.response.send_message(view=container, ephemeral=True)
+                                if interaction.response.is_done():
+                                    await interaction.followup.send(view=container, ephemeral=True)
+                                else:
+                                    await interaction.response.send_message(view=container, ephemeral=True)
                             return
                         except Exception as ex:
                             logger.warning(f"Failed to open thought container: {ex}")
                             return
 
-            await interaction.response.send_message(content="❌ Thoughts unavailable for this version.", ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(content="❌ Thoughts unavailable for this version.", ephemeral=True)
+            else:
+                await interaction.response.send_message(content="❌ Thoughts unavailable for this version.", ephemeral=True)
             return
 
         if custom_id.startswith("agent_step_view_"):
@@ -947,6 +1070,227 @@ class PriestyBot(discord.Client):
             modal = build_agent_new_task_modal(session_id, on_submit=on_new_task_submit)
             await interaction.response.send_modal(modal)
             return
+
+        if custom_id.startswith("agent_signoff:"):
+            session_id = custom_id.replace("agent_signoff:", "")
+            session = session_manager.get_session_by_id(session_id)
+            if not session:
+                await interaction.response.send_message(content="❌ Agent session not found.", ephemeral=True)
+                return
+
+            perms = getattr(interaction.user, "guild_permissions", None)
+            if not session_manager.is_collaborator(session, interaction.user.id, perms):
+                await interaction.response.send_message(content="❌ Only session collaborators can sign off on this commit.", ephemeral=True)
+                return
+
+            pr_data = session.get("github_pr_data", {})
+            prefilled_commit = pr_data.get("commit_message", "feat: implement requested changes")
+            is_creator = (str(interaction.user.id) == str(session.get("creator_id")))
+
+            async def on_signoff_modal_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+                c_msg = data.get("commit_message", "").strip() or prefilled_commit
+                g_name = data.get("git_name", "").strip()
+                g_email = data.get("git_email", "").strip()
+                force_push_val = data.get("force_push", [])
+                
+                is_force = False
+                if isinstance(force_push_val, list):
+                    is_force = "force" in force_push_val
+                elif isinstance(force_push_val, str):
+                    is_force = (force_push_val == "force")
+
+                is_anonymous = not (g_name and g_email and "@" in g_email)
+
+                session_manager.record_signoff(
+                    session_id=session_id,
+                    user_id=interaction.user.id,
+                    user_name=interaction.user.display_name,
+                    git_name=g_name,
+                    git_email=g_email,
+                    commit_message=c_msg,
+                    is_anonymous=is_anonymous
+                )
+
+                await sub_inter.response.defer(ephemeral=True)
+
+                thread = interaction.channel
+                if isinstance(thread, discord.Thread):
+                    step_card = AgentSignOffStepView(
+                        user_name=interaction.user.display_name,
+                        user_id=interaction.user.id,
+                        session_id=session_id,
+                        is_anonymous=is_anonymous
+                    )
+                    await thread.send(view=step_card)
+
+                updated_session = session_manager.get_session_by_id(session_id)
+                rev_mid = updated_session.get("review_message_id") if updated_session else None
+                if rev_mid and isinstance(thread, discord.Thread):
+                    try:
+                        r_msg = await thread.fetch_message(int(rev_mid))
+                        if r_msg:
+                            updated_pr_data = updated_session.get("github_pr_data", {})
+                            updated_view = AgentReadyForReviewView(
+                                session=updated_session,
+                                pr_data=updated_pr_data,
+                                is_installed=True
+                            )
+                            await r_msg.edit(view=updated_view)
+                    except Exception as ex:
+                        logger.debug(f"Failed to edit review card on signoff: {ex}")
+
+                if is_creator and is_force:
+                    await sub_inter.followup.send(content="🚀 **Creator Override:** Force publishing branch to GitHub...", ephemeral=True)
+                    asyncio.create_task(self._execute_publish_pr_pipeline(thread, updated_session))
+                else:
+                    collabs = updated_session.get("collaborators", []) if updated_session else []
+                    signoffs = updated_session.get("signoffs", {}) if updated_session else {}
+                    if len(signoffs) >= max(1, len(collabs)):
+                        await sub_inter.followup.send(content="✅ **All Sign-offs Complete!** Click **Publish Branch** to open the PR.", ephemeral=True)
+                    else:
+                        await sub_inter.followup.send(content="✅ **Sign-off Recorded!** Waiting for remaining collaborators...", ephemeral=True)
+
+            modal = build_agent_signoff_modal(
+                session_id=session_id,
+                prefilled_commit_message=prefilled_commit,
+                is_creator=is_creator,
+                on_submit=on_signoff_modal_submit
+            )
+            await interaction.response.send_modal(modal)
+            return
+
+        if custom_id.startswith("agent_signoff_view:"):
+            parts = custom_id.split(":")
+            if len(parts) >= 3:
+                session_id = parts[1]
+                target_uid = parts[2]
+                session = session_manager.get_session_by_id(session_id)
+                if session:
+                    signoffs = session.get("signoffs", {})
+                    s_data = signoffs.get(target_uid)
+                    if s_data:
+                        inspector = AgentSignOffInspectorView(s_data)
+                        await interaction.response.send_message(view=inspector, ephemeral=True)
+                        return
+
+            await interaction.response.send_message(content="❌ Sign-off record expired.", ephemeral=True)
+            return
+
+        if custom_id.startswith("agent_publish_pr:"):
+            session_id = custom_id.replace("agent_publish_pr:", "")
+            session = session_manager.get_session_by_id(session_id)
+            if not session:
+                await interaction.response.send_message(content="❌ Agent session not found.", ephemeral=True)
+                return
+
+            perms = getattr(interaction.user, "guild_permissions", None)
+            if not session_manager.is_collaborator(session, interaction.user.id, perms):
+                await interaction.response.send_message(content="❌ Only session collaborators can publish this branch.", ephemeral=True)
+                return
+
+            await interaction.response.defer(ephemeral=False)
+            thread = interaction.channel
+            if isinstance(thread, discord.Thread):
+                await self._execute_publish_pr_pipeline(thread, session, interaction=interaction)
+            else:
+                await interaction.followup.send(content="❌ Thread channel unavailable.", ephemeral=True)
+            return
+
+    async def _execute_publish_pr_pipeline(
+        self,
+        thread: discord.Thread,
+        session: dict[str, Any],
+        interaction: discord.Interaction | None = None
+    ):
+        session_id = session["session_id"]
+        repo_url = session.get("repo_url", "").strip()
+        pr_data = session.get("github_pr_data", {})
+
+        if not repo_url or not pr_data:
+            msg_text = "❌ Missing repository or PR configuration."
+            if interaction:
+                await interaction.followup.send(content=msg_text, ephemeral=True)
+            else:
+                await thread.send(content=msg_text)
+            return
+
+        _, owner, repo = normalize_repo_url(repo_url)
+        token, _ = await github_app_client.get_installation_token_for_repo(owner, repo)
+        if not token:
+            msg_text = f"❌ GitHub App is not installed on **{owner}/{repo}**. Please install it to proceed."
+            if interaction:
+                await interaction.followup.send(content=msg_text, ephemeral=True)
+            else:
+                await thread.send(content=msg_text)
+            return
+
+        workspace_path = session["workspace_path"]
+        branch_name = pr_data.get("branch_name", "priestyai/feature-update")
+        commit_msg = pr_data.get("commit_message", "feat: implement requested changes")
+        pr_title = pr_data.get("pr_title", "feat: implement requested changes")
+        pr_body = pr_data.get("pr_body", "Code changes ready for review.")
+
+        signoffs_dict = session.get("signoffs", {})
+        signoffs_list = list(signoffs_dict.values())
+
+        commit_success, commit_err = await git_manager.stage_and_commit(workspace_path, commit_msg, signoffs_list)
+        if not commit_success:
+            msg_text = f"❌ Failed to stage commit: `{commit_err}`"
+            if interaction:
+                await interaction.followup.send(content=msg_text, ephemeral=True)
+            else:
+                await thread.send(content=msg_text)
+            return
+
+        pr_res = await git_manager.publish_branch_and_create_pr(
+            workspace_path=workspace_path,
+            repo_url=repo_url,
+            branch_name=branch_name,
+            pr_title=pr_title,
+            pr_body=pr_body,
+            token=token
+        )
+
+        if "error" in pr_res:
+            msg_text = f"❌ Failed to publish PR: `{pr_res['error']}`"
+            if interaction:
+                await interaction.followup.send(content=msg_text, ephemeral=True)
+            else:
+                await thread.send(content=msg_text)
+            return
+
+        pr_number = pr_res.get("pr_number", 1)
+        pr_url_val = pr_res.get("html_url", f"https://github.com/{owner}/{repo}/pull/{pr_number}")
+
+        session_manager.update_session(
+            session_id,
+            pr_url=pr_url_val,
+            pr_number=pr_number
+        )
+
+        co_author_names = [s["git_name"] for s in signoffs_list if not s.get("is_anonymous") and s.get("git_name")]
+
+        rev_mid = session.get("review_message_id")
+        if rev_mid:
+            try:
+                r_msg = await thread.fetch_message(int(rev_mid))
+                if r_msg:
+                    published_view = AgentPRPublishedView(
+                        pr_number=pr_number,
+                        pr_title=pr_title,
+                        pr_url=pr_url_val,
+                        branch_name=branch_name,
+                        co_authors=co_author_names
+                    )
+                    await r_msg.edit(view=published_view)
+            except Exception as ex:
+                logger.debug(f"Failed to edit review message to published: {ex}")
+
+        pr_announcement = f"{OCTICONS_MAP['oct_pr']} **Pull Request Opened:** [#{pr_number} {pr_title}]({pr_url_val})"
+        if interaction:
+            await interaction.followup.send(content=pr_announcement, ephemeral=False)
+        else:
+            await thread.send(content=pr_announcement)
 
 if __name__ == "__main__":
     bot = PriestyBot()

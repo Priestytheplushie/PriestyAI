@@ -15,6 +15,8 @@ from agent.constants import (
     AGENT_EXECUTION_SYSTEM_INSTRUCTION
 )
 from agent.session_manager import session_manager, normalize_repo_url
+from agent.git_manager import git_manager
+from core.github_app_client import github_app_client
 from agent.parser import (
     parse_agent_questions_from_text,
     parse_agent_citations_from_text,
@@ -29,6 +31,7 @@ from agent.views import (
     AgentQuestionView,
     AgentPlanApprovalView,
     AgentFinalDeliverableView,
+    AgentReadyForReviewView,
     compute_unified_diff_str
 )
 from agent.tools import agent_list_dir
@@ -1103,6 +1106,41 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             else:
                 c_msg = await thread.send(view=final_view)
                 session_manager.update_session(session_id, last_completed_message_id=str(c_msg.id))
+
+            repo_url = session.get("repo_url", "").strip()
+            if repo_url:
+                has_changes, changed_files, diff_stats = await git_manager.detect_code_changes(session["workspace_path"])
+                if has_changes:
+                    branch_slug = git_manager.format_feature_branch_name(session["initial_prompt"])
+                    commit_msg, pr_title, pr_desc = await git_manager.generate_pr_metadata(
+                        session["initial_prompt"],
+                        changed_files,
+                        clean_summary
+                    )
+
+                    _, owner, repo_name = normalize_repo_url(repo_url)
+                    inst_token, _ = await github_app_client.get_installation_token_for_repo(owner, repo_name)
+                    is_app_installed = bool(inst_token)
+
+                    pr_data = {
+                        "branch_name": branch_slug,
+                        "pr_title": pr_title,
+                        "pr_body": pr_desc,
+                        "commit_message": commit_msg,
+                        "diff_stats": diff_stats,
+                        "changed_files": changed_files
+                    }
+
+                    session_manager.update_session(session_id, github_pr_data=pr_data)
+
+                    review_view = AgentReadyForReviewView(
+                        session=session,
+                        pr_data=pr_data,
+                        is_installed=is_app_installed
+                    )
+                    review_msg = await thread.send(view=review_view)
+                    session_manager.update_session(session_id, review_message_id=str(review_msg.id))
+                    logger.info(f"[AgentExecution] Rendered Ready for Review card #{review_msg.id} on {branch_slug} (Installed: {is_app_installed})")
 
         except Exception as e:
             stop_exec_loop.set()

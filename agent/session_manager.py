@@ -75,6 +75,11 @@ class AgentSessionManager:
                     last_plan_message_id TEXT DEFAULT '',
                     last_completed_message_id TEXT DEFAULT '',
                     header_message_id TEXT DEFAULT '',
+                    review_message_id TEXT DEFAULT '',
+                    github_pr_data_json TEXT DEFAULT '{}',
+                    signoffs_json TEXT DEFAULT '{}',
+                    pr_url TEXT DEFAULT '',
+                    pr_number INTEGER DEFAULT 0,
                     is_coding_task INTEGER DEFAULT 1,
                     task_type TEXT DEFAULT 'general',
                     citations_json TEXT DEFAULT '[]',
@@ -122,6 +127,16 @@ class AgentSessionManager:
                     cursor.execute("ALTER TABLE agent_sessions ADD COLUMN last_plan_message_id TEXT DEFAULT ''")
                 if "last_completed_message_id" not in columns:
                     cursor.execute("ALTER TABLE agent_sessions ADD COLUMN last_completed_message_id TEXT DEFAULT ''")
+                if "review_message_id" not in columns:
+                    cursor.execute("ALTER TABLE agent_sessions ADD COLUMN review_message_id TEXT DEFAULT ''")
+                if "github_pr_data_json" not in columns:
+                    cursor.execute("ALTER TABLE agent_sessions ADD COLUMN github_pr_data_json TEXT DEFAULT '{}'")
+                if "signoffs_json" not in columns:
+                    cursor.execute("ALTER TABLE agent_sessions ADD COLUMN signoffs_json TEXT DEFAULT '{}'")
+                if "pr_url" not in columns:
+                    cursor.execute("ALTER TABLE agent_sessions ADD COLUMN pr_url TEXT DEFAULT ''")
+                if "pr_number" not in columns:
+                    cursor.execute("ALTER TABLE agent_sessions ADD COLUMN pr_number INTEGER DEFAULT 0")
                 if "is_coding_task" not in columns:
                     cursor.execute("ALTER TABLE agent_sessions ADD COLUMN is_coding_task INTEGER DEFAULT 1")
                 if "task_type" not in columns:
@@ -182,8 +197,9 @@ class AgentSessionManager:
                     session_id, thread_id, channel_id, guild_id,
                     creator_id, collaborators_json, repo_url, initial_prompt,
                     state, active_plan_version, workspace_path, witty_statuses_json,
-                    is_coding_task, task_type, citations_json, tasks_history_json, thread_title
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planning', 1, ?, ?, ?, ?, '[]', '[]', ?)
+                    is_coding_task, task_type, citations_json, tasks_history_json, thread_title,
+                    github_pr_data_json, signoffs_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planning', 1, ?, ?, ?, ?, '[]', '[]', ?, '{}', '{}')
             """, (
                 session_id,
                 str(thread_id),
@@ -216,6 +232,8 @@ class AgentSessionManager:
                 d["witty_statuses"] = json.loads(d.get("witty_statuses_json") or "[]")
                 d["citations"] = json.loads(d.get("citations_json") or "[]")
                 d["tasks_history"] = json.loads(d.get("tasks_history_json") or "[]")
+                d["github_pr_data"] = json.loads(d.get("github_pr_data_json") or "{}")
+                d["signoffs"] = json.loads(d.get("signoffs_json") or "{}")
                 return d
         return None
 
@@ -230,8 +248,29 @@ class AgentSessionManager:
                 d["witty_statuses"] = json.loads(d.get("witty_statuses_json") or "[]")
                 d["citations"] = json.loads(d.get("citations_json") or "[]")
                 d["tasks_history"] = json.loads(d.get("tasks_history_json") or "[]")
+                d["github_pr_data"] = json.loads(d.get("github_pr_data_json") or "{}")
+                d["signoffs"] = json.loads(d.get("signoffs_json") or "{}")
                 return d
         return None
+
+    def get_active_sessions_for_repo(self, repo_owner: str, repo_name: str) -> list[dict[str, Any]]:
+        target_sub = f"{repo_owner.lower()}/{repo_name.lower()}"
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM agent_sessions WHERE repo_url != ''")
+            matches = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                r_url = d.get("repo_url", "").lower()
+                if target_sub in r_url:
+                    d["collaborators"] = json.loads(d.get("collaborators_json") or "[]")
+                    d["witty_statuses"] = json.loads(d.get("witty_statuses_json") or "[]")
+                    d["citations"] = json.loads(d.get("citations_json") or "[]")
+                    d["tasks_history"] = json.loads(d.get("tasks_history_json") or "[]")
+                    d["github_pr_data"] = json.loads(d.get("github_pr_data_json") or "{}")
+                    d["signoffs"] = json.loads(d.get("signoffs_json") or "{}")
+                    matches.append(d)
+            return matches
 
     def update_session(self, session_id: str, **kwargs):
         session = self.get_session_by_id(session_id)
@@ -241,6 +280,8 @@ class AgentSessionManager:
         session.update(kwargs)
         citations_json = json.dumps(kwargs.get("citations", session.get("citations", [])))
         tasks_history_json = json.dumps(kwargs.get("tasks_history", session.get("tasks_history", [])))
+        github_pr_data_json = json.dumps(kwargs.get("github_pr_data", session.get("github_pr_data", {})))
+        signoffs_json = json.dumps(kwargs.get("signoffs", session.get("signoffs", {})))
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -248,7 +289,9 @@ class AgentSessionManager:
                 UPDATE agent_sessions
                 SET state = ?, active_plan_version = ?, container_id = ?,
                     last_plan_message_id = ?, last_completed_message_id = ?, header_message_id = ?,
-                    citations_json = ?, tasks_history_json = ?, task_type = ?, thread_title = ?, last_active_at = CURRENT_TIMESTAMP
+                    review_message_id = ?, github_pr_data_json = ?, signoffs_json = ?,
+                    pr_url = ?, pr_number = ?, citations_json = ?, tasks_history_json = ?,
+                    task_type = ?, thread_title = ?, last_active_at = CURRENT_TIMESTAMP
                 WHERE session_id = ?
             """, (
                 session.get("state", "planning"),
@@ -257,6 +300,11 @@ class AgentSessionManager:
                 session.get("last_plan_message_id", ""),
                 session.get("last_completed_message_id", ""),
                 session.get("header_message_id", ""),
+                session.get("review_message_id", ""),
+                github_pr_data_json,
+                signoffs_json,
+                session.get("pr_url", ""),
+                int(session.get("pr_number", 0)),
                 citations_json,
                 tasks_history_json,
                 session.get("task_type", "general"),
@@ -264,6 +312,38 @@ class AgentSessionManager:
                 session_id
             ))
             conn.commit()
+
+    def record_signoff(
+        self,
+        session_id: str,
+        user_id: str | int,
+        user_name: str,
+        git_name: str,
+        git_email: str,
+        commit_message: str,
+        is_anonymous: bool = False
+    ):
+        session = self.get_session_by_id(session_id)
+        if not session:
+            return
+
+        signoffs = session.get("signoffs", {})
+        signoffs[str(user_id)] = {
+            "user_id": str(user_id),
+            "user_name": user_name,
+            "git_name": git_name.strip(),
+            "git_email": git_email.strip(),
+            "commit_message": commit_message.strip(),
+            "is_anonymous": is_anonymous,
+            "signed_at": int(time.time())
+        }
+
+        pr_data = session.get("github_pr_data", {})
+        if commit_message.strip():
+            pr_data["commit_message"] = commit_message.strip()
+
+        self.update_session(session_id, signoffs=signoffs, github_pr_data=pr_data)
+        logger.info(f"[AgentSession] Recorded sign-off from {user_name} ({user_id}) for session #{session_id} (Anon: {is_anonymous})")
 
     def record_completed_task(
         self,

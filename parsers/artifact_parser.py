@@ -1,6 +1,7 @@
 import re
 import time
 import io
+import random
 import zipfile
 import asyncio
 import logging
@@ -96,6 +97,7 @@ def parse_xml_quiz_body(body_content: str, default_title: str) -> list[dict[str,
                 })
 
         if q_text and options:
+            random.shuffle(options)
             questions.append({
                 "text": q_text,
                 "category": q_cat,
@@ -347,7 +349,7 @@ class ArtifactStreamParser:
                         "status": "generating",
                         "is_generating": True,
                         "start_time": self.current_start_time,
-                        "question_count": 5
+                        "question_count": 10
                     }
                     self.dispatcher.add_quiz_placeholder_record(quiz_placeholder)
                     await self.dispatcher.flush(is_final=False, force=True)

@@ -105,15 +105,35 @@ class BranchManager:
                     attempt_id TEXT PRIMARY KEY,
                     quiz_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
-                    score INTEGER NOT NULL,
+                    score INTEGER DEFAULT 0,
                     total_questions INTEGER NOT NULL,
+                    skipped INTEGER DEFAULT 0,
+                    is_completed INTEGER DEFAULT 0,
+                    current_idx INTEGER DEFAULT 0,
+                    headline TEXT DEFAULT 'Solid progress! Keep up the good work.',
                     answers_json TEXT NOT NULL,
-                    strengths_json TEXT NOT NULL,
-                    focus_areas_json TEXT NOT NULL,
+                    strengths_json TEXT DEFAULT '[]',
+                    focus_areas_json TEXT DEFAULT '[]',
                     completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user ON quiz_attempts(quiz_id, user_id)")
+
+            cursor.execute("PRAGMA table_info(quiz_attempts)")
+            att_columns = [row["name"] for row in cursor.fetchall()]
+            if "skipped" not in att_columns and "attempt_id" in att_columns:
+                cursor.execute("ALTER TABLE quiz_attempts ADD COLUMN skipped INTEGER DEFAULT 0")
+            if "headline" not in att_columns and "attempt_id" in att_columns:
+                cursor.execute("ALTER TABLE quiz_attempts ADD COLUMN headline TEXT DEFAULT 'Solid progress! Keep up the good work.'")
+            if "is_completed" not in att_columns and "attempt_id" in att_columns:
+                cursor.execute("ALTER TABLE quiz_attempts ADD COLUMN is_completed INTEGER DEFAULT 0")
+            if "current_idx" not in att_columns and "attempt_id" in att_columns:
+                cursor.execute("ALTER TABLE quiz_attempts ADD COLUMN current_idx INTEGER DEFAULT 0")
+
+            cursor.execute("""
+                DELETE FROM conversation_artifacts 
+                WHERE filename = 'study_guide.md' AND channel_id NOT LIKE 'quiz_guide_%'
+            """)
 
             conn.commit()
 
@@ -170,36 +190,117 @@ class BranchManager:
                 return d
         return None
 
-    def save_quiz_attempt(
+    def save_quiz_attempt_progress(
         self,
         quiz_id: str,
         user_id: str | int,
-        score: int,
-        total_questions: int,
-        answers: dict[int, int],
-        strengths: list[str],
-        focus_areas: list[str]
+        current_idx: int,
+        answers: dict[int, int | None],
+        total_questions: int = 0
     ) -> str:
-        attempt_id = f"att_{int(time.time() * 1000)}"
+        attempt_id = f"att_{quiz_id}_{user_id}"
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO quiz_attempts (
                     attempt_id, quiz_id, user_id, score, total_questions,
-                    answers_json, strengths_json, focus_areas_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    skipped, is_completed, current_idx, headline, answers_json, strengths_json, focus_areas_json
+                ) VALUES (?, ?, ?, 0, ?, 0, 0, ?, '', ?, '[]', '[]')
+                ON CONFLICT(attempt_id) DO UPDATE SET
+                    current_idx = excluded.current_idx,
+                    answers_json = excluded.answers_json,
+                    completed_at = CURRENT_TIMESTAMP
+            """, (
+                attempt_id,
+                str(quiz_id),
+                str(user_id),
+                int(total_questions),
+                int(current_idx),
+                json.dumps(answers)
+            ))
+            conn.commit()
+        return attempt_id
+
+    def finalize_quiz_attempt(
+        self,
+        quiz_id: str,
+        user_id: str | int,
+        score: int,
+        total_questions: int,
+        skipped: int,
+        headline: str,
+        answers: dict[int, int | None],
+        strengths: list[str],
+        focus_areas: list[str]
+    ) -> str:
+        attempt_id = f"att_{quiz_id}_{user_id}"
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO quiz_attempts (
+                    attempt_id, quiz_id, user_id, score, total_questions,
+                    skipped, is_completed, current_idx, headline, answers_json, strengths_json, focus_areas_json
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                ON CONFLICT(attempt_id) DO UPDATE SET
+                    score = excluded.score,
+                    total_questions = excluded.total_questions,
+                    skipped = excluded.skipped,
+                    is_completed = 1,
+                    current_idx = excluded.current_idx,
+                    headline = excluded.headline,
+                    answers_json = excluded.answers_json,
+                    strengths_json = excluded.strengths_json,
+                    focus_areas_json = excluded.focus_areas_json,
+                    completed_at = CURRENT_TIMESTAMP
             """, (
                 attempt_id,
                 str(quiz_id),
                 str(user_id),
                 int(score),
                 int(total_questions),
+                int(skipped),
+                int(total_questions - 1),
+                headline.strip(),
                 json.dumps(answers),
                 json.dumps(strengths),
                 json.dumps(focus_areas)
             ))
             conn.commit()
+        logger.info(f"[BranchManager] Finalized quiz attempt '{attempt_id}' for user {user_id} on quiz {quiz_id} (Score: {score}/{total_questions})")
         return attempt_id
+
+    def get_quiz_attempt(self, quiz_id: str, user_id: str | int) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM quiz_attempts WHERE quiz_id = ? AND user_id = ? ORDER BY completed_at DESC LIMIT 1",
+                (str(quiz_id), str(user_id))
+            )
+            row = cursor.fetchone()
+            if row:
+                d = dict(row)
+                raw_ans = json.loads(d.get("answers_json") or "{}")
+                parsed_ans = {}
+                for k, v in raw_ans.items():
+                    try:
+                        parsed_ans[int(k)] = v
+                    except ValueError:
+                        parsed_ans[k] = v
+                d["answers"] = parsed_ans
+                d["strengths"] = json.loads(d.get("strengths_json") or "[]")
+                d["focus_areas"] = json.loads(d.get("focus_areas_json") or "[]")
+                return d
+        return None
+
+    def delete_quiz_attempts_for_user(self, quiz_id: str, user_id: str | int) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM quiz_attempts WHERE quiz_id = ? AND user_id = ?",
+                (str(quiz_id), str(user_id))
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
@@ -242,7 +343,7 @@ class BranchManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM conversation_artifacts WHERE channel_id = ? ORDER BY updated_at DESC LIMIT ?",
+                "SELECT * FROM conversation_artifacts WHERE channel_id = ? AND filename != 'study_guide.md' ORDER BY updated_at DESC LIMIT ?",
                 (str(channel_id), limit)
             )
             results = []

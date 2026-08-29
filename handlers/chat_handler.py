@@ -434,6 +434,7 @@ class ChatHandler:
         placeholder_view: PlaceholderLayoutView | None = None
         placeholder_task: asyncio.Task | None = None
         first_content_received = False
+        is_quiz_turn = False
 
         def get_current_msg():
             return response_msg
@@ -468,8 +469,9 @@ class ChatHandler:
                 duration_seconds=max(0, int(time.time() - thinking_start_time)),
                 is_enabled=bool(accumulated_thought_buffer or [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]),
                 on_answer_now_callback=on_answer_now_clicked,
-                thought_data={"thoughts": "".join(accumulated_thought_buffer), "tool_calls": tool_call_history, "model": active_model_used},
-                model_name=active_model_used
+                thought_data={"thoughts": "".join(accumulated_thought_buffer), "tool_calls": tool_call_history, "model": active_model_used, "is_quiz": is_quiz_turn},
+                model_name=active_model_used,
+                is_quiz=is_quiz_turn
             )
 
             try:
@@ -495,6 +497,11 @@ class ChatHandler:
                     if event_type == "ROUTED":
                         if payload.witty_statuses:
                             active_witty_statuses = payload.witty_statuses
+                        if getattr(payload, "is_quiz", False):
+                            is_quiz_turn = True
+                            if placeholder_view:
+                                placeholder_view.is_quiz = True
+                                placeholder_view.thought_data["is_quiz"] = True
                         if payload.thinking_level in ["HIGH", "MEDIUM", "LOW"] and not answer_now_event.is_set():
                             await ensure_placeholder_spawned()
 
@@ -632,6 +639,8 @@ class ChatHandler:
                 raw_collected_thoughts = "".join(accumulated_thought_buffer)
                 sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(sent_msg.id)]
 
+                has_quiz_in_blocks = any(b.get("type") == "quiz" for b in sanitized_timeline) or is_quiz_turn
+
                 initial_v_data = {
                     "version_idx": 1,
                     "content": parsed_initial_content,
@@ -641,6 +650,7 @@ class ChatHandler:
                     "thoughts": raw_collected_thoughts,
                     "formatted_thoughts": None,
                     "model": active_model_used,
+                    "is_quiz": has_quiz_in_blocks,
                     "tool_calls": tool_call_history,
                     "attachments": stored_attachments,
                     "staged_components": tool_context.staged_components,
@@ -808,6 +818,7 @@ class ChatHandler:
         placeholder_view: PlaceholderLayoutView | None = None
         placeholder_task: asyncio.Task | None = None
         first_content_received = False
+        is_quiz_turn = False
 
         def get_current_msg():
             return response_msg
@@ -817,7 +828,7 @@ class ChatHandler:
 
         async def on_answer_now_clicked(inter: discord.Interaction):
             nonlocal response_msg, first_content_received
-            logger.info(f"[Answer Now Triggered] User {inter.user} requested instant response. Deleting placeholder...")
+            logger.info(f"[Answer Now Triggered] User {inter.user} requested instant response.")
             
             try:
                 if not inter.response.is_done():
@@ -853,8 +864,9 @@ class ChatHandler:
                 duration_seconds=max(0, int(time.time() - thinking_start_time)),
                 is_enabled=bool(accumulated_thought_buffer or [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]),
                 on_answer_now_callback=on_answer_now_clicked,
-                thought_data={"thoughts": "".join(accumulated_thought_buffer), "tool_calls": tool_call_history, "model": active_model_used},
-                model_name=active_model_used
+                thought_data={"thoughts": "".join(accumulated_thought_buffer), "tool_calls": tool_call_history, "model": active_model_used, "is_quiz": is_quiz_turn},
+                model_name=active_model_used,
+                is_quiz=is_quiz_turn
             )
 
             try:
@@ -880,6 +892,11 @@ class ChatHandler:
                     if event_type == "ROUTED":
                         if payload.witty_statuses:
                             active_witty_statuses = payload.witty_statuses
+                        if getattr(payload, "is_quiz", False):
+                            is_quiz_turn = True
+                            if placeholder_view:
+                                placeholder_view.is_quiz = True
+                                placeholder_view.thought_data["is_quiz"] = True
                         if payload.thinking_level in ["HIGH", "MEDIUM", "LOW"] and not answer_now_event.is_set():
                             await ensure_placeholder_spawned()
 
@@ -946,14 +963,6 @@ class ChatHandler:
 
                         if placeholder_view and not answer_now_event.is_set():
                             placeholder_view.enable_thinking()
-                            placeholder_view.thought_data["tool_calls"] = tool_call_history
-                            await placeholder_view.push_live_update()
-
-                    elif event_type == "CASCADE_RESET":
-                        active_tool_start_times.clear()
-                        active_tool_subtext = None
-                        if placeholder_view and not answer_now_event.is_set():
-                            placeholder_view.thought_data["thoughts"] = "".join(accumulated_thought_buffer)
                             placeholder_view.thought_data["tool_calls"] = tool_call_history
                             await placeholder_view.push_live_update()
 
@@ -1059,6 +1068,8 @@ class ChatHandler:
                 raw_collected_thoughts = "".join(accumulated_thought_buffer)
                 sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(sent_msg.id)]
 
+                has_quiz_in_blocks = any(b.get("type") == "quiz" for b in sanitized_timeline) or is_quiz_turn
+
                 initial_v_data = {
                     "version_idx": 1,
                     "content": parsed_initial_content,
@@ -1068,6 +1079,7 @@ class ChatHandler:
                     "thoughts": raw_collected_thoughts,
                     "formatted_thoughts": None,
                     "model": active_model_used,
+                    "is_quiz": has_quiz_in_blocks,
                     "tool_calls": tool_call_history,
                     "attachments": stored_attachments,
                     "staged_components": tool_context.staged_components,

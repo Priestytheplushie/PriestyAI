@@ -5,6 +5,7 @@ import time
 import base64
 import asyncio
 import logging
+import aiohttp
 from typing import Any
 import discord
 from discord import app_commands
@@ -12,6 +13,7 @@ from config.settings import DISCORD_TOKEN
 from core.client_manager import client_manager
 from core.branch_manager import branch_manager
 from core.config_manager import config_manager
+from core.memory_manager import memory_manager, get_user_chat_session_id
 from core.poll_manager import poll_manager
 from core.searxng_client import searxng_client
 from core.playground_server import playground_server
@@ -22,16 +24,22 @@ from agent.views import AgentStepInspectorView, AgentFinalDeliverableView, build
 from agent.constants import OCTICONS_MAP
 from handlers.chat_handler import ChatHandler
 from commands import setup_commands, build_retry_placeholder_layout
+from commands.chat import build_user_chat_modal, execute_chat_turn
 from commands.generate import model_catalog
 from handlers.stream_handler import (
     build_v2_message_layout,
     apply_message_parsers,
     chunk_timeline,
-    cleanup_sibling_messages
+    cleanup_sibling_messages,
+    should_show_reply_button
 )
 from ui.thought_container import ThoughtContainerView
 from ui.context_views import BranchTranscriptView
 from ui.artifact_views import build_code_preview_modal, build_artifact_open_modal, prepare_artifact_download_payload
+from ui.quiz_views import QuizActiveStepperView
+from ui.onboarding_views import build_welcome_terms_modal, BannedUserNoticeView
+from core.moderation import is_user_banned
+from google.genai import types
 
 logger = logging.getLogger("PriestyAI.Main")
 
@@ -190,6 +198,97 @@ class PriestyBot(discord.Client):
                 return target_msg.attachments[0].url
             return None
 
+        if custom_id.startswith("chat_reply:") or custom_id == "btn_chat_reply":
+            if is_user_banned(interaction.user.id):
+                ban_view = BannedUserNoticeView(author=interaction.user)
+                await interaction.response.send_message(view=ban_view, ephemeral=True)
+                return
+
+            if not config_manager.has_user_agreed(interaction.user.id):
+                async def on_agreed(sub_inter: discord.Interaction):
+                    await sub_inter.response.send_message("✅ Terms accepted! You can now use the Reply button.", ephemeral=True)
+
+                modal = build_welcome_terms_modal(on_agree_callback=on_agreed)
+                await interaction.response.send_modal(modal)
+                return
+
+            async def on_reply_modal_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+                prompt_text = data.get("prompt", "").strip()
+                if not prompt_text:
+                    await sub_inter.response.send_message(content="❌ Message cannot be empty.", ephemeral=True)
+                    return
+
+                await sub_inter.response.defer(ephemeral=False)
+
+                raw_data = getattr(sub_inter, "data", {})
+                resolved_attachments = raw_data.get("resolved", {}).get("attachments", {})
+                attachment_parts: list[types.Part] = []
+                raw_image_bytes: list[bytes] = []
+
+                if resolved_attachments:
+                    async with aiohttp.ClientSession() as http_session:
+                        for att_id, att_obj in resolved_attachments.items():
+                            att_url = att_obj.get("url")
+                            att_fname = att_obj.get("filename", "file.bin")
+                            content_type = att_obj.get("content_type", "application/octet-stream")
+                            if att_url:
+                                try:
+                                    async with http_session.get(att_url) as resp:
+                                        if resp.status == 200:
+                                            file_bytes = await resp.read()
+                                            part = types.Part.from_bytes(data=file_bytes, mime_type=content_type)
+                                            attachment_parts.append(part)
+                                            if content_type.startswith("image/"):
+                                                raw_image_bytes.append(file_bytes)
+                                except Exception as dl_err:
+                                    logger.warning(f"Failed to download modal attachment '{att_fname}': {dl_err}")
+
+                raw_participants = data.get("channel_context", [])
+                if isinstance(raw_participants, str):
+                    raw_participants = [raw_participants] if raw_participants else []
+                elif not isinstance(raw_participants, list):
+                    raw_participants = []
+
+                await execute_chat_turn(
+                    interaction=sub_inter,
+                    prompt_text=prompt_text,
+                    raw_attachment_parts=attachment_parts,
+                    raw_image_bytes=raw_image_bytes,
+                    participant_entities=raw_participants,
+                    is_ephemeral=False
+                )
+
+            modal = build_user_chat_modal(on_submit=on_reply_modal_submit)
+            await interaction.response.send_modal(modal)
+            return
+
+        if custom_id.startswith("quizopen:"):
+            parts = custom_id.split(":")
+            if len(parts) >= 3:
+                msg_id = parts[1]
+                quiz_id = parts[2]
+
+                quiz_data = branch_manager.get_quiz(quiz_id)
+                if not quiz_data:
+                    gen = branch_manager.get_generation(msg_id)
+                    if gen:
+                        for block in gen.get("versions", [{}])[-1].get("timeline_blocks", []):
+                            if block.get("type") == "quiz" and block.get("quiz", {}).get("quiz_id") == quiz_id:
+                                quiz_data = block["quiz"]
+                                break
+
+                if quiz_data and quiz_data.get("questions"):
+                    stepper_view = QuizActiveStepperView(
+                        quiz_data=quiz_data,
+                        user=interaction.user,
+                        message_id=msg_id
+                    )
+                    await interaction.response.send_message(view=stepper_view, ephemeral=True)
+                    return
+
+            await interaction.response.send_message(content="❌ Quiz record not found or expired.", ephemeral=True)
+            return
+
         if custom_id.startswith("fup:"):
             parts = custom_id.split(":")
             if len(parts) >= 3:
@@ -214,6 +313,13 @@ class PriestyBot(discord.Client):
                             v_data["staged_followups"] = fups
                             branch_manager.update_version_data(root_id, active_v, v_data)
 
+                            show_reply = should_show_reply_button(
+                                bot=self,
+                                guild=interaction.guild,
+                                channel=interaction.channel,
+                                interaction=interaction
+                            )
+
                             mod_map = {m["modal_id"]: m for m in v_data.get("staged_modals", [])}
                             disabled_view = build_v2_message_layout(
                                 raw_text=v_data.get("content", "") if not v_data.get("timeline_blocks") else None,
@@ -225,6 +331,7 @@ class PriestyBot(discord.Client):
                                 modals_map=mod_map,
                                 thought_duration=max(1, v_data.get("duration_seconds", 1)),
                                 has_thoughts=v_data.get("has_thoughts", True),
+                                show_reply_button=show_reply,
                                 active_version=active_v,
                                 total_versions=len(versions),
                                 message_id=root_id,
@@ -283,7 +390,8 @@ class PriestyBot(discord.Client):
                             on_submit_callback=preview_submit,
                             version=target_v,
                             diff_stats=diff_tup,
-                            artifact_id=art_id
+                            artifact_id=art_id,
+                            user=interaction.user
                         )
                         await interaction.response.send_modal(modal)
                         return
@@ -321,7 +429,8 @@ class PriestyBot(discord.Client):
                                         on_submit_callback=gen_preview_submit,
                                         version=target_v,
                                         diff_stats=diff_tup,
-                                        artifact_id=art_id
+                                        artifact_id=art_id,
+                                        user=interaction.user
                                     )
                                     await interaction.response.send_modal(modal)
                                     return
@@ -365,7 +474,8 @@ class PriestyBot(discord.Client):
                         channel_id=chan_id,
                         message_id=msg_id,
                         attachment_url=att_url,
-                        on_submit_callback=open_submit
+                        on_submit_callback=open_submit,
+                        user=interaction.user
                     )
                     await interaction.response.send_modal(modal)
                     return
@@ -407,6 +517,13 @@ class PriestyBot(discord.Client):
                                     if block.get("type") == "artifact" and block.get("artifact", {}).get("artifact_id") == art_id:
                                         block["artifact"]["active_version"] = chosen_v
 
+                            show_reply = should_show_reply_button(
+                                bot=self,
+                                guild=interaction.guild,
+                                channel=interaction.channel,
+                                interaction=interaction
+                            )
+
                             updated_view = build_v2_message_layout(
                                 raw_text=v_content if not timeline_blocks else None,
                                 timeline_blocks=timeline_blocks,
@@ -417,6 +534,7 @@ class PriestyBot(discord.Client):
                                 modals_map=mod_map,
                                 thought_duration=dur,
                                 has_thoughts=has_t,
+                                show_reply_button=show_reply,
                                 active_version=active_v,
                                 total_versions=len(versions),
                                 message_id=root_id,
@@ -525,6 +643,13 @@ class PriestyBot(discord.Client):
                 staged_mods = target_version_data.get("staged_modals", [])
                 mod_map = {m["modal_id"]: m for m in staged_mods}
 
+                show_reply = should_show_reply_button(
+                    bot=self,
+                    guild=interaction.guild,
+                    channel=interaction.channel,
+                    interaction=interaction
+                )
+
                 files = []
                 img_name = None
                 for att in target_version_data.get("attachments", []):
@@ -554,6 +679,7 @@ class PriestyBot(discord.Client):
                     has_image=bool(img_name),
                     thought_duration=dur if is_first_last else 0,
                     has_thoughts=has_t if is_first_last else False,
+                    show_reply_button=show_reply if is_first_last else False,
                     active_version=target_v,
                     total_versions=total_v,
                     message_id=root_id if is_first_last else None,
@@ -592,6 +718,7 @@ class PriestyBot(discord.Client):
                         modals_map=mod_map if is_slice_last else None,
                         thought_duration=dur if is_slice_last else 0,
                         has_thoughts=has_t if is_slice_last else False,
+                        show_reply_button=show_reply if is_slice_last else False,
                         active_version=target_v,
                         total_versions=total_v,
                         message_id=root_id if is_slice_last else None,
@@ -792,7 +919,6 @@ class PriestyBot(discord.Client):
                 raw_data = getattr(sub_inter, "data", {})
                 resolved_attachments = raw_data.get("resolved", {}).get("attachments", {})
                 if resolved_attachments:
-                    import aiohttp
                     async with aiohttp.ClientSession() as http_session:
                         for att_id, att_obj in resolved_attachments.items():
                             att_url = att_obj.get("url")

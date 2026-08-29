@@ -252,7 +252,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
         attempted_keys = set()
         for attempt in range(client_manager.key_count):
-            client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite", exclude_keys=attempted_keys)
+            client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite", exclude_keys=attempted_keys, fallback=False)
             if not client:
                 break
             attempted_keys.add(key_idx)
@@ -283,7 +283,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
     @classmethod
     async def generate_conversational_summary_fallback(cls, objective: str, report_content: str, workspace_files: list[str]) -> str:
-        client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite")
+        client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite", fallback=True)
         if not client:
             return "Successfully investigated the requirements, verified all components, and compiled the deliverables."
 
@@ -467,8 +467,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=thread.id)
 
         accumulated_thoughts = []
-        candidate_models = ["gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.5-flash-lite", "gemini-3.5-flash"]
-        active_model_pinned = None
+        candidate_models = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.5-flash-lite"]
 
         formatted_planning_instruction = (
             AGENT_PLANNING_SYSTEM_INSTRUCTION
@@ -489,20 +488,25 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                 fcalls = []
 
                 working_turn_contents = compact_conversation_history(turn_contents, keep_recent_turns=3)
-                models_to_try = [active_model_pinned] if active_model_pinned else candidate_models
 
-                for model_cand in models_to_try:
+                for model_cand in candidate_models:
                     if abort_event.is_set():
                         was_aborted = True
                         break
 
+                    eff_thinking = "HIGH" if "gemma" in model_cand else "HIGH"
                     attempted_keys = set()
+
                     while True:
                         if abort_event.is_set():
                             was_aborted = True
                             break
 
-                        client, key_idx, active_model = client_manager.get_client_for_model(model_cand, exclude_keys=attempted_keys)
+                        client, key_idx, active_model = client_manager.get_client_for_model(
+                            model_cand,
+                            exclude_keys=attempted_keys,
+                            fallback=False
+                        )
                         if not client or key_idx in attempted_keys:
                             break
 
@@ -510,7 +514,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                         try:
                             config = types.GenerateContentConfig(
                                 system_instruction=formatted_planning_instruction,
-                                thinking_config=types.ThinkingConfig(thinking_level="HIGH", include_thoughts=True),
+                                thinking_config=types.ThinkingConfig(thinking_level=eff_thinking, include_thoughts=True),
                                 tools=tool_declarations,
                                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                                 temperature=0.3
@@ -545,14 +549,15 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                                 break
 
                             stream_success = True
-                            active_model_pinned = active_model
                             break
 
                         except Exception as e:
+                            err_desc = str(e)
                             client_manager.report_error(key_idx, active_model, e)
-                            logger.warning(f"[AgentPlanning] Key #{key_idx} error on {active_model}: {e}")
-                            active_model_pinned = None
-                            continue
+                            logger.warning(f"[AgentPlanning] Error on {active_model} (Key #{key_idx}): {err_desc}")
+                            if ChatEngine._is_retryable_error(err_desc):
+                                continue
+                            break
 
                     if stream_success or was_aborted:
                         break
@@ -561,8 +566,8 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                     break
 
                 if not stream_success:
-                    logger.warning("[AgentPlanning] Rate limit encountered. Silently backing off 4s...")
-                    await asyncio.sleep(4.0)
+                    logger.warning("[AgentPlanning] All model cascades busy. Backing off 3s...")
+                    await asyncio.sleep(3.0)
                     continue
 
                 if model_parts:
@@ -833,14 +838,13 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             types.Content(role="user", parts=[types.Part(text=exec_prompt)])
         ]
 
-        candidate_models = ["gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.5-flash-lite", "gemini-3.5-flash"]
+        candidate_models = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.5-flash-lite"]
         step_counter = len(active_exec_thought_record["tool_calls"])
         accumulated_exec_thoughts = []
         final_summary_text = ""
         
         stream_dispatcher = DiscordStreamDispatcher(target_channel=thread, guild=thread.guild)
         artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=thread.id)
-        active_model_pinned = None
 
         formatted_exec_instruction = (
             AGENT_EXECUTION_SYSTEM_INSTRUCTION
@@ -862,20 +866,25 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                 full_text = ""
 
                 working_turn_contents = compact_conversation_history(turn_contents, keep_recent_turns=3)
-                models_to_try = [active_model_pinned] if active_model_pinned else candidate_models
 
-                for model_cand in models_to_try:
+                for model_cand in candidate_models:
                     if abort_event.is_set():
                         was_aborted = True
                         break
 
+                    eff_thinking = "HIGH"
                     attempted_keys = set()
+
                     while True:
                         if abort_event.is_set():
                             was_aborted = True
                             break
 
-                        client, key_idx, active_model = client_manager.get_client_for_model(model_cand, exclude_keys=attempted_keys)
+                        client, key_idx, active_model = client_manager.get_client_for_model(
+                            model_cand,
+                            exclude_keys=attempted_keys,
+                            fallback=False
+                        )
                         if not client or key_idx in attempted_keys:
                             break
 
@@ -883,7 +892,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                         try:
                             config = types.GenerateContentConfig(
                                 system_instruction=formatted_exec_instruction,
-                                thinking_config=types.ThinkingConfig(thinking_level="HIGH", include_thoughts=True),
+                                thinking_config=types.ThinkingConfig(thinking_level=eff_thinking, include_thoughts=True),
                                 tools=tool_declarations,
                                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                                 temperature=0.3
@@ -920,14 +929,15 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                                 break
 
                             stream_success = True
-                            active_model_pinned = active_model
                             break
 
                         except Exception as e:
+                            err_desc = str(e)
                             client_manager.report_error(key_idx, active_model, e)
-                            logger.warning(f"[AgentExecution] Key #{key_idx} error on {active_model}: {e}")
-                            active_model_pinned = None
-                            continue
+                            logger.warning(f"[AgentExecution] Error on {active_model} (Key #{key_idx}): {err_desc}")
+                            if ChatEngine._is_retryable_error(err_desc):
+                                continue
+                            break
 
                     if stream_success or was_aborted:
                         break
@@ -936,8 +946,8 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                     break
 
                 if not stream_success:
-                    logger.warning("[AgentExecution] Rate limit encountered. Silently backing off 4s...")
-                    await asyncio.sleep(4.0)
+                    logger.warning("[AgentExecution] All model cascades busy. Backing off 3s...")
+                    await asyncio.sleep(3.0)
                     continue
 
                 if model_parts:
@@ -1129,7 +1139,6 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
         session_id = session["session_id"]
         bot = thread.guild.me if thread.guild else None
-        bot_user = thread.guild.me._user if thread.guild and hasattr(thread.guild.me, "_user") else None
         bot_id = bot.id if bot else 0
 
         clean_prompt = re.sub(rf'<@!?{bot_id}>', '', message.content).strip()
@@ -1224,9 +1233,6 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         allowed_tools = {t for t in THREAD_CHAT_AGENT_TOOLS if t not in disabled_tools_set}
         if not has_repo:
             allowed_tools.discard("github_repo")
-
-        thread_disabled = list(all_tools - allowed_tools)
-        tool_context.allowed_tools_override = list(allowed_tools)
 
         stream_dispatcher = DiscordStreamDispatcher(origin_message=message, guild=thread.guild)
         artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=thread.id)

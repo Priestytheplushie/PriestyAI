@@ -11,7 +11,7 @@ You are the elite reasoning specialist for PriestyAI.
 You have been invoked to solve a complex sub-problem, difficult math derivation, deep algorithmic debugging task, or architectural design.
 
 STRICT FORMATTING DIRECTIVES:
-1. NEVER output LaTeX notation ($or$$ or \\frac or \\sqrt). Discord does not render LaTeX.
+1. NEVER output LaTeX notation ($ or $$ or \\frac or \\sqrt). Discord does not render LaTeX.
 2. ALWAYS use pure Unicode math symbols:
    - √2, ∛x, a/b, x², y³, a² = 2b²
    - ∈, ∉, ⊂, ℤ, ℝ, ℚ, ℕ, ±, ∓, ≠, ≤, ≥, ≈, ≡, →, ⇒, ⟺, π, θ
@@ -35,13 +35,20 @@ async def ask_expert(
     logger.info(f"[ask_expert] Invoking flagship reasoning expert for: '{question[:60]}...'")
 
     prompt_payload = f"Context Details:\n{context_details}\n\nTarget Problem:\n{question}"
-
-    expert_model_candidates = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
-    total_keys = len(client_manager.keys) if hasattr(client_manager, "keys") else 4
+    expert_model_candidates = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemma-4-31b-it"]
 
     for model_name in expert_model_candidates:
-        for key_attempt in range(total_keys):
-            client, key_idx, active_model = client_manager.get_client_for_model(model_name)
+        attempted_keys: set[int] = set()
+        while True:
+            client, key_idx, active_model = client_manager.get_client_for_model(
+                model_name,
+                exclude_keys=attempted_keys,
+                fallback=False
+            )
+            if not client or key_idx in attempted_keys:
+                break
+
+            attempted_keys.add(key_idx)
             try:
                 config = types.GenerateContentConfig(
                     system_instruction=EXPERT_SYSTEM_INSTRUCTION,
@@ -67,8 +74,13 @@ async def ask_expert(
                     }
 
             except Exception as e:
+                err_desc = str(e)
                 client_manager.report_error(key_idx, active_model, e)
-                logger.warning(f"Expert attempt failed on {active_model} (Key #{key_idx}): {e}")
+                logger.warning(f"Expert attempt error on {active_model} (Key #{key_idx}): {err_desc}")
+                err_lower = err_desc.lower()
+                if any(x in err_lower for x in ["503", "429", "500", "overloaded", "unavailable", "timeout"]):
+                    continue
+                break
 
     return {
         "status": "fallback",

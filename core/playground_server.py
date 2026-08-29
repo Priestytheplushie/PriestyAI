@@ -6,6 +6,7 @@ import base64
 import shutil
 import asyncio
 import re
+import urllib.parse
 import logging
 from collections import defaultdict
 from typing import Any
@@ -19,7 +20,10 @@ logger = logging.getLogger("PriestyAI.PlaygroundServer")
 PLAYGROUND_PORT = 8085
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEMPLATE_PATH = os.path.join(BASE_DIR, "web", "playground.html")
+TEMPLATE_PATHS = [
+    os.path.join(BASE_DIR, "web", "playground.html"),
+    os.path.join(BASE_DIR, "playground.html")
+]
 
 class PlaygroundServer:
     def __init__(self, port: int = PLAYGROUND_PORT):
@@ -30,6 +34,8 @@ class PlaygroundServer:
         self.site: web.TCPSite | None = None
         self.tunnel_proc: asyncio.subprocess.Process | None = None
         self._watchdog_task: asyncio.Task | None = None
+        self._live_websockets: dict[str, set[web.WebSocketResponse]] = defaultdict(set)
+        self._room_presence: dict[str, dict[web.WebSocketResponse, dict[str, Any]]] = defaultdict(dict)
         self._setup_routes()
 
     def _setup_routes(self):
@@ -37,24 +43,172 @@ class PlaygroundServer:
         self.app.router.add_get("/p/{artifact_id}/{filename:.*}", self.handle_artifact_subfile)
         self.app.router.add_get("/raw/{artifact_id}", self.handle_raw_artifact)
         self.app.router.add_get("/api/artifact/{artifact_id}/versions", self.handle_artifact_versions_api)
+        self.app.router.add_post("/api/artifact/{artifact_id}/save", self.handle_artifact_save_api)
+        self.app.router.add_get("/ws/live/{artifact_id}", self.handle_live_ws)
         self.app.router.add_get("/ws/terminal/{artifact_id}", self.handle_terminal_ws)
         self.app.router.add_get("/favicon.ico", self.handle_favicon)
 
-    def get_artifact_url(self, artifact_id: str, version: int = 1) -> str | None:
+    def get_artifact_url(self, artifact_id: str, version: int = 1, user: Any = None) -> str | None:
         if not self.public_url:
             return None
-        return f"{self.public_url}/p/{artifact_id}?v={version}"
+        url = f"{self.public_url}/p/{artifact_id}?v={version}"
+        if user:
+            name = getattr(user, "display_name", getattr(user, "name", str(user)))
+            avatar_obj = getattr(user, "display_avatar", getattr(user, "avatar", None))
+            avatar_url = avatar_obj.url if hasattr(avatar_obj, "url") else str(avatar_obj or "")
+            uid = str(getattr(user, "id", "0"))
+            
+            u_enc = urllib.parse.quote(name)
+            a_enc = urllib.parse.quote(avatar_url)
+            url += f"&u={u_enc}&avatar={a_enc}&uid={uid}"
+        return url
 
     async def handle_favicon(self, request: web.Request) -> web.Response:
         return web.Response(status=204)
 
     def _load_html_template(self) -> str:
+        for p in TEMPLATE_PATHS:
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        return f.read()
+                except Exception as e:
+                    logger.error(f"[PlaygroundServer] Failed to read template from {p}: {e}")
+        return "<h1>PriestyAI Playground Template Missing</h1>"
+
+    def _sync_files_to_disk(self, artifact_id: str, files: list[dict[str, Any]]):
+        term_dir = os.path.join(AGENT_WORKSPACES_ROOT, f"term_{artifact_id}")
+        if os.path.exists(term_dir):
+            for f in files:
+                f_name = f.get("filename", "script.py")
+                f_content = f.get("content", "")
+                f_path = os.path.join(term_dir, f_name)
+                os.makedirs(os.path.dirname(f_path), exist_ok=True)
+                try:
+                    with open(f_path, "w", encoding="utf-8", errors="replace") as out_f:
+                        out_f.write(f_content)
+                except Exception:
+                    pass
+
+        for entry in os.listdir(AGENT_WORKSPACES_ROOT):
+            full_w_dir = os.path.join(AGENT_WORKSPACES_ROOT, entry)
+            if os.path.isdir(full_w_dir) and not entry.startswith("term_"):
+                for f in files:
+                    f_name = f.get("filename", "")
+                    if not f_name:
+                        continue
+                    candidate_p = os.path.join(full_w_dir, f_name)
+                    if os.path.exists(candidate_p):
+                        try:
+                            with open(candidate_p, "w", encoding="utf-8", errors="replace") as out_f:
+                                out_f.write(f.get("content", ""))
+                        except Exception:
+                            pass
+
+
+    async def handle_live_ws(self, request: web.Request) -> web.WebSocketResponse:
+        artifact_id = request.match_info.get("artifact_id", "")
+        ws = web.WebSocketResponse(heartbeat=25.0)
+        await ws.prepare(request)
+
+        self._live_websockets[artifact_id].add(ws)
+        self._room_presence[artifact_id][ws] = {"user": "Anonymous", "avatar": "", "uid": ""}
+        logger.debug(f"[PlaygroundServer] Live WS connected to '{artifact_id}'")
+
         try:
-            with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
-                return f.read()
+            async for msg in ws:
+                if msg.type == web.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                        ev_type = data.get("type")
+
+                        if ev_type == "join":
+                            user_name = data.get("user") or "Anonymous"
+                            avatar_url = data.get("avatar") or ""
+                            uid = data.get("uid") or ""
+                            self._room_presence[artifact_id][ws] = {
+                                "user": user_name,
+                                "avatar": avatar_url,
+                                "uid": uid
+                            }
+                            await self._broadcast_presence(artifact_id)
+
+                        elif ev_type == "typing":
+                            p_info = self._room_presence[artifact_id].get(ws, {"user": "Anonymous"})
+                            await self._broadcast_event(artifact_id, {
+                                "type": "user_typing",
+                                "user": p_info.get("user", "Collaborator")
+                            }, exclude_ws=ws)
+
+                    except Exception as parse_err:
+                        logger.debug(f"WS message parse error: {parse_err}")
+
+        finally:
+            self._live_websockets[artifact_id].discard(ws)
+            self._room_presence[artifact_id].pop(ws, None)
+            if not self._live_websockets[artifact_id]:
+                self._live_websockets.pop(artifact_id, None)
+                self._room_presence.pop(artifact_id, None)
+            else:
+                await self._broadcast_presence(artifact_id)
+            logger.debug(f"[PlaygroundServer] Live WS disconnected from '{artifact_id}'")
+
+        return ws
+
+    async def _broadcast_presence(self, artifact_id: str):
+        users = list(self._room_presence.get(artifact_id, {}).values())
+        await self._broadcast_event(artifact_id, {
+            "type": "presence",
+            "users": users
+        })
+
+    async def _broadcast_event(self, artifact_id: str, payload: dict[str, Any], exclude_ws: web.WebSocketResponse | None = None):
+        sockets = list(self._live_websockets.get(str(artifact_id), []))
+        if not sockets:
+            return
+        payload_str = json.dumps(payload)
+        for ws in sockets:
+            if ws is not exclude_ws and not ws.closed:
+                try:
+                    await ws.send_str(payload_str)
+                except Exception:
+                    pass
+
+    async def notify_artifact_updated(self, artifact_id: str, artifact_payload: dict[str, Any]):
+        await self._broadcast_event(artifact_id, {
+            "type": "artifact_updated",
+            "artifact_id": str(artifact_id),
+            "data": artifact_payload
+        })
+
+
+    async def handle_artifact_save_api(self, request: web.Request) -> web.Response:
+        artifact_id = request.match_info.get("artifact_id", "")
+        try:
+            body = await request.json()
+            files = body.get("files", [])
+            user = body.get("user", "Anonymous")
+            version = body.get("version")
+
+            if not files:
+                return web.json_response({"error": "No files provided"}, status=400)
+
+            branch_manager.update_artifact_content_in_place(artifact_id, files, target_version=version)
+
+            self._sync_files_to_disk(artifact_id, files)
+
+            await self._broadcast_event(artifact_id, {
+                "type": "files_saved",
+                "artifact_id": artifact_id,
+                "user": user,
+                "files": files,
+                "version": version
+            })
+
+            return web.json_response({"status": "saved", "artifact_id": artifact_id})
         except Exception as e:
-            logger.error(f"[PlaygroundServer] Failed to read template from {TEMPLATE_PATH}: {e}")
-            return "<h1>PriestyAI Playground Template Missing</h1>"
+            logger.error(f"Failed to auto-save artifact {artifact_id}: {e}")
+            return web.json_response({"error": str(e)}, status=500)
 
 
     async def handle_terminal_ws(self, request: web.Request) -> web.WebSocketResponse:
@@ -78,6 +232,7 @@ class PlaygroundServer:
 
         container_name = f"priesty_term_{artifact_id}"
         has_docker = shutil.which("docker") is not None
+        container_image = "nikolaik/python-nodejs:python3.11-nodejs20-slim"
 
         if has_docker:
             inspect_p = await asyncio.create_subprocess_exec(
@@ -87,19 +242,29 @@ class PlaygroundServer:
             out_i, _ = await inspect_p.communicate()
             if inspect_p.returncode != 0 or "true" not in out_i.decode().lower():
                 await asyncio.create_subprocess_exec("docker", "rm", "-f", container_name, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-                await asyncio.create_subprocess_exec(
-                    "docker", "run", "-d", "--name", container_name,
-                    "--memory=512m", "--cpus=1.0", "--pids-limit=100",
-                    "-v", f"{workspace_dir}:/workspace",
-                    "-w", "/workspace",
-                    "python:3.11-slim", "tail", "-f", "/dev/null",
-                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-                )
+                try:
+                    await asyncio.create_subprocess_exec(
+                        "docker", "run", "-d", "--name", container_name,
+                        "--memory=512m", "--cpus=1.0", "--pids-limit=100",
+                        "-v", f"{workspace_dir}:/workspace",
+                        "-w", "/workspace",
+                        container_image, "tail", "-f", "/dev/null",
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                    )
+                except Exception:
+                    await asyncio.create_subprocess_exec(
+                        "docker", "run", "-d", "--name", container_name,
+                        "--memory=512m", "--cpus=1.0", "--pids-limit=100",
+                        "-v", f"{workspace_dir}:/workspace",
+                        "-w", "/workspace",
+                        "python:3.11-slim", "tail", "-f", "/dev/null",
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                    )
 
         discord_banner = (
-            "\r\n\x1b[38;2;88;101;242m●\x1b[0m \x1b[1;37mPriestyAI Terminal Sandbox\x1b[0m "
-            "\x1b[38;2;148;155;164m(Python 3.11 • Node • Pip)\x1b[0m\r\n"
-            "\x1b[38;2;148;155;164mType commands below or click ▶ Run to execute.\x1b[0m\r\n\r\n"
+            "\r\n\x1b[38;2;88;101;242m●\x1b[0m \x1b[1;37mPriestyAI Multi-Runtime Terminal\x1b[0m "
+            "\x1b[38;2;148;155;164m(Python 3.11 • Node.js 20 • Pip • Npx)\x1b[0m\r\n"
+            "\x1b[38;2;148;155;164mType bash/python/node commands or click ▶ Run to execute.\x1b[0m\r\n\r\n"
         )
         await ws.send_str(discord_banner)
 
@@ -244,12 +409,12 @@ class PlaygroundServer:
             return web.Response(text="Artifact not found or expired.", status=404)
 
         versions = art_data.get("versions", [])
-        total_v = len(versions)
+        total_v = max(1, len(versions))
         
         if v_param == "latest" or not v_param.isdigit():
-            target_v = total_v if total_v > 0 else 1
+            target_v = total_v
         else:
-            target_v = int(v_param)
+            target_v = max(1, min(int(v_param), total_v))
 
         target_v_data = versions[target_v - 1] if (1 <= target_v <= len(versions)) else (versions[-1] if versions else {})
 
@@ -260,21 +425,24 @@ class PlaygroundServer:
             content = target_v_data.get("content", "")
             files = [{"filename": filename, "content": content}]
 
-        is_previewable = any(f.get("filename", "").lower().endswith((".html", ".htm", ".svg", ".md", ".markdown")) for f in files)
+        is_previewable = any(f.get("filename", "").lower().endswith((".html", ".htm", ".svg", ".md", ".markdown", ".jsx", ".tsx")) for f in files)
 
         adds = target_v_data.get("additions", 0)
         dels = target_v_data.get("deletions", 0)
         diff_badge = f"(+{adds} -{dels})" if (adds > 0 or dels > 0) else ""
 
         raw_files_b64 = base64.b64encode(json.dumps(files).encode("utf-8")).decode("utf-8")
+        raw_versions_b64 = base64.b64encode(json.dumps(versions).encode("utf-8")).decode("utf-8")
 
         html = self._load_html_template()
         html = html.replace("{{ARTIFACT_ID}}", artifact_id)
         html = html.replace("{{FILENAME}}", filename)
         html = html.replace("{{VERSION}}", str(target_v))
+        html = html.replace("{{TOTAL_VERSIONS}}", str(total_v))
         html = html.replace("{{DIFF_BADGE}}", diff_badge)
         html = html.replace("{{IS_PREVIEWABLE_BOOL}}", "true" if is_previewable else "false")
         html = html.replace("{{RAW_FILES_B64}}", raw_files_b64)
+        html = html.replace("{{RAW_VERSIONS_B64}}", raw_versions_b64)
         
         has_multiple_files = len(files) > 1 or filename.endswith(".zip")
         html = html.replace("{{TABS_BAR_DISPLAY}}", "flex" if has_multiple_files else "none")

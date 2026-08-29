@@ -35,6 +35,75 @@ def parse_artifact_attributes(tag_str: str) -> tuple[str, str, str]:
 
     return filename, title, art_type
 
+def parse_quiz_attributes(tag_str: str) -> tuple[str, str, str]:
+    title_match = re.search(r'title=["\']([^"\'\n>]+)["\']', tag_str, re.IGNORECASE)
+    title = title_match.group(1).strip() if title_match else "Quiz"
+
+    topic_match = re.search(r'topic=["\']([^"\'\n>]+)["\']', tag_str, re.IGNORECASE)
+    topic = topic_match.group(1).strip() if topic_match else "Knowledge Check"
+
+    diff_match = re.search(r'difficulty=["\']([^"\'\n>]+)["\']', tag_str, re.IGNORECASE)
+    difficulty = diff_match.group(1).strip() if diff_match else "Medium"
+
+    return title, topic, difficulty
+
+def parse_xml_quiz_body(body_content: str, default_title: str) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    q_matches = re.finditer(
+        r'<question\s+([^>]*?)>(.*?)</question>',
+        body_content,
+        re.DOTALL | re.IGNORECASE
+    )
+
+    for q_match in q_matches:
+        q_attrs = q_match.group(1)
+        q_body = q_match.group(2)
+
+        text_m = re.search(r'text=["\']([^"\'\n>]+)["\']', q_attrs, re.IGNORECASE)
+        cat_m = re.search(r'category=["\']([^"\'\n>]+)["\']', q_attrs, re.IGNORECASE)
+
+        q_text = text_m.group(1).strip() if text_m else ""
+        if not q_text:
+            inner_text_m = re.search(r'<text>(.*?)</text>', q_body, re.DOTALL | re.IGNORECASE)
+            q_text = inner_text_m.group(1).strip() if inner_text_m else "Question"
+
+        q_cat = cat_m.group(1).strip() if cat_m else "General"
+
+        options: list[dict[str, Any]] = []
+        opt_matches = re.finditer(
+            r'<option\s+([^>]*?)(?:\/>|>(.*?)<\/option>)',
+            q_body,
+            re.DOTALL | re.IGNORECASE
+        )
+
+        for o_match in opt_matches:
+            o_attrs = o_match.group(1)
+            o_inner = o_match.group(2) or ""
+
+            ot_m = re.search(r'text=["\']([^"\'\n>]+)["\']', o_attrs, re.IGNORECASE)
+            oc_m = re.search(r'correct=["\']?(true|1|yes)["\']?', o_attrs, re.IGNORECASE)
+            oe_m = re.search(r'explanation=["\']([^"\'\n>]+)["\']', o_attrs, re.IGNORECASE)
+
+            opt_text = ot_m.group(1).strip() if ot_m else o_inner.strip()
+            is_correct = bool(oc_m)
+            explanation = oe_m.group(1).strip() if oe_m else ""
+
+            if opt_text:
+                options.append({
+                    "text": opt_text,
+                    "correct": is_correct,
+                    "explanation": explanation
+                })
+
+        if q_text and options:
+            questions.append({
+                "text": q_text,
+                "category": q_cat,
+                "options": options
+            })
+
+    return questions
+
 def parse_followup_attributes(tag_str: str) -> str:
     label_match = re.search(r'(?:label|title|text)=["\']([^"\'\n>]+)["\']', tag_str, re.IGNORECASE)
     if not label_match:
@@ -120,6 +189,7 @@ class ArtifactStreamParser:
         self.text_buffer = ""
         self.artifact_buffer = ""
         self.followup_buffer = ""
+        self.quiz_buffer = ""
         
         self.current_filename = ""
         self.current_title = ""
@@ -127,6 +197,11 @@ class ArtifactStreamParser:
         self.current_art_type = ""
         self.current_start_time = 0.0
         self.current_followup_label = ""
+        
+        self.current_quiz_id = ""
+        self.current_quiz_title = ""
+        self.current_quiz_topic = ""
+        self.current_quiz_difficulty = ""
 
     async def feed(self, chunk: str):
         if not chunk:
@@ -141,6 +216,9 @@ class ArtifactStreamParser:
         elif self.state == "IN_FOLLOWUP":
             self.followup_buffer += chunk
             await self._process_followup_buffer()
+        elif self.state == "IN_QUIZ":
+            self.quiz_buffer += chunk
+            await self._process_quiz_buffer()
 
     async def _process_text_buffer(self):
         while self.text_buffer and self.state == "TEXT":
@@ -215,7 +293,6 @@ class ArtifactStreamParser:
                     remainder = self.text_buffer[gt_idx + 1:]
 
                     filename, title, art_type = parse_artifact_attributes(full_tag_str)
-                    
                     if not filename:
                         await self.dispatcher.append_text(self.text_buffer[0])
                         self.text_buffer = self.text_buffer[1:]
@@ -248,6 +325,43 @@ class ArtifactStreamParser:
                 else:
                     break
 
+            possible_quiz = lower_buf.startswith("<quiz") or "<quiz".startswith(lower_buf)
+            if possible_quiz:
+                gt_idx = self.text_buffer.find(">")
+                if gt_idx != -1:
+                    full_tag_str = self.text_buffer[:gt_idx + 1]
+                    remainder = self.text_buffer[gt_idx + 1:]
+
+                    q_title, q_topic, q_diff = parse_quiz_attributes(full_tag_str)
+                    self.current_quiz_id = f"quiz_{int(time.time() * 1000)}"
+                    self.current_quiz_title = q_title
+                    self.current_quiz_topic = q_topic
+                    self.current_quiz_difficulty = q_diff
+                    self.current_start_time = time.time()
+
+                    quiz_placeholder = {
+                        "quiz_id": self.current_quiz_id,
+                        "title": self.current_quiz_title,
+                        "topic": self.current_quiz_topic,
+                        "difficulty": self.current_quiz_difficulty,
+                        "status": "generating",
+                        "is_generating": True,
+                        "start_time": self.current_start_time,
+                        "question_count": 5
+                    }
+                    self.dispatcher.add_quiz_placeholder_record(quiz_placeholder)
+                    await self.dispatcher.flush(is_final=False, force=True)
+
+                    self.state = "IN_QUIZ"
+                    self.text_buffer = ""
+
+                    if remainder:
+                        self.quiz_buffer += remainder
+                        await self._process_quiz_buffer()
+                    break
+                else:
+                    break
+
             possible_followup = False
             for prefix in ["<followup", "<follow_up", "<suggest_followup"]:
                 if lower_buf.startswith(prefix) or prefix.startswith(lower_buf):
@@ -276,7 +390,6 @@ class ArtifactStreamParser:
 
     async def _process_artifact_buffer(self):
         end_start, end_end = find_outer_closing_tag(self.artifact_buffer, "artifact")
-        
         if end_start != -1:
             artifact_body = self.artifact_buffer[:end_start]
             post_artifact_text = self.artifact_buffer[end_end:]
@@ -290,6 +403,29 @@ class ArtifactStreamParser:
             
             if post_artifact_text:
                 self.text_buffer += post_artifact_text
+                await self._process_text_buffer()
+        else:
+            if self.dispatcher:
+                now_t = asyncio.get_event_loop().time()
+                last_t = getattr(self.dispatcher, "last_edit_time", 0.0)
+                if (now_t - last_t) >= 1.0:
+                    await self.dispatcher.flush(is_final=False)
+
+    async def _process_quiz_buffer(self):
+        end_start, end_end = find_outer_closing_tag(self.quiz_buffer, "quiz")
+        if end_start != -1:
+            quiz_body = self.quiz_buffer[:end_start]
+            post_quiz_text = self.quiz_buffer[end_end:]
+
+            await self._complete_quiz(quiz_body)
+
+            self.state = "TEXT"
+            self.quiz_buffer = ""
+            self.in_code_block = False
+            self.in_inline_code = False
+
+            if post_quiz_text:
+                self.text_buffer += post_quiz_text
                 await self._process_text_buffer()
         else:
             if self.dispatcher:
@@ -321,6 +457,34 @@ class ArtifactStreamParser:
             if post_followup_text:
                 self.text_buffer += post_followup_text
                 await self._process_text_buffer()
+
+    async def _complete_quiz(self, body_content: str):
+        questions = parse_xml_quiz_body(body_content, self.current_quiz_title)
+        channel_id = getattr(self.tool_context.channel, "id", self.channel_id) if self.tool_context else self.channel_id
+
+        quiz_record = branch_manager.save_quiz(
+            channel_id=channel_id,
+            title=self.current_quiz_title,
+            topic=self.current_quiz_topic,
+            difficulty=self.current_quiz_difficulty,
+            questions=questions,
+            quiz_id=self.current_quiz_id
+        )
+
+        quiz_payload = {
+            "quiz_id": quiz_record["quiz_id"],
+            "title": quiz_record["title"],
+            "topic": quiz_record["topic"],
+            "difficulty": quiz_record["difficulty"],
+            "questions": questions,
+            "question_count": len(questions),
+            "status": "ready",
+            "is_generating": False
+        }
+
+        self.dispatcher.update_quiz_ready(quiz_payload)
+        await self.dispatcher.flush(is_final=False, force=True)
+        logger.info(f"[ArtifactParser] Completed quiz '{self.current_quiz_title}' ({len(questions)} questions)")
 
     async def _complete_artifact(self, body_content: str):
         if not self.current_filename:
@@ -409,6 +573,13 @@ class ArtifactStreamParser:
         logger.info(f"[ArtifactParser] Completed '{filename}' (v{record['active_version']}, {len(parsed_files)} file(s))")
 
     async def finish(self):
+        if self.state == "IN_QUIZ":
+            if self.current_quiz_title and self.quiz_buffer.strip():
+                logger.warning(f"[ArtifactParser] Auto-closing unclosed quiz '{self.current_quiz_title}' at stream end.")
+                await self._complete_quiz(self.quiz_buffer)
+            self.state = "TEXT"
+            self.quiz_buffer = ""
+
         if self.state == "IN_ARTIFACT":
             if self.current_filename and self.artifact_buffer.strip():
                 logger.warning(f"[ArtifactParser] Auto-closing unclosed artifact '{self.current_filename}' at stream end.")

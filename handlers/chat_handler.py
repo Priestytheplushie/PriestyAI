@@ -33,7 +33,8 @@ from core.moderation import (
 from handlers.stream_handler import (
     DiscordStreamDispatcher,
     apply_message_parsers,
-    build_v2_message_layout
+    build_v2_message_layout,
+    should_show_reply_button
 )
 from tools.registry import ToolExecutionContext
 from ui.thought_container import PlaceholderLayoutView
@@ -308,6 +309,13 @@ class ChatHandler:
         guild = interaction.guild
         origin_msg = interaction.message
 
+        show_reply = should_show_reply_button(
+            bot=bot,
+            guild=guild,
+            channel=channel,
+            interaction=interaction
+        )
+
         selected_idx = None
         if interaction.data and "custom_id" in interaction.data:
             c_id = interaction.data["custom_id"]
@@ -336,14 +344,16 @@ class ChatHandler:
                             branch_manager.update_version_data(origin_msg.id, active_v, v_data)
 
                             updated_view = build_v2_message_layout(
-                                guild=guild,
+                                raw_text=v_data.get("content", "") if not v_data.get("timeline_blocks") else None,
                                 timeline_blocks=v_data.get("timeline_blocks"),
+                                guild=guild,
                                 staged_components=v_data.get("staged_components"),
                                 staged_artifacts=v_data.get("staged_artifacts"),
                                 staged_followups=staged_fups,
                                 modals_map={m["modal_id"]: m for m in v_data.get("staged_modals", [])},
                                 thought_duration=v_data.get("duration_seconds", 0),
                                 has_thoughts=v_data.get("has_thoughts", False),
+                                show_reply_button=show_reply,
                                 active_version=active_v,
                                 total_versions=len(versions),
                                 message_id=origin_msg.id
@@ -403,7 +413,11 @@ class ChatHandler:
         context_xml = await cls.build_context_xml(channel=channel, current_user_id=user.id, guild=guild, author=user)
 
         response_msg: discord.Message | None = None
-        stream_dispatcher = DiscordStreamDispatcher(origin_message=origin_msg, guild=guild)
+        stream_dispatcher = DiscordStreamDispatcher(
+            origin_message=origin_msg,
+            guild=guild,
+            show_reply_button=show_reply
+        )
         artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=channel.id)
 
         accumulated_thought_buffer: list[str] = []
@@ -595,6 +609,7 @@ class ChatHandler:
                 modals_map=modals_map,
                 thought_duration=final_duration,
                 has_thoughts=has_reasoning,
+                show_reply_button=show_reply,
                 active_version=1,
                 total_versions=1,
                 message_id=target_id
@@ -765,8 +780,18 @@ class ChatHandler:
 
         context_xml = await cls.build_context_xml(channel=message.channel, current_user_id=message.author.id, guild=message.guild, author=message.author)
 
+        show_reply = should_show_reply_button(
+            bot=bot,
+            guild=message.guild,
+            channel=message.channel
+        )
+
         response_msg: discord.Message | None = None
-        stream_dispatcher = DiscordStreamDispatcher(origin_message=message, guild=message.guild)
+        stream_dispatcher = DiscordStreamDispatcher(
+            origin_message=message,
+            guild=message.guild,
+            show_reply_button=show_reply
+        )
         artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=message.channel.id)
 
         accumulated_thought_buffer: list[str] = []
@@ -967,7 +992,11 @@ class ChatHandler:
 
                 data_str = json.dumps(data) if isinstance(data, (dict, list)) else str(data)
                 interaction_prompt = f'<interaction_event type="{ev_type}" user="{inter.user.name}">\n  {data_str}\n</interaction_event>'
-                sub_dispatcher = DiscordStreamDispatcher(origin_message=inter.message, guild=inter.guild)
+                sub_dispatcher = DiscordStreamDispatcher(
+                    origin_message=inter.message,
+                    guild=inter.guild,
+                    show_reply_button=show_reply
+                )
                 sub_tool_ctx = ToolExecutionContext(channel=inter.channel, guild=inter.guild, author=inter.user, bot=bot)
 
                 async for sub_type, sub_payload in ChatEngine.stream_chat(
@@ -1007,6 +1036,7 @@ class ChatHandler:
                 interaction_dispatcher=handle_interaction_event,
                 thought_duration=final_duration,
                 has_thoughts=has_reasoning,
+                show_reply_button=show_reply,
                 active_version=1,
                 total_versions=1,
                 message_id=target_id

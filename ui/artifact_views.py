@@ -159,7 +159,8 @@ def build_code_preview_modal(
     on_submit_callback: Any = None,
     version: int = 1,
     diff_stats: tuple[int, int] | None = None,
-    artifact_id: str | None = None
+    artifact_id: str | None = None,
+    user: discord.User | discord.Member | None = None
 ) -> DynamicModalV2:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     icon = get_file_icon(filename)
@@ -176,9 +177,9 @@ def build_code_preview_modal(
     ]
 
     if artifact_id:
-        playground_url = playground_server.get_artifact_url(artifact_id, version)
+        playground_url = playground_server.get_artifact_url(artifact_id, version, user=user)
         if playground_url:
-            header_parts.append(f"[Open Artifact ↗]({playground_url}) (Opens in Brwoser)")
+            header_parts.append(f"[Open Artifact ↗]({playground_url}) (Opens in Browser)")
 
     header_parts.append("-# Click **Submit** below to download this file.")
 
@@ -243,7 +244,8 @@ def build_artifact_open_modal(
     channel_id: str | int = 0,
     message_id: str | int = 0,
     attachment_url: str | None = None,
-    on_submit_callback: Any = None
+    on_submit_callback: Any = None,
+    user: discord.User | discord.Member | None = None
 ) -> DynamicModalV2:
     filename = artifact.get("filename", "project.zip")
     title = artifact.get("title", filename)
@@ -270,7 +272,7 @@ def build_artifact_open_modal(
         ]
 
         if artifact_id:
-            playground_url = playground_server.get_artifact_url(artifact_id, target_version)
+            playground_url = playground_server.get_artifact_url(artifact_id, target_version, user=user)
             if playground_url:
                 tree_lines.append(f"[Open Artifact ↗]({playground_url}) (Opens in Browser)")
 
@@ -332,7 +334,7 @@ def build_artifact_open_modal(
         ]
 
         if artifact_id:
-            playground_url = playground_server.get_artifact_url(artifact_id, target_version)
+            playground_url = playground_server.get_artifact_url(artifact_id, target_version, user=user)
             if playground_url:
                 header_parts.append(f"[Open Artifact ↗]({playground_url}) (Opens in Browser)")
 

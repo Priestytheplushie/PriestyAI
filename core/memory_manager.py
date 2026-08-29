@@ -19,6 +19,10 @@ DB_PATH = os.path.join(BASE_DIR, "priestyai.db")
 EMBEDDING_MODELS = ["gemini-embedding-001", "gemini-embedding-2"]
 OUTPUT_DIMENSIONALITY = 768
 
+def get_user_chat_session_id(channel_id: str | int | None, user_id: str | int) -> str:
+    chan_str = str(channel_id) if channel_id else "dm"
+    return f"chat_{chan_str}_{user_id}"
+
 class MemoryExtractionSchema(BaseModel):
     has_memories: bool = Field(description="True if durable personal facts or server lore should be saved, False if query is generic")
     user_facts: list[str] = Field(default_factory=list, description="Clear, concise personal facts about the user (e.g. 'User develops in Rust', 'User prefers dark mode', 'User builds bots with serenity-rs'). Empty if none.")
@@ -399,7 +403,7 @@ class MemoryManager:
             "server_lore": server_candidates[:top_k]
         }
 
-    def save_chat_session(self, session_id: str, channel_id: str, guild_id: str | None, user_id: str, history: list[dict[str, str]]):
+    def save_chat_session(self, session_id: str, channel_id: str | int, guild_id: str | int | None, user_id: str | int, history: list[dict[str, str]]):
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -422,5 +426,12 @@ class MemoryManager:
                 except Exception:
                     pass
         return []
+
+    def delete_chat_session(self, session_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
+            conn.commit()
+            return cursor.rowcount > 0
 
 memory_manager = MemoryManager()

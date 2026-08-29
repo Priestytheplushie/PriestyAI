@@ -20,6 +20,7 @@ from handlers.stream_handler import (
     apply_message_parsers,
     extract_text_from_v2_message,
     cleanup_sibling_messages,
+    should_show_reply_button,
     ChatMessageLayoutView
 )
 from handlers.chat_handler import (
@@ -177,7 +178,18 @@ def setup_context_menus(tree: app_commands.CommandTree):
         )
         tool_context.message = message
 
-        stream_dispatcher = DiscordStreamDispatcher(origin_message=message, guild=interaction.guild)
+        show_reply = should_show_reply_button(
+            bot=interaction.client,
+            guild=interaction.guild,
+            channel=interaction.channel,
+            interaction=interaction
+        )
+
+        stream_dispatcher = DiscordStreamDispatcher(
+            origin_message=message,
+            guild=interaction.guild,
+            show_reply_button=show_reply
+        )
         artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
 
         accumulated_thoughts = []
@@ -258,9 +270,6 @@ def setup_context_menus(tree: app_commands.CommandTree):
 
             modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
 
-            for raw_att in stream_dispatcher.raw_attachment_buffers:
-                pass
-
             for art in tool_context.staged_artifacts:
                 art_bytes = art.get("data_bytes", b"")
                 art_fname = art.get("filename", "artifact.zip")
@@ -274,6 +283,7 @@ def setup_context_menus(tree: app_commands.CommandTree):
                 modals_map=modals_map,
                 thought_duration=final_duration,
                 has_thoughts=has_reasoning,
+                show_reply_button=show_reply,
                 active_version=1,
                 total_versions=1
             )
@@ -482,9 +492,17 @@ def setup_context_menus(tree: app_commands.CommandTree):
         active_tool_start_times = {}
         active_model_used = "gemma-4-31b-it"
 
+        show_reply = should_show_reply_button(
+            bot=interaction.client,
+            guild=interaction.guild,
+            channel=message.channel,
+            interaction=interaction
+        )
+
         stream_dispatcher = DiscordStreamDispatcher(
             existing_response_msg=root_msg,
             guild=interaction.guild,
+            show_reply_button=show_reply,
             active_version=new_version_idx,
             total_versions=new_version_idx
         )
@@ -659,6 +677,7 @@ def setup_context_menus(tree: app_commands.CommandTree):
                 modals_map=mod_map,
                 thought_duration=dur_sec,
                 has_thoughts=has_thoughts,
+                show_reply_button=show_reply,
                 active_version=new_version_idx,
                 total_versions=new_version_idx,
                 message_id=root_msg_id
@@ -742,9 +761,17 @@ def setup_context_menus(tree: app_commands.CommandTree):
 
             branch_manager.update_active_version_content(message.id, parsed_text)
 
+            show_reply = should_show_reply_button(
+                bot=interaction.client,
+                guild=interaction.guild,
+                channel=message.channel,
+                interaction=interaction
+            )
+
             v2_view = build_v2_message_layout(
                 raw_text=parsed_text,
                 guild=interaction.guild,
+                show_reply_button=show_reply,
                 message_id=message.id,
                 is_live_stream=False
             )

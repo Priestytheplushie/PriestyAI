@@ -8,7 +8,8 @@ from google.genai import types
 from config.settings import (
     WORKHORSE_DENSE_MODEL,
     WORKHORSE_MOE_MODEL,
-    FLAGSHIP_MODELS
+    FLAGSHIP_MODELS,
+    LITE_MODELS
 )
 from core.client_manager import client_manager
 from core.router import Router, RouteDecision
@@ -46,71 +47,53 @@ CRITICAL TEMPORAL GROUNDING & CURRENT REAL-TIME TIMELINE:
 - STRICT EMOJI SYNTAX: Custom Discord emojis have NO spaces: `<:name:id>` or `<a:name:id>` (e.g. `<:emoji_name:123456789012345678>`). NEVER put spaces inside the angle brackets.
 
 Discord-Flavored Markdown (DFM) & Formatting Standards:
-- Callout Alerts: Use GitHub alert syntax (`> [!TIP]`, `> [!WARNING]`, `> [!NOTE]`) SPARINGLY and with PURPOSE—maximum 1 (or 2) per response for critical gotchas, warnings, or major takeaways. Do NOT wrap standard narrative paragraphs or routine explanations in alert boxes.
+- Callout Alerts: Use GitHub alert syntax (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`) SPARINGLY and with PURPOSE—maximum 1 (or 2) per response for critical gotchas, warnings, or major takeaways. Do NOT wrap standard narrative paragraphs or routine explanations in alert boxes.
 - NO MARKDOWN PIPE TABLES (`| ... |`): Discord does not render markdown tables. Structure all comparisons, spec sheets, data overviews, and feature lists as clean bulleted lists with bold keys and backtick pills (e.g. `• `Item` — Description` or `**Subject**\n• **Key:** Value`).
 - Task Lists: Use `- [ ]` and `- [x]` for checklists. They compile into custom styled checkboxes.
 - Section Dividers: Use '---' on its own line between major topic shifts (renders as Discord visual separators).
 - Headings: Use #, ##, ### (never #### or higher).
 - Math: Use pure Unicode math symbols (√x, x², a/b, ±, ≠, ≈, Δ, π, θ) or ```text blocks. NEVER use LaTeX ($ or $$ or \\frac or \\sqrt). Discord cannot render LaTeX.
 
-Active Artifacts & Code Deliverables ("Canvas & Artifacts"):
+Interactive Quizzes & Knowledge Checks (<quiz> tags):
+- When the user explicitly asks to be quizzed, tested, or given trivia on a topic (e.g. "quiz me on Python", "make a Minecraft quiz", "test my knowledge on Docker"):
+  * Emit an interactive `<quiz title="..." topic="..." difficulty="...">` XML block.
+  * Structure each question with 3 to 4 distinct options, exactly ONE correct answer (`correct="true"`), and concise explanations for every option explaining why it is correct or incorrect.
+  * Format:
+    <quiz title="Quiz Title" topic="Subject Topic" difficulty="Easy|Medium|Hard">
+      <question text="Which item is required as fuel to brew potions in a Brewing Stand?" category="Brewing & Alchemy">
+        <option text="Blaze Powder" correct="true" explanation="Blaze Powder provides the power charges necessary to operate a Brewing Stand." />
+        <option text="Glowstone Dust" explanation="Glowstone Dust increases potion potency, but cannot fuel the stand." />
+        <option text="Blaze Rod" explanation="Blaze Rods are used to craft Brewing Stands, but cannot be placed in the fuel slot." />
+        <option text="Magma Cream" explanation="Magma Cream is a potion ingredient, not fuel." />
+      </question>
+    </quiz>
+- STRICT RULE: ONLY emit `<quiz>` tags when the user explicitly requests a quiz, exam, test, knowledge check, or trivia. Do NOT emit quizzes for general informational questions.
 
+Active Artifacts & Code Deliverables ("Canvas & Artifacts"):
 1. LIVE ARTIFACT EXECUTION vs. EXPLAINING/TEACHING ARTIFACTS:
    - CREATING LIVE DELIVERABLES (Action Mode):
      When creating a functional file, script, multi-file project, or markdown document canvas for the user, emit `<artifact identifier="...">...</artifact>` directly outside of any markdown code blocks. The system will intercept this tag, compile it into an interactive UI card, and provide a live download/canvas playground.
    - EXPLAINING / TEACHING ARTIFACT SYNTAX (Documentation Mode):
      When the user asks you to explain, demonstrate, or teach how artifacts, XML tags, or PriestyAI's features work:
      * ALWAYS wrap any example `<artifact>` or `<followup>` tags inside markdown code blocks (e.g. ```xml or ```markdown) or inline backticks (`<artifact>`).
-     * NEVER emit raw, unescaped `<artifact>` tags when you are only showing an example or giving documentation. Unescaped tags will be executed as live files instead of remaining visible tutorial text.
+     * NEVER emit raw, unescaped `<artifact>` tags when you are only showing an example or giving documentation.
 
 2. Contextual Awareness & Updating Existing Artifacts:
-   - All active deliverables and source files previously generated in this conversation are provided in the <active_artifacts> context block.
-   - When the user asks to modify, refactor, add features, fix bugs, or build upon an existing deliverable:
-     * DO NOT claim the code/artifact is missing from chat history—it is right inside <active_artifacts>!
-     * Read the existing code from <active_artifacts>, apply the modifications, and re-emit `<artifact identifier="same_filename.ext" title="Artifact Title">` with the complete updated code.
-     * Keep the exact same identifier/filename (e.g. `identifier="vscode-clone.zip"` or `identifier="calculator.html"`).
-     * PriestyAI's Artifacts engine automatically computes the unified diff, creates a new version (v2, v3, etc.), and updates the live playground!
-
-3. Artifact Types:
-   - Standalone Code Deliverables / Full Scripts / Apps:
-     <artifact identifier="filename.ext" title="Artifact Title">
-     ... complete code content ...
-     </artifact>
-   - Multi-File Project Archives (.zip):
-     <artifact identifier="project_name.zip" title="Project Title">
-       <file filename="index.html">...</file>
-       <file filename="styles.css">...</file>
-       <file filename="app.js">...</file>
-     </artifact>
-   - Markdown Document Canvas Artifacts (.md):
-     Proactively create Markdown Canvas Artifacts (`<artifact identifier="document_name.md" title="Title">`) for multi-section cheat sheets, complete setup manuals, API reference docs, and in-depth tutorials. Write a short 1-2 sentence intro in chat and put the full markdown document inside the `<artifact>` tag.
-
-4. Inline Markdown (```lang):
-   - Use for quick conversational snippets, single-function demos, illustrative toy examples, bug fixes, or short code snippets.
+   - All active deliverables previously generated in this conversation are provided in the <active_artifacts> context block.
+   - When modifying an existing deliverable, read the code from <active_artifacts> and re-emit `<artifact identifier="same_filename.ext" title="Artifact Title">` with complete updated code.
 
 Suggested Follow-up Action Buttons (<followup> tags):
-- When concluding a complex explanation or deliverable, you MAY provide 1 to 3 suggested follow-up actions as buttons.
-- Format:
+- When concluding a complex explanation or deliverable, you MAY provide 1 to 3 suggested follow-up actions as buttons:
   <followup label="Short Button Label">Detailed, self-contained prompt to execute when clicked</followup>
-- Maximum 3 follow-ups per response. Always place them at the very end of your message.
-- When explaining follow-ups in tutorial text, wrap the example tag in ```xml code fences.
-
-Visual Enrichment & Image Tools ('search_image' vs 'search_gif' vs 'edit_image' vs 'generate_image'):
-- 'search_gif(query="...")': Finds, downloads, and embeds animated GIFs, reaction memes, emotions, and motion clips.
-- 'edit_image(prompt="...", strength=0.55)': MANDATORY tool when the user uploads, attaches, or replies to an image and asks to edit, stylize, transform, filter, cartoonify, sketch, anime-fy, or modify it.
-  * Choose strength: 0.35 to 0.48 for subtle stylizing while retaining original line art, or 0.50 to 0.65 for creative redesign / 3D / anime.
-- 'search_image(query="...")': Finds and attaches real-world pictures, game art, character renders, screenshots, or hardware photos.
-- 'generate_image(prompt="...")': Creates new AI artwork from text from scratch.
+- Maximum 3 follow-ups per response at the very end of your message.
 
 Autonomous Tools:
 - github_repo: Deep GitHub repository analysis, file reading, code searching, commit logs, PR diffs, and project digests.
 - search_web / read_link: Mandatory for real-time facts, current news, updates, or latest documentation. Never guess.
-- search_image: Finds, downloads, and attaches real-world pictures, renders, and character assets to chat.
-- search_gif: Finds and embeds animated GIFs, reaction memes, and expressive motion clips.
-- edit_image: Local diffusion image-to-image styling and transformation.
-- generate_image: Local diffusion AI artwork generation.
-- execute_code: Run code in Docker sandbox to test logic or generate matplotlib plots.
-- calc: Instant high-precision math calculator (<1ms).
+- search_image / search_gif: Visual asset search and GIF reactions.
+- edit_image / generate_image: Local diffusion image editing and text-to-image.
+- execute_code: Run code in Docker sandbox to test logic.
+- calc: Instant high-precision math calculator.
 - create_poll: Native Discord interactive voting poll.
 - remember / forget: Autonomously save durable user habits/preferences or server lore.
 - ask_expert: Escalate deep mathematical proofs or difficult algorithmic barriers.
@@ -190,13 +173,14 @@ class ChatEngine:
             return {"user_memories": [], "server_lore": []}
 
     @staticmethod
-    def _is_tpm_limit_error(error_str: str) -> bool:
+    def _is_retryable_error(error_str: str) -> bool:
         err_lower = error_str.lower()
-        if "429" in err_lower or "resource_exhausted" in err_lower:
-            if "requests_per_day" in err_lower or "rpd" in err_lower or "daily quota" in err_lower:
-                return False
-            return True
-        return False
+        retryable_keywords = [
+            "429", "503", "500", "502", "504",
+            "unavailable", "overloaded", "resource_exhausted",
+            "timeout", "timed out", "internal server error", "connection reset"
+        ]
+        return any(kw in err_lower for kw in retryable_keywords)
 
     @staticmethod
     async def stream_fast_answer(
@@ -207,76 +191,88 @@ class ChatEngine:
     ) -> AsyncGenerator[tuple[str, Any], None]:
         fast_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL]
         for model_name in fast_models:
-            client, key_idx, active_model = client_manager.get_client_for_model(model_name)
-            if client is None:
-                continue
+            attempted_keys: set[int] = set()
+            while True:
+                client, key_idx, active_model = client_manager.get_client_for_model(
+                    model_name,
+                    exclude_keys=attempted_keys,
+                    fallback=False
+                )
+                if client is None or key_idx in attempted_keys:
+                    break
 
-            eff_thinking = normalize_thinking_level(active_model, "MINIMAL")
-            logger.info(f"[Answer Now Fast Stream] Dispatched '{active_model}' with {eff_thinking} thinking (Key #{key_idx})")
-            yield ("ACTIVE_MODEL", active_model)
-            try:
-                for tool_turn in range(5):
-                    config = types.GenerateContentConfig(
-                        system_instruction=formatted_system_prompt,
-                        thinking_config=types.ThinkingConfig(
-                            thinking_level=eff_thinking,
-                            include_thoughts=False
-                        ),
-                        tools=tool_declarations,
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                        temperature=0.4
-                    )
+                attempted_keys.add(key_idx)
+                eff_thinking = normalize_thinking_level(active_model, "MINIMAL")
+                logger.info(f"[Answer Now Fast Stream] Dispatched '{active_model}' with {eff_thinking} thinking (Key #{key_idx})")
+                yield ("ACTIVE_MODEL", active_model)
 
-                    response_stream = await client.aio.models.generate_content_stream(
-                        model=active_model,
-                        contents=conversation_contents,
-                        config=config
-                    )
-
-                    tool_calls_to_execute = []
-                    model_parts: list[types.Part] = []
-
-                    async for chunk in response_stream:
-                        if chunk.candidates and chunk.candidates[0].content:
-                            for part in chunk.candidates[0].content.parts:
-                                model_parts.append(part)
-                                if part.text:
-                                    clean_txt, leaked_calls = extract_and_strip_leaked_calls(part.text)
-                                    if clean_txt:
-                                        yield ("CONTENT", clean_txt)
-                                    if leaked_calls:
-                                        tool_calls_to_execute.extend(leaked_calls)
-                                elif part.function_call:
-                                    tool_calls_to_execute.append(part.function_call)
-
-                    if model_parts:
-                        conversation_contents.append(types.Content(role="model", parts=model_parts))
-
-                    if not tool_calls_to_execute:
-                        return
-
-                    function_response_parts: list[types.Part] = []
-                    for call in tool_calls_to_execute:
-                        call_name = call.name
-                        call_args = dict(call.args) if call.args else {}
-                        yield ("TOOL_START", {"name": call_name, "args": call_args})
-                        tool_result = await tool_registry.execute(call_name, call_args, tool_context)
-                        yield ("TOOL_END", {"name": call_name, "args": call_args, "result": tool_result})
-                        function_response_parts.append(
-                            types.Part(
-                                function_response=types.FunctionResponse(
-                                    name=call_name,
-                                    response=tool_result
-                                )
-                            )
+                try:
+                    for tool_turn in range(5):
+                        config = types.GenerateContentConfig(
+                            system_instruction=formatted_system_prompt,
+                            thinking_config=types.ThinkingConfig(
+                                thinking_level=eff_thinking,
+                                include_thoughts=False
+                            ),
+                            tools=tool_declarations,
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                            temperature=0.4
                         )
 
-                    conversation_contents.append(types.Content(role="user", parts=function_response_parts))
+                        response_stream = await client.aio.models.generate_content_stream(
+                            model=active_model,
+                            contents=conversation_contents,
+                            config=config
+                        )
 
-                return
-            except Exception as e:
-                client_manager.report_error(key_idx, active_model, e)
-                logger.warning(f"Fast stream fail on '{active_model}': {e}")
+                        tool_calls_to_execute = []
+                        model_parts: list[types.Part] = []
+
+                        async for chunk in response_stream:
+                            if chunk.candidates and chunk.candidates[0].content:
+                                for part in chunk.candidates[0].content.parts:
+                                    model_parts.append(part)
+                                    if part.text:
+                                        clean_txt, leaked_calls = extract_and_strip_leaked_calls(part.text)
+                                        if clean_txt:
+                                            yield ("CONTENT", clean_txt)
+                                        if leaked_calls:
+                                            tool_calls_to_execute.extend(leaked_calls)
+                                    elif part.function_call:
+                                        tool_calls_to_execute.append(part.function_call)
+
+                        if model_parts:
+                            conversation_contents.append(types.Content(role="model", parts=model_parts))
+
+                        if not tool_calls_to_execute:
+                            return
+
+                        function_response_parts: list[types.Part] = []
+                        for call in tool_calls_to_execute:
+                            call_name = call.name
+                            call_args = dict(call.args) if call.args else {}
+                            yield ("TOOL_START", {"name": call_name, "args": call_args})
+                            tool_result = await tool_registry.execute(call_name, call_args, tool_context)
+                            yield ("TOOL_END", {"name": call_name, "args": call_args, "result": tool_result})
+                            function_response_parts.append(
+                                types.Part(
+                                    function_response=types.FunctionResponse(
+                                        name=call_name,
+                                        response=tool_result
+                                    )
+                                )
+                            )
+
+                        conversation_contents.append(types.Content(role="user", parts=function_response_parts))
+
+                    return
+                except Exception as e:
+                    err_desc = str(e)
+                    client_manager.report_error(key_idx, active_model, e)
+                    logger.warning(f"Fast stream fail on '{active_model}' (Key #{key_idx}): {err_desc}")
+                    if ChatEngine._is_retryable_error(err_desc):
+                        continue
+                    break
 
         yield ("ERROR", "Fast answer generation failed across all available keys.")
 
@@ -377,17 +373,26 @@ class ChatEngine:
 
         candidate_models = [requested_model]
         if requested_model in FLAGSHIP_MODELS:
-            candidate_models += ["gemini-3.6-flash", "gemini-3.5-flash", WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL]
+            candidate_models += ["gemini-3.6-flash", "gemini-3.5-flash", WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL, "gemini-3.5-flash-lite"]
         elif requested_model == WORKHORSE_DENSE_MODEL:
-            candidate_models += [WORKHORSE_MOE_MODEL, "gemini-3.5-flash-lite", "gemini-3.5-flash"]
+            candidate_models += [WORKHORSE_MOE_MODEL, "gemini-3.5-flash", "gemini-3.5-flash-lite"]
         elif requested_model == WORKHORSE_MOE_MODEL:
             candidate_models += [WORKHORSE_DENSE_MODEL, "gemini-3.5-flash-lite", "gemini-3.5-flash"]
+        elif requested_model in LITE_MODELS:
+            candidate_models += ["gemini-3.1-flash-lite", WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL, "gemini-3.5-flash"]
         else:
-            candidate_models += [WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL]
+            candidate_models += [WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL, "gemini-3.5-flash-lite"]
+
+        seen_cands = set()
+        clean_candidate_models = []
+        for m in candidate_models:
+            if m not in seen_cands:
+                seen_cands.add(m)
+                clean_candidate_models.append(m)
 
         tool_declarations = tool_registry.get_tool_declarations(disabled_tools=resolved_cfg.get("disabled_tools", []))
 
-        for model_cand in candidate_models:
+        for model_cand in clean_candidate_models:
             conversation_contents: list[types.Content] = [
                 types.Content(
                     role="user",
@@ -412,11 +417,12 @@ class ChatEngine:
 
                 client, key_idx, active_model = client_manager.get_client_for_model(
                     model_cand, 
-                    exclude_keys=attempted_keys
+                    exclude_keys=attempted_keys,
+                    fallback=False
                 )
                 
                 if client is None or key_idx in attempted_keys:
-                    logger.warning(f"Exhausted all available keys for model '{model_cand}'. Cascading to next candidate...")
+                    logger.warning(f"Exhausted all available keys for model '{model_cand}'. Cascading to next candidate in chain...")
                     break
 
                 attempted_keys.add(key_idx)
@@ -555,11 +561,11 @@ class ChatEngine:
                     err_desc = "First token timeout (>18s)" if isinstance(e, asyncio.TimeoutError) else str(e)
                     client_manager.report_error(key_idx, active_model, Exception(err_desc))
 
-                    if ChatEngine._is_tpm_limit_error(err_desc):
-                        logger.warning(f"[TPM Limit Hit] Key #{key_idx} rate-limited on '{active_model}'. Swapping key...")
+                    if ChatEngine._is_retryable_error(err_desc):
+                        logger.warning(f"[Transient Error on Key #{key_idx}] '{active_model}': {err_desc}. Trying next available key...")
                         continue
                     else:
-                        logger.warning(f"[Fatal / Cascade Error] '{active_model}': {err_desc}. Cascading...")
+                        logger.warning(f"[Fatal / Unsupported Config] '{active_model}': {err_desc}. Cascading to next candidate...")
                         break
 
             tool_context.staged_components.clear()

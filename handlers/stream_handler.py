@@ -1,7 +1,7 @@
-import io
 import re
 import time
 import json
+import io
 import asyncio
 import logging
 from typing import Any, Callable
@@ -33,11 +33,48 @@ from parsers.markdown_parser import (
 )
 from ui.modals import DynamicModalV2
 from ui.artifact_views import build_artifact_components_for_message
+from ui.quiz_views import build_quiz_components_for_message
 from core.branch_manager import branch_manager
 
 logger = logging.getLogger("PriestyAI.StreamHandler")
 
 MAX_V2_MESSAGE_TEXT_BUDGET = 3500
+
+def should_show_reply_button(
+    bot: discord.Client | None = None,
+    guild: discord.Guild | None = None,
+    channel: discord.abc.Messageable | None = None,
+    interaction: discord.Interaction | None = None
+) -> bool:
+    guild_id = None
+    if interaction and interaction.guild_id:
+        guild_id = interaction.guild_id
+    elif guild and hasattr(guild, "id"):
+        guild_id = guild.id
+
+    client = bot or (interaction.client if interaction else None)
+
+    if guild_id:
+        if client:
+            bot_guild = client.get_guild(guild_id)
+            if bot_guild is not None and getattr(bot_guild, "me", None) is not None:
+                return False
+            return True
+
+        if guild and getattr(guild, "me", None) is not None:
+            return False
+        return True
+
+    target_chan = channel or (interaction.channel if interaction else None)
+    if target_chan:
+        is_group = isinstance(target_chan, getattr(discord, "GroupChannel", ())) or getattr(target_chan, "type", None) == discord.ChannelType.group
+        if is_group:
+            return True
+
+        if isinstance(target_chan, discord.DMChannel):
+            return False
+
+    return False
 
 def create_accented_container(color: int | None = None) -> Container:
     if color is not None:
@@ -171,7 +208,7 @@ def chunk_timeline(timeline: list[dict[str, Any]], max_chars: int = MAX_V2_MESSA
                         current_slice.append({"type": "text", "content": sub_text})
                     current_slice_chars += sub_len
 
-        elif b_type in ["artifact", "media", "component", "alert"]:
+        elif b_type in ["artifact", "quiz", "media", "component", "alert"]:
             overhead = 150
             if (current_slice_chars + overhead > max_chars or len(current_slice) >= 30) and current_slice:
                 message_slices.append(current_slice)
@@ -203,6 +240,7 @@ def build_v2_message_layout(
     has_image: bool = False,
     thought_duration: int = 0,
     has_thoughts: bool = False,
+    show_reply_button: bool = False,
     active_version: int = 1,
     total_versions: int = 1,
     message_id: str | int | None = None,
@@ -264,6 +302,12 @@ def build_v2_message_layout(
                 art_data = block.get("artifact", {})
                 art_items = build_artifact_components_for_message(art_data, message_id=target_mid, is_live_stream=is_live_stream)
                 elements.extend(art_items)
+                idx += 1
+
+            elif b_type == "quiz":
+                quiz_data = block.get("quiz", {})
+                quiz_items = build_quiz_components_for_message(quiz_data, message_id=target_mid, is_live_stream=is_live_stream)
+                elements.extend(quiz_items)
                 idx += 1
 
             elif b_type == "media":
@@ -495,7 +539,7 @@ def build_v2_message_layout(
             btn = Button(
                 label=fup_label,
                 style=btn_style,
-                custom_id=f"fup:{target_mid}:{idx}",
+                custom_id=fup.get("custom_id") or f"fup:{target_mid}:{idx}",
                 disabled=is_fup_disabled
             )
             fup_buttons.append(btn)
@@ -503,9 +547,10 @@ def build_v2_message_layout(
             elements.append(ActionRow(*fup_buttons))
 
     if message_id:
-        if (has_thoughts or total_versions >= 2) and elements:
+        if (has_thoughts or total_versions >= 2 or (show_reply_button and not is_live_stream)) and elements:
             elements.append(Separator(visible=True))
 
+        footer_row_items = []
         if has_thoughts and len(elements) < 39:
             time_str = f"{thought_duration}s" if thought_duration > 0 else "<1s"
             t_btn = Button(
@@ -513,7 +558,19 @@ def build_v2_message_layout(
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"gen_thought_{message_id}_{active_version}"
             )
-            elements.append(ActionRow(t_btn))
+            footer_row_items.append(t_btn)
+
+        if show_reply_button and not is_live_stream and len(elements) < 39:
+            r_btn = Button(
+                label="Reply",
+                emoji="💬",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"chat_reply:{message_id}"
+            )
+            footer_row_items.append(r_btn)
+
+        if footer_row_items:
+            elements.append(ActionRow(*footer_row_items))
 
         if total_versions >= 2 and len(elements) < 39:
             prev_btn = Button(label="◀", style=discord.ButtonStyle.secondary, disabled=(active_version <= 1 or is_live_stream), custom_id=f"gen_prev_{message_id}")
@@ -535,6 +592,7 @@ class DiscordStreamDispatcher:
         interaction: discord.Interaction | None = None,
         target_channel: discord.abc.Messageable | None = None,
         is_ephemeral: bool = False,
+        show_reply_button: bool | None = None,
         active_version: int = 1,
         total_versions: int = 1
     ):
@@ -546,6 +604,16 @@ class DiscordStreamDispatcher:
         self.is_ephemeral = is_ephemeral
         self.active_version = active_version
         self.total_versions = total_versions
+
+        if show_reply_button is not None:
+            self.show_reply_button = show_reply_button
+        else:
+            self.show_reply_button = should_show_reply_button(
+                bot=None,
+                guild=guild,
+                channel=target_channel or (origin_message.channel if origin_message else None),
+                interaction=interaction
+            )
 
         self.sent_messages: list[discord.Message] = [existing_response_msg] if existing_response_msg else []
         self.interaction_overflow_count = 1 if interaction else 0
@@ -604,6 +672,37 @@ class DiscordStreamDispatcher:
         placeholder_art["is_generating"] = True
         self.timeline.append({"type": "artifact", "artifact": placeholder_art, "status": "generating"})
         logger.info(f"[Dispatcher] Anchored live XML artifact placeholder: '{placeholder_art.get('filename')}'")
+
+    def add_quiz_placeholder_record(self, placeholder_quiz: dict[str, Any]):
+        if "start_time" not in placeholder_quiz:
+            placeholder_quiz["start_time"] = time.time()
+        placeholder_quiz["status"] = "generating"
+        placeholder_quiz["is_generating"] = True
+        self.timeline.append({"type": "quiz", "quiz": placeholder_quiz, "status": "generating"})
+        logger.info(f"[Dispatcher] Anchored live Quiz placeholder: '{placeholder_quiz.get('title')}'")
+
+    def update_quiz_ready(self, quiz_data: dict[str, Any]):
+        target_id = quiz_data.get("quiz_id")
+        found = False
+
+        for block in reversed(self.timeline):
+            if block.get("type") == "quiz":
+                q = block.get("quiz", {})
+                if (target_id and q.get("quiz_id") == target_id) or block.get("status") == "generating" or q.get("status") == "generating":
+                    block["quiz"] = dict(quiz_data)
+                    block["quiz"]["status"] = "ready"
+                    block["quiz"]["is_generating"] = False
+                    block["status"] = "ready"
+                    found = True
+                    logger.info(f"[Dispatcher] Replaced generating placeholder with ready quiz: '{quiz_data.get('title')}'")
+                    break
+
+        if not found:
+            ready_q = dict(quiz_data)
+            ready_q["status"] = "ready"
+            ready_q["is_generating"] = False
+            self.timeline.append({"type": "quiz", "quiz": ready_q, "status": "ready"})
+            logger.info(f"[Dispatcher] Appended ready quiz block: '{quiz_data.get('title')}'")
 
     def update_artifact_ready(self, artifact_data: dict[str, Any]):
         target_fn = artifact_data.get("filename")
@@ -679,6 +778,7 @@ class DiscordStreamDispatcher:
         interaction_dispatcher: Callable | None = None,
         thought_duration: int = 0,
         has_thoughts: bool = False,
+        show_reply_button: bool | None = None,
         active_version: int | None = None,
         total_versions: int | None = None,
         message_id: str | int | None = None,
@@ -695,6 +795,7 @@ class DiscordStreamDispatcher:
         target_total_v = total_versions if total_versions is not None else self.total_versions
         target_msg_id = message_id or (self.primary_message.id if self.primary_message else None)
         active_followups = staged_followups if staged_followups is not None else self.staged_followups
+        render_reply = show_reply_button if show_reply_button is not None else self.show_reply_button
 
         if not is_final and target_msg_id:
             gen = branch_manager.get_generation(target_msg_id)
@@ -722,6 +823,7 @@ class DiscordStreamDispatcher:
                         interaction_dispatcher=chunk_dispatcher,
                         thought_duration=thought_duration if is_last_slice else 0,
                         has_thoughts=has_thoughts if is_last_slice else False,
+                        show_reply_button=render_reply if is_last_slice else False,
                         active_version=target_active_v,
                         total_versions=target_total_v,
                         message_id=target_msg_id if is_last_slice else None,
@@ -784,10 +886,12 @@ class DiscordStreamDispatcher:
         interaction_dispatcher: Callable | None = None,
         thought_duration: int = 0,
         has_thoughts: bool = False,
+        show_reply_button: bool | None = None,
         active_version: int = 1,
         total_versions: int = 1,
         message_id: str | int | None = None
     ):
+        render_reply = show_reply_button if show_reply_button is not None else self.show_reply_button
         await self.flush(
             staged_artifacts=staged_artifacts,
             staged_components=staged_components,
@@ -796,6 +900,7 @@ class DiscordStreamDispatcher:
             interaction_dispatcher=interaction_dispatcher,
             thought_duration=thought_duration,
             has_thoughts=has_thoughts,
+            show_reply_button=render_reply,
             active_version=active_version,
             total_versions=total_versions,
             message_id=message_id,

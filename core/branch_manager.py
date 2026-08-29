@@ -86,7 +86,120 @@ class BranchManager:
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_channel_file ON conversation_artifacts(channel_id, filename)")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS quizzes (
+                    quiz_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    difficulty TEXT DEFAULT 'Medium',
+                    questions_json TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_quizzes_channel ON quizzes(channel_id)")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS quiz_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    quiz_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    total_questions INTEGER NOT NULL,
+                    answers_json TEXT NOT NULL,
+                    strengths_json TEXT NOT NULL,
+                    focus_areas_json TEXT NOT NULL,
+                    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user ON quiz_attempts(quiz_id, user_id)")
+
             conn.commit()
+
+
+    def save_quiz(
+        self,
+        channel_id: str | int,
+        title: str,
+        topic: str,
+        difficulty: str,
+        questions: list[dict[str, Any]],
+        quiz_id: str | None = None
+    ) -> dict[str, Any]:
+        q_id = quiz_id or f"quiz_{int(time.time() * 1000)}"
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO quizzes (quiz_id, channel_id, title, topic, difficulty, questions_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(quiz_id) DO UPDATE SET
+                    title = excluded.title,
+                    topic = excluded.topic,
+                    difficulty = excluded.difficulty,
+                    questions_json = excluded.questions_json
+            """, (
+                str(q_id),
+                str(channel_id),
+                title.strip() or "Quiz",
+                topic.strip() or "General Knowledge",
+                difficulty.strip().capitalize() or "Medium",
+                json.dumps(questions)
+            ))
+            conn.commit()
+
+        logger.info(f"[BranchManager] Saved quiz '{title}' ({q_id}) with {len(questions)} questions.")
+        return {
+            "quiz_id": str(q_id),
+            "channel_id": str(channel_id),
+            "title": title.strip() or "Quiz",
+            "topic": topic.strip() or "General Knowledge",
+            "difficulty": difficulty.strip().capitalize() or "Medium",
+            "questions": questions,
+            "status": "ready"
+        }
+
+    def get_quiz(self, quiz_id: str) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM quizzes WHERE quiz_id = ?", (str(quiz_id),))
+            row = cursor.fetchone()
+            if row:
+                d = dict(row)
+                d["questions"] = json.loads(d.get("questions_json") or "[]")
+                return d
+        return None
+
+    def save_quiz_attempt(
+        self,
+        quiz_id: str,
+        user_id: str | int,
+        score: int,
+        total_questions: int,
+        answers: dict[int, int],
+        strengths: list[str],
+        focus_areas: list[str]
+    ) -> str:
+        attempt_id = f"att_{int(time.time() * 1000)}"
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO quiz_attempts (
+                    attempt_id, quiz_id, user_id, score, total_questions,
+                    answers_json, strengths_json, focus_areas_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                attempt_id,
+                str(quiz_id),
+                str(user_id),
+                int(score),
+                int(total_questions),
+                json.dumps(answers),
+                json.dumps(strengths),
+                json.dumps(focus_areas)
+            ))
+            conn.commit()
+        return attempt_id
 
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
@@ -138,6 +251,50 @@ class BranchManager:
                 d["versions"] = json.loads(d.get("versions_json") or "[]")
                 results.append(d)
             return results
+
+    def update_artifact_content_in_place(
+        self,
+        artifact_id: str,
+        files: list[dict[str, Any]],
+        target_version: int | None = None
+    ) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM conversation_artifacts WHERE artifact_id = ?", (str(artifact_id),))
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            versions = json.loads(row["versions_json"] or "[]")
+            if not versions:
+                return False
+
+            active_v = target_version or row["active_version"] or len(versions)
+            if not (1 <= active_v <= len(versions)):
+                active_v = len(versions)
+
+            v_entry = versions[active_v - 1]
+            v_entry["files"] = files
+            
+            if len(files) == 1 and not files[0].get("filename", "").endswith(".zip"):
+                v_entry["content"] = files[0].get("content", "")
+                v_entry["lines"] = max(1, len(v_entry["content"].splitlines()))
+                v_entry["size_bytes"] = len(v_entry["content"].encode("utf-8"))
+            else:
+                v_entry["content"] = ""
+                v_entry["lines"] = sum(f.get("lines", len(f.get("content", "").splitlines())) for f in files)
+                v_entry["size_bytes"] = sum(f.get("size_bytes", len(f.get("content", "").encode("utf-8"))) for f in files)
+
+            v_entry["timestamp"] = int(time.time())
+
+            cursor.execute("""
+                UPDATE conversation_artifacts
+                SET versions_json = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE artifact_id = ?
+            """, (json.dumps(versions), str(artifact_id)))
+            conn.commit()
+            logger.info(f"[BranchManager] In-place auto-saved artifact '{artifact_id}' (v{active_v}, {len(files)} files)")
+            return True
 
     def save_or_update_artifact(
         self,

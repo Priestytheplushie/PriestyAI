@@ -105,7 +105,6 @@ class PlaygroundServer:
                         except Exception:
                             pass
 
-
     async def handle_live_ws(self, request: web.Request) -> web.WebSocketResponse:
         artifact_id = request.match_info.get("artifact_id", "")
         ws = web.WebSocketResponse(heartbeat=25.0)
@@ -181,7 +180,6 @@ class PlaygroundServer:
             "data": artifact_payload
         })
 
-
     async def handle_artifact_save_api(self, request: web.Request) -> web.Response:
         artifact_id = request.match_info.get("artifact_id", "")
         try:
@@ -194,7 +192,6 @@ class PlaygroundServer:
                 return web.json_response({"error": "No files provided"}, status=400)
 
             branch_manager.update_artifact_content_in_place(artifact_id, files, target_version=version)
-
             self._sync_files_to_disk(artifact_id, files)
 
             await self._broadcast_event(artifact_id, {
@@ -209,7 +206,6 @@ class PlaygroundServer:
         except Exception as e:
             logger.error(f"Failed to auto-save artifact {artifact_id}: {e}")
             return web.json_response({"error": str(e)}, status=500)
-
 
     async def handle_terminal_ws(self, request: web.Request) -> web.WebSocketResponse:
         artifact_id = request.match_info.get("artifact_id", "")
@@ -241,9 +237,13 @@ class PlaygroundServer:
             )
             out_i, _ = await inspect_p.communicate()
             if inspect_p.returncode != 0 or "true" not in out_i.decode().lower():
-                await asyncio.create_subprocess_exec("docker", "rm", "-f", container_name, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                rm_p = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-f", container_name,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                )
+                await rm_p.communicate()
                 try:
-                    await asyncio.create_subprocess_exec(
+                    run_p = await asyncio.create_subprocess_exec(
                         "docker", "run", "-d", "--name", container_name,
                         "--memory=512m", "--cpus=1.0", "--pids-limit=100",
                         "-v", f"{workspace_dir}:/workspace",
@@ -251,8 +251,9 @@ class PlaygroundServer:
                         container_image, "tail", "-f", "/dev/null",
                         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
                     )
+                    await run_p.communicate()
                 except Exception:
-                    await asyncio.create_subprocess_exec(
+                    run_p = await asyncio.create_subprocess_exec(
                         "docker", "run", "-d", "--name", container_name,
                         "--memory=512m", "--cpus=1.0", "--pids-limit=100",
                         "-v", f"{workspace_dir}:/workspace",
@@ -260,21 +261,22 @@ class PlaygroundServer:
                         "python:3.11-slim", "tail", "-f", "/dev/null",
                         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
                     )
+                    await run_p.communicate()
 
         discord_banner = (
-            "\r\n\x1b[38;2;88;101;242m●\x1b[0m \x1b[1;37mPriestyAI Multi-Runtime Terminal\x1b[0m "
-            "\x1b[38;2;148;155;164m(Python 3.11 • Node.js 20 • Pip • Npx)\x1b[0m\r\n"
-            "\x1b[38;2;148;155;164mType bash/python/node commands or click ▶ Run to execute.\x1b[0m\r\n\r\n"
+            "\r\n\x1b[38;2;88;101;242m●\x1b[0m \x1b[1;37mPriestyAI Sandbox Terminal\x1b[0m "
+            "\x1b[38;2;148;155;164m(Python 3.11 • Node.js 20 • Non-Interactive)\x1b[0m\r\n"
+            "\x1b[38;2;240;178;50mℹ️ Tip:\x1b[0m \x1b[38;2;148;155;164mInteractive console prompts (e.g. input()) are not supported in the web terminal.\r\n"
+            "   Click \x1b[1;37mDownload\x1b[0;38;2;148;155;164m above to run interactive CLI scripts in your local terminal.\x1b[0m\r\n\r\n"
         )
         await ws.send_str(discord_banner)
 
-        cwd_disp = "/workspace"
         prompt_str = (
             "\x1b[38;2;88;101;242mpriesty\x1b[0m"
             "\x1b[38;2;148;155;164m@\x1b[0m"
             "\x1b[38;2;35;165;90msandbox\x1b[0m"
             "\x1b[38;2;148;155;164m:\x1b[0m"
-            f"\x1b[38;2;240;178;50m{cwd_disp}\x1b[0m"
+            "\x1b[38;2;240;178;50m/workspace\x1b[0m"
             "\x1b[38;2;148;155;164m$ \x1b[0m"
         )
         await ws.send_str(prompt_str)
@@ -311,13 +313,20 @@ class PlaygroundServer:
                                             stderr=asyncio.subprocess.STDOUT,
                                             cwd=run_cwd
                                         )
-                                        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=45.0)
+                                        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=25.0)
                                         output_text = stdout_bytes.decode("utf-8", errors="replace")
-                                        formatted_out = output_text.replace("\n", "\r\n")
+
+                                        if "EOFError" in output_text or "EOF when reading a line" in output_text:
+                                            output_text += (
+                                                "\n\x1b[38;2;240;178;50m[Notice: Interactive input() detected. "
+                                                "Download files via the header button to run interactively locally]\x1b[0m\n"
+                                            )
+
+                                        formatted_out = output_text.replace("\r\n", "\n").replace("\n", "\r\n")
                                         if formatted_out:
                                             await ws.send_str(formatted_out + ("\r\n" if not formatted_out.endswith("\r\n") else ""))
                                     except asyncio.TimeoutError:
-                                        await ws.send_str("\x1b[38;2;242;63;67m[Command timed out after 45s]\x1b[0m\r\n")
+                                        await ws.send_str("\x1b[38;2;242;63;67m[Command timed out after 25s. Download code to run long interactive scripts locally]\x1b[0m\r\n")
                                     except Exception as e:
                                         await ws.send_str(f"\x1b[38;2;242;63;67mError: {e}\x1b[0m\r\n")
 
@@ -339,12 +348,15 @@ class PlaygroundServer:
         finally:
             if has_docker:
                 try:
-                    await asyncio.create_subprocess_exec("docker", "rm", "-f", container_name, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                    rm_final = await asyncio.create_subprocess_exec(
+                        "docker", "rm", "-f", container_name,
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                    )
+                    await rm_final.communicate()
                 except Exception:
                     pass
 
         return ws
-
 
     async def handle_artifact_versions_api(self, request: web.Request) -> web.Response:
         artifact_id = request.match_info.get("artifact_id", "")

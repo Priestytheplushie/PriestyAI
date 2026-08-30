@@ -86,8 +86,6 @@
       text-overflow: ellipsis;
       max-width: 180px;
     }
-
-    /* Interactive Version Select Dropdown */
     .version-wrapper {
       display: inline-flex;
       align-items: center;
@@ -124,8 +122,6 @@
       color: var(--text-muted);
       white-space: nowrap;
     }
-
-    /* Save Status Pill */
     .save-pill {
       display: inline-flex;
       align-items: center;
@@ -142,8 +138,6 @@
     }
     .save-pill.saved { color: var(--discord-green); border-color: rgba(35,165,90,0.3); }
     .save-pill.saving { color: var(--discord-yellow); border-color: rgba(240,178,50,0.3); }
-
-    /* Far-Right Avatar Profiles */
     .avatar-circle {
       width: 28px;
       height: 28px;
@@ -191,7 +185,6 @@
       background-color: var(--border-subtle);
       margin: 0 2px;
     }
-
     .header-center {
       display: flex;
       align-items: center;
@@ -264,8 +257,6 @@
     .action-btn.primary:hover {
       background: var(--discord-blurple-hover);
     }
-
-    /* Mobile Overflow Action Menu */
     #mobile-more-btn {
       display: none;
     }
@@ -318,8 +309,6 @@
       background: var(--border-subtle);
       margin: 4px 0;
     }
-
-    /* Mobile User Profile Section */
     .mobile-user-card {
       display: flex;
       align-items: center;
@@ -358,7 +347,6 @@
       background-color: var(--discord-green);
       border-radius: 50%;
     }
-
     main {
       flex: 1;
       display: flex;
@@ -372,8 +360,6 @@
       position: relative;
       overflow: hidden;
     }
-
-    /* Discord Channel-Style File Explorer Sidebar */
     #sidebar {
       width: 230px;
       background: var(--bg-sidebar);
@@ -478,7 +464,6 @@
       color: #ffffff;
       font-weight: 600;
     }
-
     .workspace-area {
       flex: 1;
       display: flex;
@@ -493,7 +478,6 @@
       flex-direction: column;
       overflow: hidden;
     }
-    
     .tabs-bar {
       height: 38px;
       background: var(--bg-surface);
@@ -539,11 +523,8 @@
       display: inline-flex;
       align-items: center;
     }
-
     #editor-container { flex: 1; width: 100%; height: 100%; }
     .divider { width: 2px; background: var(--border-subtle); z-index: 5; }
-    
-    /* Status Bar */
     .editor-status-bar {
       height: 24px;
       background: var(--bg-surface);
@@ -603,7 +584,6 @@
       0%, 80%, 100% { transform: scale(0); }
       40% { transform: scale(1.0); }
     }
-
     .preview-header {
       height: 38px;
       background: var(--bg-surface);
@@ -619,7 +599,6 @@
       color: var(--text-muted);
       user-select: none;
     }
-
     .zoom-controls {
       display: inline-flex;
       align-items: center;
@@ -656,15 +635,12 @@
       text-align: center;
       user-select: none;
     }
-
     #preview-frame {
       width: 100%;
       height: 100%;
       border: none;
       background: var(--bg-base);
     }
-
-    /* Discord Channel Terminal Drawer */
     #terminal-drawer {
       height: 270px;
       background: var(--bg-subtle);
@@ -782,8 +758,6 @@
     .xterm .xterm-screen {
       touch-action: manipulation;
     }
-
-    /* Discord Chat-Style Terminal Message Bar (Hidden on desktop by default) */
     .term-chat-bar-container {
       display: none;
       background: #2b2d31;
@@ -827,8 +801,6 @@
       background: var(--discord-blurple);
       color: #ffffff;
     }
-
-    /* Discord Chat Input Box */
     .discord-chat-box {
       background: var(--bg-chat-box);
       border-radius: 8px;
@@ -884,8 +856,6 @@
     .discord-send-btn:active {
       transform: scale(0.96);
     }
-
-    /* Toast Notification Banner */
     #toast-banner {
       position: fixed;
       bottom: 36px;
@@ -912,10 +882,6 @@
       transform: translateY(0);
       pointer-events: auto;
     }
-
-    /* ========================================================
-       RESPONSIVE BREAKPOINTS (Mobile & Small Tablet Optimization)
-       ======================================================== */
     @media (max-width: 768px) {
       header {
         padding: 0 8px;
@@ -925,34 +891,25 @@
       .file-name { max-width: 100px; font-size: 12px; }
       .bot-badge { display: none; }
       .diff-badge { display: none; }
-
-      /* Desktop items hidden */
       #btn-desktop-copy,
       #btn-desktop-download,
       #presence-container,
       .header-divider-v {
         display: none !important;
       }
-
-      /* Keep user avatar visible and tap-friendly on mobile header */
       #my-avatar-circle {
         width: 26px;
         height: 26px;
         font-size: 10px;
       }
-
-      /* Mobile More button active */
       #mobile-more-btn {
         display: flex;
       }
-
       #btn-split { display: none !important; }
       .view-btn { padding: 4px 8px; font-size: 11px; }
-
       .tabs-bar { height: 32px; }
       .file-tab { font-size: 12px; padding: 0 10px; }
       .preview-header { font-size: 11px; height: 32px; padding: 0 8px; }
-
       #sidebar {
         position: absolute;
         top: 0;
@@ -965,7 +922,6 @@
         transform: translateX(-100%);
         margin-left: 0;
       }
-
       #terminal-drawer { 
         height: 310px;
         max-height: 85dvh;
@@ -973,12 +929,9 @@
       #terminal-drawer.maximized {
         height: 85dvh !important;
       }
-      
-      /* Show chatbox input ONLY on mobile when terminal drawer is open */
       #terminal-drawer:not(.collapsed) .term-chat-bar-container {
         display: flex;
       }
-
       .term-action-btn span:not(.codicon) {
         display: none;
       }
@@ -986,18 +939,14 @@
         padding: 3px 6px;
       }
     }
-
     @media (max-width: 480px) {
       .file-name { max-width: 75px; }
       .save-pill { padding: 2px 5px; }
       .save-pill #save-pill-text { display: none; }
-      
       .view-btn span:not(.codicon) { display: none; }
       .view-btn { padding: 5px 7px; }
-      
       #run-text { display: none; }
       .action-btn { padding: 5px 8px; }
-      
       .zoom-level { min-width: 28px; }
     }
   </style>
@@ -1032,33 +981,23 @@
       <button class="action-btn success" id="btn-run" onclick="runActiveFile()" title="Run / Reload (Ctrl+Enter)">
         <span class="codicon codicon-play" id="run-icon"></span> <span id="run-text">Run</span>
       </button>
-      
-      <!-- Desktop Action Buttons -->
       <button class="action-btn" id="btn-desktop-copy" onclick="copyCode()" title="Copy Code">
         <span class="codicon codicon-copy"></span> <span id="copy-text">Copy</span>
       </button>
       <button class="action-btn primary" id="btn-desktop-download" onclick="downloadArtifact()" title="Download Files">
         <span class="codicon codicon-cloud-download"></span> <span>Download</span>
       </button>
-      
       <div class="header-divider-v"></div>
-
-      <!-- Peer Collaborators -->
       <div class="presence-container" id="presence-container"></div>
-
-      <!-- User Profile Avatar (Tapping toggles mobile menu on small screens) -->
       <div class="avatar-circle" id="my-avatar-circle" onclick="toggleMobileMenu()" title="User Profile">
         <span id="my-initial">?</span>
         <div class="status-dot-online"></div>
       </div>
-
-      <!-- Mobile Overflow Menu Button -->
       <button class="action-btn" id="mobile-more-btn" onclick="toggleMobileMenu()" title="More Options">
         <span class="codicon codicon-ellipsis"></span>
       </button>
     </div>
 
-    <!-- Mobile Overflow Dropdown with Full User PFP & Info -->
     <div class="mobile-overflow-menu" id="mobile-overflow-menu">
       <div class="mobile-user-card" id="mobile-user-card">
         <div class="avatar-circle" id="mobile-avatar-circle">
@@ -1137,7 +1076,6 @@
       </div>
     </div>
 
-    <!-- Discord Channel-Styled Terminal Drawer -->
     <div id="terminal-drawer" class="collapsed">
       <div class="terminal-header" onclick="toggleTerminal()" title="Click to expand / collapse terminal">
         <div class="terminal-header-title">
@@ -1164,7 +1102,6 @@
 
       <div class="terminal-body" id="xterm-container"></div>
 
-      <!-- Discord Chat Input Bar & Quick Action Chips (Mobile Only) -->
       <div class="term-chat-bar-container" id="term-chat-bar">
         <div class="term-quick-chips">
           <button class="term-chip-btn" onclick="sendTerminalKey('\t')"><span class="codicon codicon-arrow-right"></span> Tab</button>
@@ -1295,7 +1232,6 @@
     let currentDocZoom = 1.0;
     let currentMode = 'code';
 
-    // User Identity Resolution
     const urlParams = new URLSearchParams(window.location.search);
     const paramUser = urlParams.get('u');
     const paramAvatar = urlParams.get('avatar');
@@ -1309,7 +1245,6 @@
     let myUserAvatar = localStorage.getItem('priesty_user_avatar') || '';
     let myUserUid = localStorage.getItem('priesty_user_uid') || '';
 
-    // xterm.js Terminal & Raw Log Tracker
     let term = null;
     let fitAddon = null;
     let termSocket = null;
@@ -1317,7 +1252,6 @@
     let liveSocket = null;
     let rawTerminalLogBuffer = '';
 
-    // Apply Profile Badge & Avatar (Both Header & Mobile Dropdown)
     function renderMyProfileBadge() {
       const avatarCircle = document.getElementById('my-avatar-circle');
       const initialEl = document.getElementById('my-initial');
@@ -1352,7 +1286,6 @@
       applyAvatar(mobileAvatarCircle, mobileInitialEl);
     }
 
-    // Mobile Menu Toggling
     function toggleMobileMenu() {
       const menu = document.getElementById('mobile-overflow-menu');
       if (menu) menu.classList.toggle('show');
@@ -1631,7 +1564,6 @@
       }
     }
 
-    // Terminal Sandbox
     function initTerminal(autoExecuteCmd) {
       if (!term) {
         const container = document.getElementById('xterm-container');
@@ -1662,7 +1594,6 @@
         term.loadAddon(fitAddon);
         term.open(container);
 
-        // Ensure helper textarea mobile attributes for smoother input
         const xtermTextarea = container.querySelector('.xterm-helper-textarea');
         if (xtermTextarea) {
           xtermTextarea.setAttribute('autocapitalize', 'none');
@@ -1755,7 +1686,6 @@
       }, 230);
     }
 
-    // 1-Click Copy Terminal Logs & Selections
     function copyTerminalLogs() {
       let textToCopy = "";
       
@@ -1823,7 +1753,6 @@
       }
     }
 
-    // Auto-fit terminal on mobile visual viewport changes (soft keyboard)
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', function() {
         if (isTermOpen && fitAddon) {
@@ -2236,9 +2165,9 @@ code + '\n' +
             const escaped = f.filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             const linkRegex = new RegExp('<link[^>]*href=["\'](?:./)?' + escaped + '["\'][^>]*>', 'gi');
             if (linkRegex.test(htmlCode)) {
-              htmlCode = htmlCode.replace(linkRegex, '<' + 'style>\n/* Inlined ' + f.filename + ' */\n' + f.content + '\n<' + '/style>');
+              htmlCode = htmlCode.replace(linkRegex, '<' + 'style>\n' + f.content + '\n<' + '/style>');
             } else if (htmlCode.includes('</' + 'head>')) {
-              htmlCode = htmlCode.replace('</' + 'head>', '<' + 'style>\n/* Inlined ' + f.filename + ' */\n' + f.content + '\n<' + '/style></' + 'head>');
+              htmlCode = htmlCode.replace('</' + 'head>', '<' + 'style>\n' + f.content + '\n<' + '/style></' + 'head>');
             }
           }
         });
@@ -2249,9 +2178,9 @@ code + '\n' +
             const escaped = f.filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             const scriptRegex = new RegExp('<script[^>]*src=["\'](?:./)?' + escaped + '["\'][^>]*>\\s*<' + '\\/script>', 'gi');
             if (scriptRegex.test(htmlCode)) {
-              htmlCode = htmlCode.replace(scriptRegex, '<' + 'script>\n/* Inlined ' + f.filename + ' */\n' + f.content + '\n<' + '/script>');
+              htmlCode = htmlCode.replace(scriptRegex, '<' + 'script>\n' + f.content + '\n<' + '/script>');
             } else if (htmlCode.includes('</' + 'body>')) {
-              htmlCode = htmlCode.replace('</' + 'body>', '<' + 'script>\n/* Inlined ' + f.filename + ' */\n' + f.content + '\n<' + '/script></' + 'body>');
+              htmlCode = htmlCode.replace('</' + 'body>', '<' + 'script>\n' + f.content + '\n<' + '/script></' + 'body>');
             }
           }
         });

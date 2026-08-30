@@ -17,6 +17,8 @@ from discord.ui import (
     Select
 )
 from core.config_manager import config_manager
+from core.github_app_client import github_app_client
+from agent.constants import OCTICONS_MAP, GITHUB_APP_INSTALL_URL
 from ui.modals import DynamicModalV2
 
 logger = logging.getLogger("PriestyAI.ConfigViews")
@@ -25,7 +27,7 @@ DEFAULT_SERVER_BIO = (
     "**PriestyAI** — Intelligent server companion & assistant.\n\n"
     "• Real-time web search, image creation & file downloads\n"
     "• Autonomous workspace agents & personal memory\n\n"
-    "✨ **Chat:** @mention • </ask:1540889817980731543> • </agent:1542273792221511761>\n"
+    "✨ **Chat:** @mention • </ask:1540889817980731543> • </agent:1542280617515950221>\n"
     "⚙️ **Manage:** </config:1541093516078485646> • </data:1541122763044163665>\n"
     "💡 Tip: Right-click any response to **Branch** or **Retry**."
 )
@@ -60,6 +62,122 @@ def format_mentionable_defaults(entities: list[Any], guild: discord.Guild | None
                 pass
         defaults.append({"id": ent_id_str, "type": ent_type})
     return defaults
+
+
+class GitHubConfigDashboardView(LayoutView):
+    def __init__(self, user: discord.User | discord.Member):
+        super().__init__(timeout=600)
+        self.user = user
+        self.authorized_repos: list[dict[str, Any]] = []
+        self._is_loading = True
+
+    async def initialize(self):
+        self.authorized_repos = await github_app_client.list_authorized_repositories()
+        self._is_loading = False
+        self._build_dashboard()
+
+    def _build_dashboard(self):
+        self.clear_items()
+        container = Container()
+
+        u_cfg = config_manager.get_user_config(self.user.id)
+        git_name = u_cfg.get("git_name", "").strip() or "*Not configured*"
+        git_email = u_cfg.get("git_email", "").strip() or "*Not configured*"
+
+        header_text = (
+            f"# <:github:1542000155371507802> GitHub Configuration\n"
+            f"Manage your default Git commit attribution and authorized repositories."
+        )
+        container.add_item(TextDisplay(header_text))
+        container.add_item(discord.ui.Separator(visible=True))
+
+        identity_block = (
+            f"**Git Identity (Commit Attribution):**\n"
+            f"• **Git Name:** `{git_name}`\n"
+            f"• **Git Email:** `{git_email}`\n"
+            f"-# Pre-fills automatically when signing off on agent commits."
+        )
+        container.add_item(TextDisplay(identity_block))
+
+        repo_lines = ["\n**Authorized Repositories:**"]
+        if self.authorized_repos:
+            for r in self.authorized_repos[:12]:
+                priv_tag = " 🔒" if r.get("private") else ""
+                repo_lines.append(f"• {OCTICONS_MAP['oct_repo']} [{r['full_name']}]({r['html_url']}){priv_tag}")
+            if len(self.authorized_repos) > 12:
+                repo_lines.append(f"-# ... and {len(self.authorized_repos) - 12} more repositories")
+        else:
+            repo_lines.append(f"-# *No repositories installed yet. Click **Install App ↗** to grant access.*")
+
+        container.add_item(TextDisplay("\n".join(repo_lines)))
+        container.add_item(discord.ui.Separator(visible=True))
+
+        config_id_btn = Button(
+            label="Configure Identity",
+            style=discord.ButtonStyle.primary,
+            custom_id="btn_cfg_git_identity"
+        )
+        config_id_btn.callback = self._on_configure_identity_clicked
+
+        install_btn = Button(
+            label="Install App ↗",
+            style=discord.ButtonStyle.link,
+            url=GITHUB_APP_INSTALL_URL
+        )
+
+        container.add_item(ActionRow(config_id_btn, install_btn))
+        self.add_item(container)
+
+    async def _on_configure_identity_clicked(self, interaction: discord.Interaction):
+        u_cfg = config_manager.get_user_config(self.user.id)
+        current_name = u_cfg.get("git_name", "")
+        current_email = u_cfg.get("git_email", "")
+
+        fields = [
+            {
+                "type": "text_display",
+                "content": (
+                    "# Default Git Author Identity\n"
+                    "Configure your default name and email for `Co-authored-by` git commit attribution."
+                )
+            },
+            {
+                "type": "text_input",
+                "custom_id": "git_name",
+                "label": "Default Git Name",
+                "placeholder": "e.g. Alex Rivers",
+                "value": current_name,
+                "style": "short",
+                "required": False,
+                "max_length": 100
+            },
+            {
+                "type": "text_input",
+                "custom_id": "git_email",
+                "label": "Default Git Email",
+                "placeholder": "e.g. alex.rivers@example.com",
+                "value": current_email,
+                "style": "short",
+                "required": False,
+                "max_length": 150
+            }
+        ]
+
+        async def on_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+            new_name = data.get("git_name", "").strip()
+            new_email = data.get("git_email", "").strip()
+
+            config_manager.set_user_config(self.user.id, git_name=new_name, git_email=new_email)
+            self._build_dashboard()
+            await sub_inter.response.edit_message(view=self)
+
+        modal = DynamicModalV2(
+            title="Configure Git Identity",
+            custom_id="modal_config_git_identity",
+            fields_schema=fields,
+            on_submit_callback=on_submit
+        )
+        await interaction.response.send_modal(modal)
 
 
 class ServerIdentityDashboardView(LayoutView):
@@ -272,7 +390,7 @@ SCOPE_EXPLANATIONS = {
     ),
     "user": (
         "### User Scope Context\n"
-        "Configurations set at the User Scope define your personal identity (preferred name, coding habits) "
+        "Configurations set at the User Scope define your personal identity (preferred name, Git credentials, coding habits) "
         "and control personal facts memory banks. These settings follow you across all servers."
     ),
     "bot_dm": (
@@ -288,6 +406,13 @@ SCOPE_EXPLANATIONS = {
 }
 
 SETTING_HELP_TEXTS = {
+    "github": (
+        "### GitHub Configuration\n"
+        "Manage your Git author identity and view repositories authorized with the PriestyAI GitHub App.\n\n"
+        "• **Git Name & Email:** Sets your default co-author credit for Pull Request commits.\n"
+        "• **Authorized Repositories:** Lists repositories linked with the GitHub App.\n"
+        "• **Install App:** Direct link to authorize new repositories with 1 click."
+    ),
     "server_identity": (
         "### Server Identity\n"
         "Customize how PriestyAI presents itself in this specific Discord server.\n\n"
@@ -365,7 +490,7 @@ SETTING_HELP_TEXTS = {
         "Restores custom configurations back to defaults for a specific scope.\n\n"
         "• **Server Scope:** Clears server lore, permissions, and server prompts (Admins only).\n"
         "• **Channel Scope:** Clears channel prompt overrides and tool locks.\n"
-        "• **User / User App Scope:** Wipes personal preferred name and custom persona."
+        "• **User / User App Scope:** Wipes personal preferred name, Git identity, and custom persona."
     )
 }
 
@@ -392,6 +517,7 @@ class ConfigHelpView(LayoutView):
 
         select_options = [
             discord.SelectOption(label="System Prompt", value="system_prompt", description="Custom instructions, behavior rules, and persona overrides"),
+            discord.SelectOption(label="GitHub", value="github", description="Git author attribution and authorized repositories"),
             discord.SelectOption(label="AI Channels", value="ai_channels", description="Designate channels for automatic AI conversation without mentions"),
             discord.SelectOption(label="Server Identity", value="server_identity", description="Server nickname, bio, avatar, and server banner"),
             discord.SelectOption(label="Memory", value="memory", description="Personal facts memory and shared server lore policies"),

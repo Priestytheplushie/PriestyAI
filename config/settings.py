@@ -18,6 +18,10 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
     raise ValueError("DISCORD_TOKEN environment variable is missing from .env")
 
+BOT_OWNER_ID = os.getenv("BOT_OWNER_ID", "").strip()
+
+DATABASE_ENCRYPTION_KEY = os.getenv("DATABASE_ENCRYPTION_KEY", "").strip()
+
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 if GITHUB_TOKEN:
     logger.info("GitHub API authentication loaded via GITHUB_TOKEN (5,000 req/hr).")

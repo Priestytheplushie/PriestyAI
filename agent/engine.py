@@ -499,6 +499,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
                     eff_thinking = "HIGH" if "gemma" in model_cand else "HIGH"
                     attempted_keys = set()
+                    consecutive_503s = 0
 
                     while True:
                         if abort_event.is_set():
@@ -558,6 +559,11 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                             err_desc = str(e)
                             client_manager.report_error(key_idx, active_model, e)
                             logger.warning(f"[AgentPlanning] Error on {active_model} (Key #{key_idx}): {err_desc}")
+                            if "503" in err_desc or "unavailable" in err_desc.lower():
+                                consecutive_503s += 1
+                                if consecutive_503s >= 2:
+                                    logger.warning(f"[AgentPlanning] '{model_cand}' experiencing high demand. Cascading immediately to next model candidate...")
+                                    break
                             if ChatEngine._is_retryable_error(err_desc):
                                 continue
                             break
@@ -569,8 +575,8 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                     break
 
                 if not stream_success:
-                    logger.warning("[AgentPlanning] All model cascades busy. Backing off 3s...")
-                    await asyncio.sleep(3.0)
+                    logger.warning("[AgentPlanning] All model cascades busy. Backing off 2s...")
+                    await asyncio.sleep(2.0)
                     continue
 
                 if model_parts:
@@ -877,6 +883,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
                     eff_thinking = "HIGH"
                     attempted_keys = set()
+                    consecutive_503s = 0
 
                     while True:
                         if abort_event.is_set():
@@ -938,6 +945,11 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                             err_desc = str(e)
                             client_manager.report_error(key_idx, active_model, e)
                             logger.warning(f"[AgentExecution] Error on {active_model} (Key #{key_idx}): {err_desc}")
+                            if "503" in err_desc or "unavailable" in err_desc.lower():
+                                consecutive_503s += 1
+                                if consecutive_503s >= 2:
+                                    logger.warning(f"[AgentExecution] '{model_cand}' experiencing high demand. Cascading immediately to next model candidate...")
+                                    break
                             if ChatEngine._is_retryable_error(err_desc):
                                 continue
                             break
@@ -949,8 +961,8 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                     break
 
                 if not stream_success:
-                    logger.warning("[AgentExecution] All model cascades busy. Backing off 3s...")
-                    await asyncio.sleep(3.0)
+                    logger.warning("[AgentExecution] All model cascades busy. Backing off 2s...")
+                    await asyncio.sleep(2.0)
                     continue
 
                 if model_parts:
@@ -1111,8 +1123,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             if repo_url:
                 has_changes, changed_files, diff_stats = await git_manager.detect_code_changes(session["workspace_path"])
                 if has_changes:
-                    branch_slug = git_manager.format_feature_branch_name(session["initial_prompt"])
-                    commit_msg, pr_title, pr_desc = await git_manager.generate_pr_metadata(
+                    commit_msg, pr_title, pr_desc, branch_slug = await git_manager.generate_pr_metadata(
                         session["initial_prompt"],
                         changed_files,
                         clean_summary

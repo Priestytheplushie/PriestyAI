@@ -13,9 +13,26 @@ def setup_data_commands(tree: app_commands.CommandTree):
         app_commands.Choice(name="Delete", value="delete")
     ])
     async def data_command(interaction: discord.Interaction, action: str = "browse"):
+        if getattr(interaction.client, "application", None) is None:
+            try:
+                app_obj = await interaction.client.fetch_application()
+                interaction.client.application = app_obj
+            except Exception:
+                pass
+
         if action == "delete":
-            del_view = DataDeletionView(user=interaction.user, guild=interaction.guild, channel=interaction.channel)
+            del_view = DataDeletionView(
+                user=interaction.user,
+                guild=interaction.guild,
+                channel=interaction.channel,
+                client=interaction.client
+            )
             await interaction.response.send_message(view=del_view, ephemeral=True)
         else:
-            db_view = DatabaseDashboardView(user=interaction.user, guild=interaction.guild, channel=interaction.channel)
+            db_view = DatabaseDashboardView(
+                user=interaction.user,
+                guild=interaction.guild,
+                channel=interaction.channel,
+                client=interaction.client
+            )
             await interaction.response.send_message(view=db_view, ephemeral=True)

@@ -4,6 +4,7 @@ import sqlite3
 import logging
 from typing import Any
 import discord
+from core.encryption import encryption_manager
 
 logger = logging.getLogger("PriestyAI.ConfigManager")
 
@@ -62,6 +63,8 @@ class ConfigManager:
                     user_id TEXT PRIMARY KEY,
                     preferred_name TEXT DEFAULT '',
                     special_instructions TEXT DEFAULT '',
+                    git_name TEXT DEFAULT '',
+                    git_email TEXT DEFAULT '',
                     user_memory_policy TEXT DEFAULT 'read_write',
                     preferred_reasoning_level TEXT DEFAULT 'AUTO',
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -89,6 +92,13 @@ class ConfigManager:
             ch_columns = [row["name"] for row in cursor.fetchall()]
             if "entity_disabled_tools_json" not in ch_columns and "channel_id" in ch_columns:
                 cursor.execute("ALTER TABLE channel_configs ADD COLUMN entity_disabled_tools_json TEXT DEFAULT '{}'")
+
+            cursor.execute("PRAGMA table_info(user_configs)")
+            u_columns = [row["name"] for row in cursor.fetchall()]
+            if "git_name" not in u_columns and "user_id" in u_columns:
+                cursor.execute("ALTER TABLE user_configs ADD COLUMN git_name TEXT DEFAULT ''")
+            if "git_email" not in u_columns and "user_id" in u_columns:
+                cursor.execute("ALTER TABLE user_configs ADD COLUMN git_email TEXT DEFAULT ''")
 
             conn.commit()
         logger.info(f"Initialized configuration tables at absolute path: '{self.db_path}'")
@@ -282,11 +292,17 @@ class ConfigManager:
             cursor.execute("SELECT * FROM user_configs WHERE user_id = ?", (str(user_id),))
             row = cursor.fetchone()
             if row:
-                return dict(row)
+                d = dict(row)
+                d["preferred_name"] = encryption_manager.decrypt_text(d.get("preferred_name", ""))
+                d["special_instructions"] = encryption_manager.decrypt_text(d.get("special_instructions", ""))
+                d["git_email"] = encryption_manager.decrypt_text(d.get("git_email", ""))
+                return d
         return {
             "user_id": str(user_id),
             "preferred_name": "",
             "special_instructions": "",
+            "git_name": "",
+            "git_email": "",
             "user_memory_policy": "read_write",
             "preferred_reasoning_level": "AUTO"
         }
@@ -295,23 +311,32 @@ class ConfigManager:
         current = self.get_user_config(user_id)
         current.update(kwargs)
 
+        enc_pref_name = encryption_manager.encrypt_text(current.get("preferred_name", "").strip())
+        enc_instructions = encryption_manager.encrypt_text(current.get("special_instructions", "").strip())
+        enc_git_email = encryption_manager.encrypt_text(current.get("git_email", "").strip())
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO user_configs (
                     user_id, preferred_name, special_instructions,
+                    git_name, git_email,
                     user_memory_policy, preferred_reasoning_level, updated_at
-                ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(user_id) DO UPDATE SET
                     preferred_name = excluded.preferred_name,
                     special_instructions = excluded.special_instructions,
+                    git_name = excluded.git_name,
+                    git_email = excluded.git_email,
                     user_memory_policy = excluded.user_memory_policy,
                     preferred_reasoning_level = excluded.preferred_reasoning_level,
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 str(user_id),
-                current.get("preferred_name", ""),
-                current.get("special_instructions", ""),
+                enc_pref_name,
+                enc_instructions,
+                current.get("git_name", ""),
+                enc_git_email,
                 current.get("user_memory_policy", "read_write"),
                 current.get("preferred_reasoning_level", "AUTO")
             ))
@@ -335,9 +360,9 @@ class ConfigManager:
         setting_clean = setting.lower().replace(" ", "_")
         scope_clean = scope.lower().replace(" ", "_")
 
-        if setting_clean == "user_persona":
+        if setting_clean in ["user_persona", "github"]:
             if scope_clean not in ["user", "bot_dm", "user_app", "global_dm"]:
-                return False, "User Persona is a personal setting and is only available in User, Bot DM, or User App scopes."
+                return False, f"{setting.title()} is a personal setting and is only available in User, Bot DM, or User App scopes."
             return True, ""
 
         if scope_clean in ["user", "bot_dm", "user_app", "global_dm"]:
@@ -363,7 +388,7 @@ class ConfigManager:
             return True, ""
 
         if setting_clean in ["permissions", "server_identity"] or (setting_clean == "reset" and scope_clean == "server"):
-            return False, "🔒 This setting is restricted to Server Administrators and the Server Owner."
+            return False, "This setting is restricted to Server Administrators and the Server Owner."
 
         manager_policy = s_cfg.get("config_manager_role", "administrators").lower()
 
@@ -372,11 +397,11 @@ class ConfigManager:
         elif manager_policy == "managers":
             if member.guild_permissions.manage_guild or member.guild_permissions.manage_channels:
                 return True, ""
-            return False, "🔒 This setting requires `Manage Server` or `Manage Channels` permissions."
+            return False, "This setting requires Manage Server or Manage Channels permissions."
         elif manager_policy == "owner_only":
-            return False, "🔒 General settings on this server are restricted to the Server Owner."
+            return False, "General settings on this server are restricted to the Server Owner."
 
-        return False, "🔒 You do not have permission to modify server settings for PriestyAI."
+        return False, "You do not have permission to modify server settings for PriestyAI."
 
     def resolve_effective_config(
         self,
@@ -423,6 +448,8 @@ class ConfigManager:
         return {
             "combined_system_prompt": "\n\n".join(system_prompts),
             "preferred_name": u_cfg.get("preferred_name", "").strip(),
+            "git_name": u_cfg.get("git_name", "").strip(),
+            "git_email": u_cfg.get("git_email", "").strip(),
             "reasoning_level": reasoning,
             "disabled_tools": list(disabled_tools),
             "user_memory_policy": u_cfg.get("user_memory_policy", "read_write"),

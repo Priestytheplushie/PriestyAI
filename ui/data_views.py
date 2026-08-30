@@ -16,6 +16,8 @@ from discord.ui import (
 )
 from core.memory_manager import memory_manager
 from core.config_manager import config_manager
+from core.feedback_manager import feedback_manager
+from config.settings import BOT_OWNER_ID
 from ui.modals import DynamicModalV2
 
 logger = logging.getLogger("PriestyAI.DataViews")
@@ -27,17 +29,57 @@ DATABASE_INFO_TEXT = (
     "• **Configs:** Your persona, preferred name, reasoning depth, and channel settings."
 )
 
+def is_user_bot_admin(user: discord.User | discord.Member, client: discord.Client | None = None) -> bool:
+    uid = str(user.id)
+
+    if BOT_OWNER_ID:
+        allowed_ids = [i.strip() for i in BOT_OWNER_ID.replace(";", ",").split(",") if i.strip()]
+        if uid in allowed_ids:
+            return True
+
+    if not client:
+        return False
+
+    if hasattr(client, "owner_id") and client.owner_id and str(client.owner_id) == uid:
+        return True
+    if hasattr(client, "owner_ids") and client.owner_ids and user.id in client.owner_ids:
+        return True
+
+    app = getattr(client, "application", None)
+    if app:
+        owner = getattr(app, "owner", None)
+        if owner:
+            if isinstance(owner, discord.Team):
+                team_owner_id = getattr(owner, "owner_user_id", None) or getattr(owner, "owner_id", None)
+                if team_owner_id and str(team_owner_id) == uid:
+                    return True
+
+                members = getattr(owner, "members", [])
+                for m in members:
+                    m_id = getattr(m, "id", None) or getattr(getattr(m, "user", None), "id", None)
+                    if m_id and str(m_id) == uid:
+                        return True
+            else:
+                if str(getattr(owner, "id", "")) == uid:
+                    return True
+
+    return False
+
+
 class DatabaseDashboardView(LayoutView):
-    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None):
+    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None, client: discord.Client | None = None):
         super().__init__(timeout=600)
         self.user = user
         self.guild = guild
         self.channel = channel
+        self.client = client
         self._build_dashboard()
 
     def _build_dashboard(self):
         self.clear_items()
         container = Container()
+
+        is_admin = is_user_bot_admin(self.user, self.client)
 
         container.add_item(TextDisplay(f"# Database\n{DATABASE_INFO_TEXT}"))
         container.add_item(Separator(visible=True))
@@ -62,6 +104,16 @@ class DatabaseDashboardView(LayoutView):
                 emoji="⚙️"
             )
         ]
+
+        if is_admin:
+            browse_options.append(
+                discord.SelectOption(
+                    label="Admin Database & Feedback",
+                    value="browse_admin",
+                    description="Owner & Team access: inspect all tables and review feedback",
+                    emoji="🛡️"
+                )
+            )
 
         browse_select = Select(
             custom_id="select_browse_db",
@@ -104,13 +156,19 @@ class DatabaseDashboardView(LayoutView):
         choice = interaction.data["values"][0]
 
         if choice == "browse_memories":
-            view = MemoriesBrowserView(user=self.user, guild=self.guild, channel=self.channel, page=0)
+            view = MemoriesBrowserView(user=self.user, guild=self.guild, channel=self.channel, client=self.client, page=0)
             await interaction.response.edit_message(view=view)
         elif choice == "browse_server_lore":
-            view = ServerLoreBrowserView(user=self.user, guild=self.guild, channel=self.channel, page=0)
+            view = ServerLoreBrowserView(user=self.user, guild=self.guild, channel=self.channel, client=self.client, page=0)
             await interaction.response.edit_message(view=view)
         elif choice == "browse_configs":
-            view = ConfigsBrowserView(user=self.user, guild=self.guild, channel=self.channel)
+            view = ConfigsBrowserView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
+            await interaction.response.edit_message(view=view)
+        elif choice == "browse_admin":
+            if not is_user_bot_admin(self.user, self.client or interaction.client):
+                await interaction.response.send_message(content="Access Denied: Admin database viewer is restricted to the Bot Owner / Team.", ephemeral=True)
+                return
+            view = AdminDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client or interaction.client)
             await interaction.response.edit_message(view=view)
 
     async def _on_close_clicked(self, interaction: discord.Interaction):
@@ -141,7 +199,7 @@ class DatabaseDashboardView(LayoutView):
 
         async def on_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
             query = data.get("search_query", "").strip()
-            view = SearchResultsView(user=self.user, guild=self.guild, channel=self.channel, query=query)
+            view = SearchResultsView(user=self.user, guild=self.guild, channel=self.channel, query=query, client=self.client)
             await view.perform_search()
             await sub_inter.response.edit_message(view=view)
 
@@ -154,16 +212,438 @@ class DatabaseDashboardView(LayoutView):
         await interaction.response.send_modal(modal)
 
     async def _on_delete_nav_clicked(self, interaction: discord.Interaction):
-        view = DataDeletionView(user=self.user, guild=self.guild, channel=self.channel)
+        view = DataDeletionView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
         await interaction.response.edit_message(view=view)
 
 
-class MemoriesBrowserView(LayoutView):
-    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None, page: int = 0):
+
+class AdminDashboardView(LayoutView):
+    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None, client: discord.Client | None):
         super().__init__(timeout=600)
         self.user = user
         self.guild = guild
         self.channel = channel
+        self.client = client
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        container = Container()
+
+        total_open = feedback_manager.get_feedback_count(status_filter="open")
+        total_tickets = feedback_manager.get_feedback_count(status_filter="all")
+        tables = feedback_manager.get_all_tables()
+
+        header_text = (
+            "# Admin Database & Feedback Panel\n"
+            f"Logged in as Administrator: `{self.user.name}`\n\n"
+            f"• **Feedback Tickets:** `{total_tickets}` total (`{total_open}` open)\n"
+            f"• **Active Database Tables:** `{len(tables)}` tables"
+        )
+        container.add_item(TextDisplay(header_text))
+        container.add_item(Separator(visible=True))
+
+        admin_options = [
+            discord.SelectOption(
+                label="Feedback Tickets",
+                value="admin_feedback",
+                description=f"Inspect and resolve {total_tickets} feedback submissions",
+                emoji="📋"
+            ),
+            discord.SelectOption(
+                label="All Database Tables",
+                value="admin_tables",
+                description=f"Inspect decrypted rows across {len(tables)} SQLite tables",
+                emoji="🗄️"
+            )
+        ]
+
+        admin_select = Select(
+            custom_id="select_admin_nav",
+            placeholder="Select Admin Module...",
+            options=admin_options
+        )
+        admin_select.callback = self._on_nav_selected
+        container.add_item(ActionRow(admin_select))
+
+        container.add_item(Separator(visible=True))
+
+        back_btn = Button(label="◀ Back to Dashboard", style=discord.ButtonStyle.primary, custom_id="btn_admin_back_dash")
+        back_btn.callback = self._on_back_clicked
+        container.add_item(ActionRow(back_btn))
+
+        self.add_item(container)
+
+    async def _on_nav_selected(self, interaction: discord.Interaction):
+        if not interaction.data or "values" not in interaction.data or not interaction.data["values"]:
+            return
+        choice = interaction.data["values"][0]
+
+        if choice == "admin_feedback":
+            view = AdminFeedbackBrowserView(user=self.user, guild=self.guild, channel=self.channel, client=self.client, page=0)
+            await interaction.response.edit_message(view=view)
+        elif choice == "admin_tables":
+            view = AdminTableExplorerView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
+            await interaction.response.edit_message(view=view)
+
+    async def _on_back_clicked(self, interaction: discord.Interaction):
+        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
+        await interaction.response.edit_message(view=dash)
+
+
+class AdminFeedbackBrowserView(LayoutView):
+    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None, client: discord.Client | None, page: int = 0, status_filter: str = "all"):
+        super().__init__(timeout=600)
+        self.user = user
+        self.guild = guild
+        self.channel = channel
+        self.client = client
+        self.current_page = page
+        self.status_filter = status_filter
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        container = Container()
+
+        total_tickets = feedback_manager.get_feedback_count(status_filter=self.status_filter)
+        page_size = 4
+        total_pages = max(1, (total_tickets + page_size - 1) // page_size)
+        self.current_page = max(0, min(self.current_page, total_pages - 1))
+
+        header_text = (
+            f"# Feedback Tickets ({self.status_filter.capitalize()})\n"
+            f"Showing `{total_tickets}` ticket(s) recorded in SQLite.\n"
+            f"Click **View** on any ticket to inspect full details, attachments, and update status."
+        )
+        container.add_item(TextDisplay(header_text))
+        container.add_item(Separator(visible=True))
+
+        tickets = feedback_manager.get_all_feedback(
+            status_filter=self.status_filter,
+            limit=page_size,
+            offset=self.current_page * page_size
+        )
+
+        if not tickets:
+            container.add_item(TextDisplay("*No feedback tickets found matching this filter.*"))
+        else:
+            for t in tickets:
+                t_id = t["id"]
+                t_user = t.get("user_name", "Unknown")
+                t_uid = t.get("user_id", "0")
+                t_type = t.get("feedback_type", "Feedback")
+                t_status = t.get("status", "open").upper()
+                t_content = t.get("content", "").strip()
+                t_created = t.get("created_at", "")
+
+                preview_text = (t_content[:140] + "...") if len(t_content) > 140 else t_content
+                snippet = f"**Feedback Ticket - #{t_id}**\n`{t_type}` • Submitted by {t_user} (<@{t_uid}>) • Status: `{t_status}`\n> {preview_text}\n-# Created: `{t_created}`"
+
+                view_btn = Button(
+                    label="View",
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=f"btn_view_feedback_{t_id}"
+                )
+                view_btn.callback = self._create_view_callback(t_id)
+
+                section = Section(TextDisplay(snippet), accessory=view_btn)
+                container.add_item(section)
+
+        container.add_item(Separator(visible=True))
+
+        row_items = []
+        if total_pages > 1:
+            prev_btn = Button(label="◀", style=discord.ButtonStyle.secondary, disabled=(self.current_page == 0), custom_id="btn_fb_prev")
+            ind_btn = Button(label=f"{self.current_page + 1} / {total_pages}", style=discord.ButtonStyle.secondary, disabled=True, custom_id="btn_fb_ind")
+            next_btn = Button(label="▶", style=discord.ButtonStyle.secondary, disabled=(self.current_page >= total_pages - 1), custom_id="btn_fb_next")
+
+            async def on_prev(inter: discord.Interaction):
+                self.current_page -= 1
+                self._build_layout()
+                await inter.response.edit_message(view=self)
+
+            async def on_next(inter: discord.Interaction):
+                self.current_page += 1
+                self._build_layout()
+                await inter.response.edit_message(view=self)
+
+            prev_btn.callback = on_prev
+            next_btn.callback = on_next
+            row_items.extend([prev_btn, ind_btn, next_btn])
+
+        back_btn = Button(label="◀ Admin Panel", style=discord.ButtonStyle.primary, custom_id="btn_fb_back_admin")
+        back_btn.callback = self._on_back_clicked
+        row_items.append(back_btn)
+
+        container.add_item(ActionRow(*row_items))
+        self.add_item(container)
+
+    def _create_view_callback(self, ticket_id: int):
+        async def callback(interaction: discord.Interaction):
+            ticket_data = feedback_manager.get_feedback_ticket(ticket_id)
+            if not ticket_data:
+                await interaction.response.send_message(content="Ticket not found.", ephemeral=True)
+                return
+            detail_view = AdminFeedbackDetailView(
+                ticket_data=ticket_data,
+                user=self.user,
+                guild=self.guild,
+                channel=self.channel,
+                client=self.client,
+                parent_browser_view=self
+            )
+            await interaction.response.edit_message(view=detail_view)
+        return callback
+
+    async def _on_back_clicked(self, interaction: discord.Interaction):
+        view = AdminDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
+        await interaction.response.edit_message(view=view)
+
+
+class AdminFeedbackDetailView(LayoutView):
+    def __init__(self, ticket_data: dict[str, Any], user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None, client: discord.Client | None, parent_browser_view: Any):
+        super().__init__(timeout=600)
+        self.ticket = ticket_data
+        self.user = user
+        self.guild = guild
+        self.channel = channel
+        self.client = client
+        self.parent_browser_view = parent_browser_view
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        container = Container()
+
+        t_id = self.ticket["id"]
+        t_user = self.ticket.get("user_name", "Unknown")
+        t_uid = self.ticket.get("user_id", "0")
+        t_gid = self.ticket.get("guild_id")
+        t_cid = self.ticket.get("channel_id")
+        t_type = self.ticket.get("feedback_type", "Feedback")
+        t_status = self.ticket.get("status", "open").upper()
+        t_content = self.ticket.get("content", "").strip()
+        t_created = self.ticket.get("created_at", "")
+        t_notes = self.ticket.get("admin_notes", "").strip() or "*No admin notes added.*"
+        attachments = self.ticket.get("attachments", [])
+
+        location_str = f"Guild ID: `{t_gid or 'DM'}` • Channel ID: `{t_cid or 'DM'}`"
+        header_text = (
+            f"# Feedback Ticket #{t_id}\n"
+            f"• **Category:** `{t_type}`\n"
+            f"• **Status:** `{t_status}`\n"
+            f"• **Submitted by:** {t_user} (<@{t_uid}> • ID: `{t_uid}`)\n"
+            f"• **Location:** {location_str}\n"
+            f"• **Timestamp:** `{t_created}`"
+        )
+        container.add_item(TextDisplay(header_text))
+        container.add_item(Separator(visible=True))
+
+        body_block = f"### Content:\n{t_content}"
+        container.add_item(TextDisplay(body_block))
+
+        if attachments:
+            container.add_item(Separator(visible=True))
+            att_lines = ["### Attached Files:"]
+            for a in attachments:
+                fname = a.get("filename", "Attachment")
+                url = a.get("url", "#")
+                att_lines.append(f"• [{fname}]({url})")
+            container.add_item(TextDisplay("\n".join(att_lines)))
+
+        container.add_item(Separator(visible=True))
+        container.add_item(TextDisplay(f"### Admin Notes:\n{t_notes}"))
+        container.add_item(Separator(visible=True))
+
+        in_review_btn = Button(label="Mark In Review", style=discord.ButtonStyle.secondary, custom_id="btn_stat_review")
+        in_review_btn.callback = self._create_status_callback("in_review")
+
+        resolve_btn = Button(label="Resolve", style=discord.ButtonStyle.success, custom_id="btn_stat_resolve")
+        resolve_btn.callback = self._create_status_callback("resolved")
+
+        note_btn = Button(label="Edit Note", style=discord.ButtonStyle.secondary, custom_id="btn_stat_note")
+        note_btn.callback = self._on_edit_note_clicked
+
+        del_btn = Button(label="Delete", style=discord.ButtonStyle.danger, custom_id="btn_stat_delete")
+        del_btn.callback = self._on_delete_clicked
+
+        container.add_item(ActionRow(in_review_btn, resolve_btn, note_btn, del_btn))
+
+        back_btn = Button(label="◀ Back to Tickets", style=discord.ButtonStyle.primary, custom_id="btn_ticket_back")
+        back_btn.callback = self._on_back_clicked
+        container.add_item(ActionRow(back_btn))
+
+        self.add_item(container)
+
+    def _create_status_callback(self, new_status: str):
+        async def callback(interaction: discord.Interaction):
+            feedback_manager.update_ticket_status(self.ticket["id"], new_status)
+            self.ticket["status"] = new_status
+            self._build_layout()
+            await interaction.response.edit_message(view=self)
+        return callback
+
+    async def _on_edit_note_clicked(self, interaction: discord.Interaction):
+        fields = [
+            {
+                "type": "text_display",
+                "content": f"Update internal admin notes for Ticket #{self.ticket['id']}."
+            },
+            {
+                "type": "text_input",
+                "custom_id": "admin_notes",
+                "label": "Admin Notes",
+                "style": "paragraph",
+                "value": self.ticket.get("admin_notes", ""),
+                "required": False,
+                "max_length": 1500
+            }
+        ]
+
+        async def on_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+            new_note = data.get("admin_notes", "").strip()
+            feedback_manager.update_ticket_status(self.ticket["id"], self.ticket.get("status", "open"), admin_notes=new_note)
+            self.ticket["admin_notes"] = new_note
+            self._build_layout()
+            await sub_inter.response.edit_message(view=self)
+
+        modal = DynamicModalV2(
+            title=f"Edit Notes - Ticket #{self.ticket['id']}",
+            custom_id=f"modal_edit_note_{self.ticket['id']}",
+            fields_schema=fields,
+            on_submit_callback=on_submit
+        )
+        await interaction.response.send_modal(modal)
+
+    async def _on_delete_clicked(self, interaction: discord.Interaction):
+        feedback_manager.delete_ticket(self.ticket["id"])
+        self.parent_browser_view._build_layout()
+        await interaction.response.edit_message(view=self.parent_browser_view)
+
+    async def _on_back_clicked(self, interaction: discord.Interaction):
+        self.parent_browser_view._build_layout()
+        await interaction.response.edit_message(view=self.parent_browser_view)
+
+
+class AdminTableExplorerView(LayoutView):
+    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None, client: discord.Client | None):
+        super().__init__(timeout=600)
+        self.user = user
+        self.guild = guild
+        self.channel = channel
+        self.client = client
+        self.selected_table = "memories"
+        self.current_page = 0
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        container = Container()
+
+        all_tables = feedback_manager.get_all_tables()
+        table_options = []
+        for t in all_tables:
+            t_name = t["name"]
+            t_cnt = t["row_count"]
+            table_options.append(
+                discord.SelectOption(
+                    label=t_name,
+                    value=t_name,
+                    description=f"{t_cnt} row(s)",
+                    default=(t_name == self.selected_table)
+                )
+            )
+
+        header_text = (
+            f"# Dynamic SQLite Table Explorer\n"
+            f"Inspecting table: `{self.selected_table}` (Decrypted on-the-fly)\n"
+            f"Select a table from the menu below to view its contents."
+        )
+        container.add_item(TextDisplay(header_text))
+        container.add_item(Separator(visible=True))
+
+        table_select = Select(
+            custom_id="select_admin_table",
+            placeholder="Choose database table...",
+            options=table_options[:25]
+        )
+        table_select.callback = self._on_table_selected
+        container.add_item(ActionRow(table_select))
+        container.add_item(Separator(visible=True))
+
+        page_size = 3
+        rows = feedback_manager.get_table_rows(
+            table_name=self.selected_table,
+            limit=page_size,
+            offset=self.current_page * page_size
+        )
+
+        if not rows:
+            container.add_item(TextDisplay(f"*Table `{self.selected_table}` is currently empty.*"))
+        else:
+            for idx, r in enumerate(rows):
+                lines = [f"**Row #{self.current_page * page_size + idx + 1}:**"]
+                for col_k, col_v in r.items():
+                    if col_k == "embedding":
+                        lines.append(f"• **{col_k}:** `<768-dim float vector blob>`")
+                    else:
+                        str_val = str(col_v)
+                        if len(str_val) > 200:
+                            str_val = str_val[:200] + "..."
+                        lines.append(f"• **{col_k}:** {str_val}")
+                container.add_item(TextDisplay("\n".join(lines)))
+                if idx < len(rows) - 1:
+                    container.add_item(Separator(visible=True))
+
+        container.add_item(Separator(visible=True))
+
+        row_items = []
+        prev_btn = Button(label="◀", style=discord.ButtonStyle.secondary, disabled=(self.current_page == 0), custom_id="btn_tbl_prev")
+        ind_btn = Button(label=f"Page {self.current_page + 1}", style=discord.ButtonStyle.secondary, disabled=True, custom_id="btn_tbl_ind")
+        next_btn = Button(label="▶", style=discord.ButtonStyle.secondary, disabled=(len(rows) < page_size), custom_id="btn_tbl_next")
+
+        async def on_prev(inter: discord.Interaction):
+            self.current_page -= 1
+            self._build_layout()
+            await inter.response.edit_message(view=self)
+
+        async def on_next(inter: discord.Interaction):
+            self.current_page += 1
+            self._build_layout()
+            await inter.response.edit_message(view=self)
+
+        prev_btn.callback = on_prev
+        next_btn.callback = on_next
+        row_items.extend([prev_btn, ind_btn, next_btn])
+
+        back_btn = Button(label="◀ Admin Panel", style=discord.ButtonStyle.primary, custom_id="btn_tbl_back_admin")
+        back_btn.callback = self._on_back_clicked
+        row_items.append(back_btn)
+
+        container.add_item(ActionRow(*row_items))
+        self.add_item(container)
+
+    async def _on_table_selected(self, interaction: discord.Interaction):
+        if interaction.data and "values" in interaction.data and interaction.data["values"]:
+            self.selected_table = interaction.data["values"][0]
+            self.current_page = 0
+            self._build_layout()
+            await interaction.response.edit_message(view=self)
+
+    async def _on_back_clicked(self, interaction: discord.Interaction):
+        view = AdminDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
+        await interaction.response.edit_message(view=view)
+
+
+
+class MemoriesBrowserView(LayoutView):
+    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None, client: discord.Client | None = None, page: int = 0):
+        super().__init__(timeout=600)
+        self.user = user
+        self.guild = guild
+        self.channel = channel
+        self.client = client
         self.current_page = page
         self._build_layout()
 
@@ -279,16 +759,17 @@ class MemoriesBrowserView(LayoutView):
         return callback
 
     async def _on_back_clicked(self, interaction: discord.Interaction):
-        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel)
+        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
         await interaction.response.edit_message(view=dash)
 
 
 class ServerLoreBrowserView(LayoutView):
-    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None, page: int = 0):
+    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None, client: discord.Client | None = None, page: int = 0):
         super().__init__(timeout=600)
         self.user = user
         self.guild = guild
         self.channel = channel
+        self.client = client
         self.current_page = page
         self._build_layout()
 
@@ -412,16 +893,17 @@ class ServerLoreBrowserView(LayoutView):
         return callback
 
     async def _on_back_clicked(self, interaction: discord.Interaction):
-        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel)
+        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
         await interaction.response.edit_message(view=dash)
 
 
 class ConfigsBrowserView(LayoutView):
-    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None):
+    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None, client: discord.Client | None = None):
         super().__init__(timeout=600)
         self.user = user
         self.guild = guild
         self.channel = channel
+        self.client = client
         self._build_layout()
 
     def _build_layout(self):
@@ -479,17 +961,18 @@ class ConfigsBrowserView(LayoutView):
         self.add_item(container)
 
     async def _on_back_clicked(self, interaction: discord.Interaction):
-        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel)
+        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
         await interaction.response.edit_message(view=dash)
 
 
 class SearchResultsView(LayoutView):
-    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None, query: str):
+    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None, query: str, client: discord.Client | None = None):
         super().__init__(timeout=600)
         self.user = user
         self.guild = guild
         self.channel = channel
         self.query = query
+        self.client = client
 
     async def perform_search(self):
         self.clear_items()
@@ -583,16 +1066,17 @@ class SearchResultsView(LayoutView):
         return callback
 
     async def _on_back_clicked(self, interaction: discord.Interaction):
-        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel)
+        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
         await interaction.response.edit_message(view=dash)
 
 
 class DataDeletionView(LayoutView):
-    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None):
+    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None, client: discord.Client | None = None):
         super().__init__(timeout=600)
         self.user = user
         self.guild = guild
         self.channel = channel
+        self.client = client
         self._build_layout()
 
     def _build_layout(self):
@@ -701,5 +1185,5 @@ class DataDeletionView(LayoutView):
         await interaction.response.edit_message(view=self)
 
     async def _on_back_clicked(self, interaction: discord.Interaction):
-        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel)
+        dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
         await interaction.response.edit_message(view=dash)

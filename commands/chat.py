@@ -33,6 +33,7 @@ from ui.modals import DynamicModalV2
 from ui.onboarding_views import (
     build_welcome_terms_modal,
     build_terms_review_modal,
+    build_privacy_modal,
     BannedUserNoticeView
 )
 
@@ -322,7 +323,7 @@ async def execute_chat_turn(
     except Exception as e:
         logger.exception(f"Error in /chat turn: {e}")
         try:
-            err_view = build_v2_message_layout(raw_text=f"⚠️ Error: `{e}`", guild=guild)
+            err_view = build_v2_message_layout(raw_text=f"Error: `{e}`", guild=guild)
             await interaction.edit_original_response(view=err_view)
         except discord.HTTPException:
             pass
@@ -336,7 +337,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
         if not config_manager.has_user_agreed(interaction.user.id):
             async def on_terms_agreed(sub_inter: discord.Interaction):
                 await sub_inter.response.send_message(
-                    content="✅ **Terms Accepted:** Thank you for agreeing to the Terms of Service & Safety Guidelines! You can now use all PriestyAI features.",
+                    content="Terms Accepted: Thank you for agreeing to the Terms of Service & Safety Guidelines. You can now use all PriestyAI features.",
                     ephemeral=True
                 )
 
@@ -345,6 +346,13 @@ def setup_chat_commands(tree: app_commands.CommandTree):
             return
 
         modal = build_terms_review_modal()
+        await interaction.response.send_modal(modal)
+
+    @tree.command(name="privacy", description="Review PriestyAI's Privacy Policy, data retention rules, and third-party disclosures")
+    @app_commands.allowed_installs(guilds=True, users=True)
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    async def privacy_command(interaction: discord.Interaction):
+        modal = build_privacy_modal()
         await interaction.response.send_modal(modal)
 
     @tree.command(name="ask", description="Ask PriestyAI a quick question anywhere on Discord")
@@ -496,7 +504,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
         except Exception as e:
             logger.exception(f"Error in /ask command: {e}")
             try:
-                err_view = build_v2_message_layout(raw_text=f"⚠️ Error: `{e}`", guild=interaction.guild)
+                err_view = build_v2_message_layout(raw_text=f"Error: `{e}`", guild=interaction.guild)
                 await interaction.edit_original_response(view=err_view)
             except discord.HTTPException:
                 pass
@@ -516,14 +524,14 @@ def setup_chat_commands(tree: app_commands.CommandTree):
         if input and input.strip().lower() in ["reset", "clear", "--reset", "-r", "clean"]:
             memory_manager.delete_chat_session(session_id)
             await interaction.response.send_message(
-                content="🧹 **Chat Session Reset:** Your conversation history for this channel has been cleared. Your next message will start fresh!",
+                content="Chat Session Reset: Your conversation history for this channel has been cleared. Your next message will start fresh.",
                 ephemeral=True
             )
             return
 
         if not config_manager.has_user_agreed(interaction.user.id):
             async def on_agreed(sub_inter: discord.Interaction):
-                await sub_inter.response.send_message("✅ Terms accepted! You can now use `/chat`.", ephemeral=True)
+                await sub_inter.response.send_message("Terms accepted. You can now use /chat.", ephemeral=True)
 
             modal = build_welcome_terms_modal(on_agree_callback=on_agreed)
             await interaction.response.send_modal(modal)
@@ -537,7 +545,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
         async def on_modal_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
             prompt_text = data.get("prompt", "").strip()
             if not prompt_text:
-                await sub_inter.response.send_message(content="❌ Message cannot be empty.", ephemeral=True)
+                await sub_inter.response.send_message(content="Message cannot be empty.", ephemeral=True)
                 return
 
             await sub_inter.response.defer(ephemeral=False)

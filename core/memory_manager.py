@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from google.genai import types
 from core.client_manager import client_manager
+from core.encryption import encryption_manager
 
 logger = logging.getLogger("PriestyAI.Memory")
 
@@ -25,8 +26,8 @@ def get_user_chat_session_id(channel_id: str | int | None, user_id: str | int) -
 
 class MemoryExtractionSchema(BaseModel):
     has_memories: bool = Field(description="True if durable personal facts or server lore should be saved, False if query is generic")
-    user_facts: list[str] = Field(default_factory=list, description="Clear, concise personal facts about the user (e.g. 'User develops in Rust', 'User prefers dark mode', 'User builds bots with serenity-rs'). Empty if none.")
-    server_lore: list[str] = Field(default_factory=list, description="Durable server project facts or guild lore (e.g. 'Project Nebula is targeting a Q3 release'). Empty if none.")
+    user_facts: list[str] = Field(default_factory=list, description="Clear, concise personal facts about the user. Empty if none.")
+    server_lore: list[str] = Field(default_factory=list, description="Durable server project facts or guild lore. Empty if none.")
 
 MEMORY_EXTRACTOR_INSTRUCTION = """You are the background long-term memory extractor for PriestyAI.
 Analyze the user's prompt and extract any durable, high-value facts worth remembering.
@@ -147,6 +148,7 @@ class MemoryManager:
             return {"error": "Failed to generate vector embedding for memory."}
 
         packed_vec = pack_vector(vec)
+        encrypted_text = encryption_manager.encrypt_text(memory_text.strip())
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -165,9 +167,9 @@ class MemoryManager:
                         UPDATE memories
                         SET memory_text = ?, embedding = ?, importance_score = ?, last_accessed_at = CURRENT_TIMESTAMP
                         WHERE id = ?
-                    """, (memory_text, packed_vec, importance, mem_id))
+                    """, (encrypted_text, packed_vec, importance, mem_id))
                     conn.commit()
-                    logger.info(f"[Memory Updated] Refined memory ID #{mem_id} (similarity: {sim:.2f}): '{memory_text}'")
+                    logger.info(f"[Memory Updated] Refined memory ID #{mem_id} (similarity: {sim:.2f}) [Encrypted at Rest]")
                     return {
                         "status": "updated",
                         "memory_id": mem_id,
@@ -178,11 +180,11 @@ class MemoryManager:
             cursor.execute("""
                 INSERT INTO memories (category, entity_id, memory_text, embedding, importance_score)
                 VALUES (?, ?, ?, ?, ?)
-            """, (cat_clean, str(entity_id), memory_text, packed_vec, importance))
+            """, (cat_clean, str(entity_id), encrypted_text, packed_vec, importance))
             conn.commit()
             new_id = cursor.lastrowid
 
-        logger.info(f"[Memory Stored] Saved new {cat_clean} memory #{new_id}: '{memory_text}'")
+        logger.info(f"[Memory Stored] Saved new {cat_clean} memory #{new_id} [Encrypted at Rest]")
         return {
             "status": "saved",
             "memory_id": new_id,
@@ -247,7 +249,9 @@ class MemoryManager:
             cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
             row = cursor.fetchone()
             if row:
-                return dict(row)
+                d = dict(row)
+                d["memory_text"] = encryption_manager.decrypt_text(d.get("memory_text", ""))
+                return d
         return None
 
     def get_all_memories_for_entity(self, category: str, entity_id: str | int) -> list[dict[str, Any]]:
@@ -257,7 +261,12 @@ class MemoryManager:
                 "SELECT * FROM memories WHERE category = ? AND entity_id = ? ORDER BY created_at DESC",
                 (category.lower().strip(), str(entity_id))
             )
-            return [dict(row) for row in cursor.fetchall()]
+            decrypted_rows = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                d["memory_text"] = encryption_manager.decrypt_text(d.get("memory_text", ""))
+                decrypted_rows.append(d)
+            return decrypted_rows
 
     async def update_memory_text(self, memory_id: int, new_text: str) -> bool:
         clean_text = new_text.strip()
@@ -269,6 +278,7 @@ class MemoryManager:
             return False
 
         packed_vec = pack_vector(vec)
+        encrypted_text = encryption_manager.encrypt_text(clean_text)
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -276,7 +286,7 @@ class MemoryManager:
                 UPDATE memories
                 SET memory_text = ?, embedding = ?, last_accessed_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-            """, (clean_text, packed_vec, memory_id))
+            """, (encrypted_text, packed_vec, memory_id))
             conn.commit()
             return cursor.rowcount > 0
 
@@ -288,11 +298,12 @@ class MemoryManager:
             if not row:
                 return {"error": f"Memory ID #{memory_id} not found."}
 
-            deleted_text = row["memory_text"]
+            raw_text = row["memory_text"]
+            deleted_text = encryption_manager.decrypt_text(raw_text)
             cursor.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             conn.commit()
 
-        logger.info(f"[Memory Forgotten] Deleted memory #{memory_id}: '{deleted_text}' (Reason: {reason})")
+        logger.info(f"[Memory Forgotten] Deleted memory #{memory_id} (Reason: {reason})")
         return {
             "status": "forgotten",
             "memory_id": memory_id,
@@ -362,9 +373,10 @@ class MemoryManager:
                 vec = unpack_vector(row["embedding"])
                 sim = cosine_similarity(query_vec, vec)
                 if sim >= 0.40:
+                    decrypted_text = encryption_manager.decrypt_text(row["memory_text"])
                     user_candidates.append({
                         "id": row["id"],
-                        "text": row["memory_text"],
+                        "text": decrypted_text,
                         "similarity": sim,
                         "importance": row["importance_score"]
                     })
@@ -378,9 +390,10 @@ class MemoryManager:
                     vec = unpack_vector(row["embedding"])
                     sim = cosine_similarity(query_vec, vec)
                     if sim >= 0.40:
+                        decrypted_text = encryption_manager.decrypt_text(row["memory_text"])
                         server_candidates.append({
                             "id": row["id"],
-                            "text": row["memory_text"],
+                            "text": decrypted_text,
                             "similarity": sim,
                             "importance": row["importance_score"]
                         })
@@ -404,6 +417,7 @@ class MemoryManager:
         }
 
     def save_chat_session(self, session_id: str, channel_id: str | int, guild_id: str | int | None, user_id: str | int, history: list[dict[str, str]]):
+        encrypted_history_json = encryption_manager.encrypt_text(json.dumps(history))
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -412,7 +426,7 @@ class MemoryManager:
                 ON CONFLICT(session_id) DO UPDATE SET
                     history_json = excluded.history_json,
                     last_active_at = CURRENT_TIMESTAMP
-            """, (session_id, str(channel_id), str(guild_id) if guild_id else None, str(user_id), json.dumps(history)))
+            """, (session_id, str(channel_id), str(guild_id) if guild_id else None, str(user_id), encrypted_history_json))
             conn.commit()
 
     def get_chat_session(self, session_id: str) -> list[dict[str, str]]:
@@ -422,7 +436,8 @@ class MemoryManager:
             row = cursor.fetchone()
             if row:
                 try:
-                    return json.loads(row["history_json"])
+                    decrypted_json = encryption_manager.decrypt_text(row["history_json"])
+                    return json.loads(decrypted_json)
                 except Exception:
                     pass
         return []

@@ -1,6 +1,6 @@
 import difflib
-import time
 import logging
+import time
 from typing import Any, Callable
 import discord
 from discord import ui
@@ -73,7 +73,7 @@ def build_agent_create_modal(default_user_id: int | str, on_submit: Callable) ->
             "type": "text_input",
             "custom_id": "repo_url",
             "label": "GitHub Repository",
-            "description": "Repository URL or owner/repo to clone into workspace (Optional)",
+            "description": "Repository URL (e.g. owner/repo). Note: Private repos require GitHub App.",
             "placeholder": "e.g. owner/repo or https://github.com/owner/repo",
             "style": "short",
             "required": False
@@ -463,12 +463,14 @@ class AgentReadyForReviewView(LayoutView):
         self,
         session: dict[str, Any],
         pr_data: dict[str, Any],
-        is_installed: bool = True
+        is_installed: bool = True,
+        is_publishing: bool = False
     ):
         super().__init__(timeout=None)
         self.session = session
         self.pr_data = pr_data
         self.is_installed = is_installed
+        self.is_publishing = is_publishing
         self._build_layout()
 
     def _build_layout(self):
@@ -514,6 +516,15 @@ class AgentReadyForReviewView(LayoutView):
                 custom_id=f"agent_publish_pr_disabled_{session_id}"
             )
             container.add_item(Section(TextDisplay(f"-# {diff_stat_str}"), accessory=disabled_publish))
+        elif self.is_publishing:
+            container.add_item(Separator(visible=True))
+            publishing_btn = Button(
+                label="Publishing...",
+                style=discord.ButtonStyle.secondary,
+                disabled=True,
+                custom_id=f"agent_publishing_disabled_{session_id}"
+            )
+            container.add_item(Section(TextDisplay(f"-# {diff_stat_str} • Creating Pull Request..."), accessory=publishing_btn))
         else:
             container.add_item(Separator(visible=True))
 
@@ -598,6 +609,98 @@ class AgentPRPublishedView(LayoutView):
         )
         container.add_item(ActionRow(pr_link_btn))
         self.add_item(container)
+
+
+class AgentCIFailureView(LayoutView):
+    def __init__(self, session_id: str, commit_sha: str, check_name: str, failed_step: str = "", check_run_id: str | int = ""):
+        super().__init__(timeout=None)
+        self.session_id = session_id
+        self.commit_sha = commit_sha
+        self.check_name = check_name
+        self.failed_step = failed_step
+        self.check_run_id = str(check_run_id)
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        step_part = f" • Step: `{self.failed_step}`" if self.failed_step else ""
+        text_content = (
+            f"{DFM_EMOJI_MAP['gfm_caution']} **CI checks failed on commit `{self.commit_sha[:7]}`**\n"
+            f"Workflow: `{self.check_name}`{step_part}\n"
+            f"-# Click Fix to have PriestyAI analyze the traceback and push a patch."
+        )
+        fix_btn = Button(
+            label="Fix CI",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"agent_fix_ci:{self.session_id}:{self.check_run_id}"
+        )
+        self.add_item(Section(TextDisplay(text_content), accessory=fix_btn))
+
+class AgentMergeConflictView(LayoutView):
+    def __init__(self, pr_number: int, branch_name: str, base_branch: str, pr_url: str):
+        super().__init__(timeout=None)
+        self.pr_number = pr_number
+        self.branch_name = branch_name
+        self.base_branch = base_branch
+        self.pr_url = pr_url
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        text_content = (
+            f"{DFM_EMOJI_MAP['gfm_warning']} **Merge conflicts detected on PR #{self.pr_number}**\n"
+            f"Branch `{self.branch_name}` has conflicts with target `{self.base_branch}`.\n"
+            f"-# Resolve conflicts on GitHub or ask PriestyAI in chat to rebase."
+        )
+        view_btn = Button(
+            label="View Conflicts ↗",
+            style=discord.ButtonStyle.link,
+            url=self.pr_url
+        )
+        self.add_item(Section(TextDisplay(text_content), accessory=view_btn))
+
+class AgentPRMergedView(LayoutView):
+    def __init__(self, session_id: str, pr_number: int, base_branch: str):
+        super().__init__(timeout=None)
+        self.session_id = session_id
+        self.pr_number = pr_number
+        self.base_branch = base_branch
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        text_content = (
+            f"{OCTICONS_MAP['oct_pr']} **Pull Request #{self.pr_number} Merged into `{self.base_branch}`!** 🎉\n"
+            f"All changes have been merged into the production branch.\n"
+            f"-# Workspace files remain archived. Click Close Thread to archive this channel."
+        )
+        close_btn = Button(
+            label="Close Thread",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"agent_close_thread:{self.session_id}"
+        )
+        self.add_item(Section(TextDisplay(text_content), accessory=close_btn))
+
+class AgentPRClosedUnmergedView(LayoutView):
+    def __init__(self, pr_number: int, base_branch: str, pr_url: str):
+        super().__init__(timeout=None)
+        self.pr_number = pr_number
+        self.base_branch = base_branch
+        self.pr_url = pr_url
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        text_content = (
+            f"{DFM_EMOJI_MAP['gfm_caution']} {OCTICONS_MAP['oct_pr']} **Pull Request #{self.pr_number} closed with unmerged commits**\n"
+            f"This pull request was closed without being merged into `{self.base_branch}`."
+        )
+        view_btn = Button(
+            label="View PR ↗",
+            style=discord.ButtonStyle.link,
+            url=self.pr_url
+        )
+        self.add_item(Section(TextDisplay(text_content), accessory=view_btn))
 
 class AgentQuestionView(LayoutView):
     def __init__(

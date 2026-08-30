@@ -4,6 +4,7 @@ from typing import Any
 from core.config_manager import config_manager
 from ui.config_views import (
     ServerIdentityDashboardView,
+    GitHubConfigDashboardView,
     ConfigHelpView,
     build_ai_channels_modal,
     build_system_prompt_modal,
@@ -16,6 +17,7 @@ from ui.config_views import (
 
 SETTINGS_SCOPE_MAP = {
     "Help": ["User", "Channel", "Server", "Bot DM", "User App"],
+    "GitHub": ["User", "Bot DM", "User App"],
     "Server Identity": ["Server"],
     "System Prompt": ["Channel", "Server", "User", "Bot DM", "User App"],
     "AI Channels": ["Channel", "Server"],
@@ -70,7 +72,7 @@ async def scope_autocomplete(interaction: discord.Interaction, current: str) -> 
 
 def setup_config_commands(tree: app_commands.CommandTree):
 
-    @tree.command(name="config", description="Configure PriestyAI rules, prompts, personas, and permissions")
+    @tree.command(name="config", description="Configure PriestyAI rules, prompts, personas, GitHub identity, and permissions")
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     @app_commands.describe(setting="The setting category to configure", scope="The target level where this configuration applies")
@@ -87,6 +89,13 @@ def setup_config_commands(tree: app_commands.CommandTree):
         allowed, reason = config_manager.check_permission(interaction, setting, scope)
         if not allowed:
             await interaction.response.send_message(content=f"❌ **Access Denied:** {reason}", ephemeral=True)
+            return
+
+        if setting_clean == "github":
+            await interaction.response.defer(ephemeral=True)
+            gh_dashboard = GitHubConfigDashboardView(user=interaction.user)
+            await gh_dashboard.initialize()
+            await interaction.followup.send(view=gh_dashboard, ephemeral=True)
             return
 
         if setting_clean == "server_identity":
@@ -147,7 +156,7 @@ def setup_config_commands(tree: app_commands.CommandTree):
                 new_override = bool(data.get("override_user"))
                 target_c = data.get("target_channel") or interaction.channel_id
                 if scope_clean == "server":
-                    config_manager.set_server_config(interaction.guild_id, system_prompt=new_prompt, override_user_instructions=new_override)
+                    config_manager.set_server_config(interaction.guild.id, system_prompt=new_prompt, override_user_instructions=new_override)
                 elif scope_clean == "channel":
                     config_manager.set_channel_config(target_c, guild_id=interaction.guild_id, system_prompt=new_prompt, override_user_instructions=new_override)
                 await sub_inter.response.send_message(content=f"✅ **System Prompt Updated** for `{scope.capitalize()} Scope`.", ephemeral=True)

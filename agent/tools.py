@@ -1,5 +1,7 @@
 import os
 import re
+import csv
+import json
 import logging
 import httpx
 import trafilatura
@@ -59,8 +61,10 @@ async def agent_terminal(command: str, context: ToolExecutionContext = None) -> 
 @tool_registry.register(
     name="agent_read_file",
     description=(
-        "Reads lines and contents from any file in the workspace (supports code, text, Markdown, Google Docs PDF tables, and Word documents).\n"
-        "- path: Relative path from workspace root (e.g. 'document.pdf', 'src/index.js', 'notes.txt').\n"
+        "Reads lines and structured contents from files in the workspace.\n"
+        "Supports code, markdown, PDFs (with tables), Word (.docx), Excel spreadsheets (.xlsx/.xls), "
+        "CSV/TSV data tables, PowerPoint slides (.pptx), and Jupyter Notebooks (.ipynb).\n"
+        "- path: Relative path from workspace root.\n"
         "- start_line: 1-indexed starting line (default 1).\n"
         "- end_line: Ending line (0 for full content)."
     )
@@ -81,14 +85,109 @@ async def agent_read_file(path: str, start_line: int = 1, end_line: int = 0, con
         return {"error": f"File '{path}' does not exist in workspace."}
 
     try:
-        if path.lower().endswith(".pdf"):
+        lower_path = path.lower()
+
+        if lower_path.endswith((".xlsx", ".xls")):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(full_path, data_only=True)
+                sheet_blocks = []
+                for sheet_name in wb.sheetnames:
+                    sheet = wb[sheet_name]
+                    sheet_blocks.append(f"### Sheet: {sheet_name}")
+                    rows = list(sheet.iter_rows(values_only=True))
+                    non_empty_rows = [r for r in rows if any(cell is not None for cell in r)]
+                    if non_empty_rows:
+                        headers = [str(c or "").strip().replace("\n", " ") for c in non_empty_rows[0]]
+                        sheet_blocks.append("| " + " | ".join(headers) + " |")
+                        sheet_blocks.append("| " + " | ".join(["---"] * len(headers)) + " |")
+                        for r in non_empty_rows[1:100]:
+                            row_vals = [str(c or "").strip().replace("\n", " ") for c in r]
+                            sheet_blocks.append("| " + " | ".join(row_vals) + " |")
+                        if len(non_empty_rows) > 100:
+                            sheet_blocks.append(f"-# ... and {len(non_empty_rows) - 100} more rows")
+                    else:
+                        sheet_blocks.append("*(Empty sheet)*")
+                
+                full_text = "\n\n".join(sheet_blocks)
+                lines = [l + "\n" for l in full_text.splitlines()]
+            except Exception as ex:
+                return {"error": f"Failed to read Excel workbook: {ex}"}
+
+        elif lower_path.endswith((".csv", ".tsv")):
+            delimiter = "\t" if lower_path.endswith(".tsv") else ","
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f, delimiter=delimiter)
+                rows = list(reader)
+
+            table_blocks = []
+            if rows:
+                headers = [c.strip().replace("\n", " ") for c in rows[0]]
+                table_blocks.append("| " + " | ".join(headers) + " |")
+                table_blocks.append("| " + " | ".join(["---"] * len(headers)) + " |")
+                for r in rows[1:120]:
+                    row_vals = [c.strip().replace("\n", " ") for c in r]
+                    table_blocks.append("| " + " | ".join(row_vals) + " |")
+                if len(rows) > 120:
+                    table_blocks.append(f"-# ... and {len(rows) - 120} more rows")
+            
+            full_text = "\n".join(table_blocks)
+            lines = [l + "\n" for l in full_text.splitlines()]
+
+        elif lower_path.endswith(".pptx"):
+            try:
+                from pptx import Presentation
+                prs = Presentation(full_path)
+                slide_blocks = []
+                for idx, slide in enumerate(prs.slides):
+                    texts = []
+                    for shape in slide.shapes:
+                        if shape.has_text_frame and shape.text.strip():
+                            texts.append(shape.text.strip())
+                    
+                    slide_str = f"--- [Slide {idx + 1}] ---\n" + "\n".join(texts)
+                    if slide.has_notes_slide and slide.notes_slide.notes_text_frame.text.strip():
+                        slide_str += f"\n**Speaker Notes:** {slide.notes_slide.notes_text_frame.text.strip()}"
+                    slide_blocks.append(slide_str)
+
+                full_text = "\n\n".join(slide_blocks)
+                lines = [l + "\n" for l in full_text.splitlines()]
+            except Exception as ex:
+                return {"error": f"Failed to read PowerPoint file: {ex}"}
+
+        elif lower_path.endswith(".ipynb"):
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                nb_data = json.load(f)
+            
+            cells = nb_data.get("cells", [])
+            cell_blocks = []
+            for idx, c in enumerate(cells):
+                c_type = c.get("cell_type", "code")
+                src = "".join(c.get("source", []))
+                if c_type == "markdown":
+                    cell_blocks.append(f"<!-- Markdown Cell {idx + 1} -->\n{src}")
+                else:
+                    cell_blocks.append(f"```python\n# [Code Cell {idx + 1}]\n{src}\n```")
+                    outputs = c.get("outputs", [])
+                    out_texts = []
+                    for out in outputs:
+                        if "text" in out:
+                            out_texts.append("".join(out["text"]))
+                        elif "data" in out and "text/plain" in out["data"]:
+                            out_texts.append("".join(out["data"]["text/plain"]))
+                    if out_texts:
+                        cell_blocks.append("```text\n# [Output]\n" + "\n".join(out_texts)[:800] + "\n```")
+
+            full_text = "\n\n".join(cell_blocks)
+            lines = [l + "\n" for l in full_text.splitlines()]
+
+        elif lower_path.endswith(".pdf"):
             try:
                 import pdfplumber
                 page_texts = []
                 with pdfplumber.open(full_path) as pdf:
                     for idx, page in enumerate(pdf.pages):
                         page_blocks = [f"--- [PDF Page {idx + 1}] ---"]
-                        
                         tables = page.extract_tables()
                         if tables:
                             page_blocks.append("\n**[Extracted Tables]**")
@@ -110,28 +209,21 @@ async def agent_read_file(path: str, start_line: int = 1, end_line: int = 0, con
                 
                 full_text = "\n\n".join(page_texts)
                 lines = [l + "\n" for l in full_text.splitlines()]
-
             except ImportError:
-                try:
-                    import pypdf
-                    reader = pypdf.PdfReader(full_path)
-                    page_texts = []
-                    for idx, page in enumerate(reader.pages):
-                        ptxt = page.extract_text() or ""
-                        page_texts.append(f"--- [PDF Page {idx + 1}] ---\n{ptxt}")
-                    full_text = "\n\n".join(page_texts)
-                    lines = [l + "\n" for l in full_text.splitlines()]
-                except Exception as p_err:
-                    return {"error": f"Failed to extract PDF (install 'pdfplumber' via 'pip install pdfplumber'): {p_err}"}
-            except Exception as pdf_err:
-                return {"error": f"Failed to parse PDF tables: {pdf_err}"}
+                import pypdf
+                reader = pypdf.PdfReader(full_path)
+                page_texts = []
+                for idx, page in enumerate(reader.pages):
+                    ptxt = page.extract_text() or ""
+                    page_texts.append(f"--- [PDF Page {idx + 1}] ---\n{ptxt}")
+                full_text = "\n\n".join(page_texts)
+                lines = [l + "\n" for l in full_text.splitlines()]
 
-        elif path.lower().endswith(".docx"):
+        elif lower_path.endswith(".docx"):
             try:
                 import docx
                 doc = docx.Document(full_path)
                 doc_lines = []
-                
                 for elem in doc.element.body:
                     if elem.tag.endswith('p'):
                         p = docx.text.paragraph.Paragraph(elem, doc)
@@ -177,7 +269,7 @@ async def agent_read_file(path: str, start_line: int = 1, end_line: int = 0, con
 @tool_registry.register(
     name="agent_write_file",
     description=(
-        "Creates or overwrites a file in the workspace with complete content.\n"
+        "Creates a new file or overwrites an entire file in the workspace with complete content.\n"
         "- path: Relative path from workspace root.\n"
         "- content: Full source content to write."
     )

@@ -12,12 +12,15 @@ from typing import Any
 import httpx
 import discord
 from agent.constants import GITHUB_BOT_NAME, GITHUB_BOT_EMAIL
-from config.settings import AGENT_WORKSPACES_ROOT
+from config.settings import AGENT_WORKSPACES_ROOT, GITHUB_TOKEN
 
 logger = logging.getLogger("PriestyAI.Agent.SessionManager")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "priestyai.db")
+
+PRIMARY_POLYGLOT_IMAGE = "nikolaik/python-nodejs:python3.11-nodejs20-slim"
+FALLBACK_DOCKER_IMAGE = "python:3.11-bookworm"
 
 def normalize_repo_url(repo_input: str) -> tuple[str, str, str]:
     clean = repo_input.strip().rstrip("/")
@@ -462,7 +465,7 @@ class AgentSessionManager:
                 return d
         return None
 
-    async def _download_repo_zip_fallback(self, repo_url: str, dest_dir: str) -> bool:
+    async def _download_repo_zip_fallback(self, repo_url: str, dest_dir: str, auth_token: str | None = None) -> bool:
         _, owner, repo = normalize_repo_url(repo_url)
         if not owner or not repo:
             return False
@@ -472,6 +475,11 @@ class AgentSessionManager:
             f"https://github.com/{owner}/{repo}/archive/refs/heads/master.zip"
         ]
         headers = {"User-Agent": "PriestyAI-Agent"}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        elif GITHUB_TOKEN:
+            headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             for z_url in zip_urls:
                 try:
@@ -517,30 +525,43 @@ class AgentSessionManager:
         clone_url, owner, repo = normalize_repo_url(repo_url)
         target_clone_url = clone_url or repo_url
 
+        from core.github_app_client import github_app_client
+        inst_token, _ = await github_app_client.get_installation_token_for_repo(owner, repo) if (owner and repo) else (None, None)
+
+        if inst_token:
+            auth_clone_url = f"https://x-access-token:{inst_token}@github.com/{owner}/{repo}.git"
+            logger.info(f"[AgentDocker] Cloning {owner}/{repo} using GitHub App Installation Token...")
+        elif GITHUB_TOKEN and owner and repo:
+            auth_clone_url = f"https://{GITHUB_TOKEN}@github.com/{owner}/{repo}.git"
+            logger.info(f"[AgentDocker] Cloning {owner}/{repo} using GITHUB_TOKEN...")
+        else:
+            auth_clone_url = target_clone_url
+            logger.info(f"[AgentDocker] Cloning public repo {owner}/{repo}...")
+
         if not os.listdir(workspace_path):
             cloned = False
             if shutil.which("git"):
                 try:
-                    clone_cmd = ["git", "clone", "--depth", "1", target_clone_url, "."]
+                    clone_cmd = ["git", "clone", "--depth", "1", auth_clone_url, "."]
                     clone_proc = await asyncio.create_subprocess_exec(
                         *clone_cmd,
                         cwd=workspace_path,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
-                    stdout, stderr = await asyncio.wait_for(clone_proc.communicate(), timeout=25.0)
+                    stdout, stderr = await asyncio.wait_for(clone_proc.communicate(), timeout=30.0)
                     if clone_proc.returncode == 0:
                         cloned = True
                         await self._configure_git_identity_local(workspace_path)
-                        logger.info(f"[AgentDocker] Cloned {target_clone_url} into {workspace_path}")
+                        logger.info(f"[AgentDocker] Cloned {owner}/{repo} into {workspace_path}")
                     else:
                         logger.warning(f"[AgentDocker] git clone error: {stderr.decode()}")
                 except Exception as ex:
                     logger.warning(f"[AgentDocker] git clone error: {ex}")
 
             if not cloned:
-                logger.info(f"[AgentDocker] Falling back to HTTP zip download for {target_clone_url}...")
-                await self._download_repo_zip_fallback(target_clone_url, workspace_path)
+                logger.info(f"[AgentDocker] Falling back to HTTP zip download for {owner}/{repo}...")
+                await self._download_repo_zip_fallback(target_clone_url, workspace_path, auth_token=inst_token)
                 if shutil.which("git") and not os.path.exists(os.path.join(workspace_path, ".git")):
                     try:
                         init_proc = await asyncio.create_subprocess_exec(
@@ -599,6 +620,7 @@ class AgentSessionManager:
         except Exception:
             pass
 
+        selected_image = PRIMARY_POLYGLOT_IMAGE
         docker_cmd = [
             "docker", "run", "-d",
             "--name", container_name,
@@ -606,11 +628,11 @@ class AgentSessionManager:
             "--cpus=1.5",
             "-v", f"{workspace_path}:/workspace",
             "-w", "/workspace",
-            "python:3.11-bookworm",
+            selected_image,
             "tail", "-f", "/dev/null"
         ]
 
-        logger.info(f"[AgentDocker] Launching workspace container {container_name} (python:3.11-bookworm)...")
+        logger.info(f"[AgentDocker] Launching polyglot workspace container {container_name} ({selected_image})...")
         try:
             run_proc = await asyncio.create_subprocess_exec(
                 *docker_cmd,
@@ -618,6 +640,17 @@ class AgentSessionManager:
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await asyncio.wait_for(run_proc.communicate(), timeout=90.0)
+            if run_proc.returncode != 0:
+                logger.warning(f"[AgentDocker] Primary image failed ({stderr.decode()}). Falling back to {FALLBACK_DOCKER_IMAGE}...")
+                fallback_cmd = list(docker_cmd)
+                fallback_cmd[-2] = FALLBACK_DOCKER_IMAGE
+                run_proc = await asyncio.create_subprocess_exec(
+                    *fallback_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(run_proc.communicate(), timeout=90.0)
+
             if run_proc.returncode == 0:
                 self.update_session(session_id, container_id=container_name)
                 
@@ -637,7 +670,7 @@ class AgentSessionManager:
                     except Exception:
                         pass
 
-                logger.info(f"[AgentDocker] Launched workspace container: {container_name}")
+                logger.info(f"[AgentDocker] Polyglot workspace container online: {container_name}")
                 return container_name
             else:
                 logger.warning(f"[AgentDocker] Docker run returned {run_proc.returncode}: {stderr.decode()}")
@@ -670,6 +703,8 @@ class AgentSessionManager:
                 elif cmd_str.startswith("pip ") or cmd_str.startswith("pip3 "):
                     args_part = cmd_str.split(" ", 1)[-1].strip()
                     exec_args = [py_exe, "-m", "pip"] + args_part.split()
+                elif cmd_str.startswith("npm ") or cmd_str.startswith("npx ") or cmd_str.startswith("node "):
+                    exec_args = ["cmd.exe", "/c", cmd_str]
                 else:
                     exec_args = ["cmd.exe", "/c", cmd_str]
             else:

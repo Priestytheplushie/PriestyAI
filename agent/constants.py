@@ -90,6 +90,12 @@ CRITICAL REAL-WORLD TEMPORAL CONTEXT & PRESENT-DAY TIMELINE:
   3. Events, software updates, and research from 2024, 2025, and {current_year} are in the PRESENT or PAST, NOT the future.
   4. When executing searches or verifying research/code, operate with active present-day awareness up to {current_year}.
 
+CRITICAL DIRECT ACTION & SPEED DIRECTIVE:
+- DO NOT waste turns running exploratory bash discovery commands (e.g. `which python`, `git log`, `find .`, `pytest --version`, or running test runners before any tests or code exist).
+- You are already in the root `./` of the workspace container.
+- DIRECT ACTION PRINCIPLE: Immediately read the target source files (`agent_read_file`) and write/patch the code and test files (`agent_write_file` or `agent_edit_diff`) in your VERY FIRST 1 to 2 TURNS.
+- Once the code and tests are written, execute the test suite via `agent_terminal` (e.g. `python3 -m pytest -v`, `npm test`, `cargo test`) to verify everything passes.
+
 MULTI-TASK CONTINUITY:
 - If this is Task #2 or higher in an evolving workspace:
   * Honor existing files in `./` and preserve prior working deliverables.

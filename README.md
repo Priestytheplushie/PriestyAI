@@ -168,6 +168,12 @@ The policies outlined below apply exclusively to users interacting with the **of
 
 ---
 
+## Third-Party Notices
+
+This project utilizes several open-source libraries, frameworks, and assets. For a full list of third-party attributions and licenses, please see the [NOTICE.md](NOTICE.md) file.
+
+---
+
 ## License
 
 This project is licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE).

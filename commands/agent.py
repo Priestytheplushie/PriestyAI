@@ -11,6 +11,8 @@ from agent.session_manager import session_manager
 from agent.engine import AgentEngine
 from agent.constants import OCTICONS_MAP
 from core.moderation import check_moderation, is_user_banned
+from core.config_manager import config_manager
+from ui.onboarding_views import build_welcome_terms_modal, BannedUserNoticeView
 
 logger = logging.getLogger("PriestyAI.Commands.Agent")
 
@@ -21,11 +23,15 @@ def setup_agent_commands(tree: app_commands.CommandTree):
     @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
     async def agent_command(interaction: discord.Interaction):
         if is_user_banned(interaction.user.id):
-            await interaction.response.send_message(content="❌ Your account access has been suspended.", ephemeral=True)
+            ban_view = BannedUserNoticeView(author=interaction.user)
+            await interaction.response.send_message(view=ban_view, ephemeral=True)
             return
 
         if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message(content="❌ Agent sessions can only be created inside standard server text channels.", ephemeral=True)
+            await interaction.response.send_message(
+                content="❌ Agent sessions can only be created inside standard server text channels.",
+                ephemeral=True
+            )
             return
 
         bot_member = interaction.guild.me
@@ -33,7 +39,10 @@ def setup_agent_commands(tree: app_commands.CommandTree):
         
         if not (channel_perms.create_private_threads and channel_perms.send_messages_in_threads and channel_perms.manage_threads):
             await interaction.response.send_message(
-                content="❌ I lack the required permissions to manage private threads in this channel. Please grant me `Create Private Threads`, `Send Messages in Threads`, and `Manage Threads` permissions.",
+                content=(
+                    "❌ I lack the required permissions to manage private threads in this channel. "
+                    "Please grant me `Create Private Threads`, `Send Messages in Threads`, and `Manage Threads` permissions."
+                ),
                 ephemeral=True
             )
             return
@@ -45,7 +54,10 @@ def setup_agent_commands(tree: app_commands.CommandTree):
 
             is_flagged, is_zt, flagged_cats, _ = await check_moderation(prompt)
             if is_flagged:
-                await sub_inter.response.send_message(content="❌ This request conflicts with automated safety guardrails.", ephemeral=True)
+                await sub_inter.response.send_message(
+                    content="❌ This request conflicts with automated safety guardrails.",
+                    ephemeral=True
+                )
                 return
 
             await sub_inter.response.defer(ephemeral=True)
@@ -109,8 +121,20 @@ def setup_agent_commands(tree: app_commands.CommandTree):
                             except Exception as dl_err:
                                 logger.warning(f"[Agent] Failed to download modal attachment '{att_fname}': {dl_err}")
 
-            await sub_inter.followup.send(content=f"{OCTICONS_MAP['oct_branch']} **Agent Session Launched:** Joined private thread <#{thread.id}>.", ephemeral=True)
+            await sub_inter.followup.send(
+                content=f"{OCTICONS_MAP['oct_branch']} **Agent Session Launched:** Joined private thread <#{thread.id}>.",
+                ephemeral=True
+            )
             asyncio.create_task(AgentEngine.start_planning_turn(thread, session))
+
+        if not config_manager.has_user_agreed(interaction.user.id):
+            async def on_agreed(sub_inter: discord.Interaction):
+                agent_modal = build_agent_create_modal(default_user_id=sub_inter.user.id, on_submit=on_modal_submit)
+                await sub_inter.response.send_modal(agent_modal)
+
+            welcome_modal = build_welcome_terms_modal(on_agree_callback=on_agreed)
+            await interaction.response.send_modal(welcome_modal)
+            return
 
         modal = build_agent_create_modal(default_user_id=interaction.user.id, on_submit=on_modal_submit)
         await interaction.response.send_modal(modal)

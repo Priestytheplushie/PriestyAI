@@ -22,6 +22,7 @@ from config.settings import (
     GEMMA_MODELS
 )
 from core.client_manager import client_manager
+from core.config_manager import config_manager
 from core.moderation import (
     check_moderation,
     log_moderation_violation,
@@ -29,7 +30,7 @@ from core.moderation import (
     ban_user,
     generate_friendly_refusal
 )
-from ui.onboarding_views import BannedUserNoticeView
+from ui.onboarding_views import build_welcome_terms_modal, BannedUserNoticeView
 
 logger = logging.getLogger("PriestyAI.Commands.Generate")
 
@@ -46,9 +47,7 @@ def clean_model_name(raw_name: str, model_id: str) -> str:
     name = raw_name or model_id.split("/")[-1]
     
     name = re.sub(r'(?i)\(?\s*free\s*\)?|:free|\[.*?\]', '', name)
-    
     name = re.sub(r'^(?:Meta|Google|Qwen|Mistral|DeepSeek|Anthropic|OpenAI):\s*', '', name, flags=re.IGNORECASE)
-    
     name = name.replace("instruct", "").replace("Instruct", "").replace("-", " ").strip()
     
     if "deepseek r1 distill llama 70b" in name.lower() or "deepseek r1 distill" in name.lower():
@@ -381,6 +380,270 @@ async def model_autocomplete_handler(
     chosen_type = interaction.namespace.type or "Text"
     return model_catalog.get_choices(chosen_type, current)
 
+async def _execute_generate(
+    interaction: discord.Interaction,
+    type: str,
+    model: str,
+    prompt: str
+):
+    await model_catalog.ensure_initialized()
+    model_entry = model_catalog.get_model_entry(model, type)
+
+    if not model_entry:
+        t_clean = type.lower().strip()
+        target_dict = model_catalog.image_models if t_clean == "image" else (model_catalog.audio_models if t_clean == "audio" else model_catalog.text_models)
+        for k, entry in target_dict.items():
+            if entry["display_name"].lower() == model.lower() or k.lower() == model.lower():
+                model_entry = entry
+                break
+
+    if not model_entry:
+        await interaction.followup.send(content="❌ This model is not allowed.", ephemeral=True)
+        return
+
+    is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(prompt)
+    if is_flagged:
+        log_moderation_violation(interaction.user.id, interaction.guild_id, flagged_cats, score)
+        if is_zero_tolerance:
+            ban_user(interaction.user.id, reason=f"Zero-tolerance violation: {', '.join(flagged_cats)}")
+            ban_view = BannedUserNoticeView(author=interaction.user)
+            await interaction.followup.send(view=ban_view, ephemeral=True)
+            return
+
+        refusal_text = await generate_friendly_refusal(flagged_cats)
+        await interaction.followup.send(content=refusal_text, ephemeral=True)
+        return
+
+    start_time = time.time()
+    provider = model_entry.get("provider")
+    raw_model_id = model_entry.get("id")
+    display_label = model_entry.get("display_name", model)
+
+    if type.lower() == "image":
+        seed = random.randint(1, 99999999)
+        encoded_prompt = urllib.parse.quote(prompt.strip())
+        image_url = (
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}?"
+            f"width=1024&height=1024&model={raw_model_id}&nologo=true&seed={seed}"
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(image_url, headers=DOWNLOAD_HEADERS)
+                elapsed = max(0.1, time.time() - start_time)
+
+                if resp.status_code == 200 and len(resp.content) > 5000:
+                    file_obj = discord.File(io.BytesIO(resp.content), filename=f"generated_{int(start_time)}.png")
+                    footer_text = f"> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
+                    await interaction.followup.send(content=footer_text, file=file_obj)
+                    return
+                else:
+                    await interaction.followup.send(
+                        content=f"⚠️ Image generation failed ({resp.status_code}). Please try a different prompt."
+                    )
+                    return
+        except Exception as e:
+            logger.error(f"[/generate image error] {e}")
+            await interaction.followup.send(content=f"⚠️ Generation error: `{e}`")
+            return
+
+    elif type.lower() == "audio":
+        try:
+            import edge_tts
+            voice_id = raw_model_id or "en-US-ChristopherNeural"
+            communicate = edge_tts.Communicate(prompt.strip()[:1500], voice=voice_id)
+
+            audio_buffer = io.BytesIO()
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_buffer.write(chunk["data"])
+
+            mp3_bytes = audio_buffer.getvalue()
+            elapsed = max(0.1, time.time() - start_time)
+
+            if len(mp3_bytes) > 100:
+                approx_duration = max(1.0, len(mp3_bytes) / 16000.0)
+
+                ogg_bytes = await mp3_to_ogg_opus(mp3_bytes)
+                voice_sent = False
+
+                if ogg_bytes and interaction.channel_id:
+                    voice_sent = await send_native_discord_voice_message(
+                        channel_id=interaction.channel_id,
+                        ogg_bytes=ogg_bytes,
+                        duration_secs=approx_duration
+                    )
+
+                if voice_sent:
+                    try:
+                        await interaction.delete_original_response()
+                    except Exception:
+                        pass
+                    return
+
+                audio_buffer.seek(0)
+                file_obj = discord.File(audio_buffer, filename="voice-message.mp3")
+                footer_text = f"> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
+                await interaction.followup.send(content=footer_text, file=file_obj)
+                return
+            else:
+                await interaction.followup.send(content="⚠️ Failed to synthesize audio.")
+                return
+        except Exception as e:
+            logger.error(f"[/generate audio error] {e}")
+            await interaction.followup.send(content=f"⚠️ Audio generation error: `{e}`")
+            return
+
+    else:
+        if provider == "groq":
+            if not GROQ_API_KEY:
+                await interaction.followup.send(content="❌ This model is not allowed.")
+                return
+
+            try:
+                payload = {
+                    "model": raw_model_id,
+                    "messages": [{"role": "user", "content": prompt.strip()}],
+                    "temperature": 0.7
+                }
+                headers = {
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                async with httpx.AsyncClient(timeout=35.0) as client:
+                    resp = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers=headers,
+                        json=payload
+                    )
+                    elapsed = max(0.1, time.time() - start_time)
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        result_text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                        footer = f"\n\n> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
+
+                        if len(result_text) + len(footer) <= 2000:
+                            await interaction.followup.send(content=f"{result_text}{footer}")
+                        else:
+                            cutoff = 2000 - len(footer) - 5
+                            await interaction.followup.send(content=f"{result_text[:cutoff]}...{footer}")
+                        return
+                    else:
+                        await interaction.followup.send(content=f"⚠️ Provider returned HTTP {resp.status_code}.")
+                        return
+            except Exception as e:
+                logger.error(f"[/generate text Groq error] {e}")
+                await interaction.followup.send(content=f"⚠️ Generation error: `{e}`")
+                return
+
+        elif provider == "openrouter":
+            if not OPENROUTER_API_KEY:
+                await interaction.followup.send(content="❌ This model is not allowed.")
+                return
+
+            if not raw_model_id.endswith(":free") and f"openrouter/{raw_model_id}" not in model_catalog.text_models:
+                await interaction.followup.send(content="❌ This model is not allowed.")
+                return
+
+            try:
+                payload = {
+                    "model": raw_model_id,
+                    "messages": [{"role": "user", "content": prompt.strip()}],
+                    "temperature": 0.7
+                }
+                headers = {
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://github.com/PriestyAI",
+                    "X-Title": "PriestyAI Discord",
+                    "Content-Type": "application/json"
+                }
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    resp = await client.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers=headers,
+                        json=payload
+                    )
+                    elapsed = max(0.1, time.time() - start_time)
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        result_text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                        footer = f"\n\n> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
+
+                        if len(result_text) + len(footer) <= 2000:
+                            await interaction.followup.send(content=f"{result_text}{footer}")
+                        else:
+                            cutoff = 2000 - len(footer) - 5
+                            await interaction.followup.send(content=f"{result_text[:cutoff]}...{footer}")
+                        return
+                    else:
+                        await interaction.followup.send(content=f"⚠️ Provider returned HTTP {resp.status_code}.")
+                        return
+            except Exception as e:
+                logger.error(f"[/generate text OpenRouter error] {e}")
+                await interaction.followup.send(content=f"⚠️ Generation error: `{e}`")
+                return
+
+        elif provider == "ollama":
+            try:
+                payload = {
+                    "model": raw_model_id,
+                    "messages": [{"role": "user", "content": prompt.strip()}],
+                    "stream": False
+                }
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(f"{OLLAMA_URL}/v1/chat/completions", json=payload)
+                    elapsed = max(0.1, time.time() - start_time)
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        result_text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                        footer = f"\n\n> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
+
+                        if len(result_text) + len(footer) <= 2000:
+                            await interaction.followup.send(content=f"{result_text}{footer}")
+                        else:
+                            cutoff = 2000 - len(footer) - 5
+                            await interaction.followup.send(content=f"{result_text[:cutoff]}...{footer}")
+                        return
+                    else:
+                        await interaction.followup.send(content=f"⚠️ Local Ollama returned HTTP {resp.status_code}.")
+                        return
+            except Exception as e:
+                logger.error(f"[/generate text Ollama error] {e}")
+                await interaction.followup.send(content=f"⚠️ Local Ollama connection error: `{e}`")
+                return
+
+        elif provider == "google":
+            client, key_idx, active_model = client_manager.get_client_for_model(raw_model_id)
+            if not client:
+                await interaction.followup.send(content="⚠️ Gemini service is currently busy. Please try again.")
+                return
+
+            try:
+                res = await client.aio.models.generate_content(
+                    model=active_model,
+                    contents=prompt.strip()
+                )
+                elapsed = max(0.1, time.time() - start_time)
+                response_text = res.text.strip() if (res and res.text) else "*No response generated.*"
+                
+                footer = f"\n\n> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
+                if len(response_text) + len(footer) <= 2000:
+                    await interaction.followup.send(content=f"{response_text}{footer}")
+                else:
+                    cutoff = 2000 - len(footer) - 5
+                    await interaction.followup.send(content=f"{response_text[:cutoff]}...{footer}")
+                return
+            except Exception as e:
+                logger.error(f"[/generate text Gemini error] {e}")
+                await interaction.followup.send(content=f"⚠️ Gemini error: `{e}`")
+                return
+
+        else:
+            await interaction.followup.send(content="❌ This model is not allowed.")
+
 def setup_generate_commands(tree: app_commands.CommandTree):
 
     @tree.command(name="generate", description="Directly generate raw text, voice messages, or images using top AI models")
@@ -409,265 +672,17 @@ def setup_generate_commands(tree: app_commands.CommandTree):
             await interaction.response.send_message(view=ban_view, ephemeral=True)
             return
 
-        await model_catalog.ensure_initialized()
-        model_entry = model_catalog.get_model_entry(model, type)
+        if not config_manager.has_user_agreed(interaction.user.id):
+            async def on_agreed(sub_inter: discord.Interaction):
+                await sub_inter.response.defer(ephemeral=False)
+                await _execute_generate(sub_inter, type=type, model=model, prompt=prompt)
 
-        if not model_entry:
-            t_clean = type.lower().strip()
-            target_dict = model_catalog.image_models if t_clean == "image" else (model_catalog.audio_models if t_clean == "audio" else model_catalog.text_models)
-            for k, entry in target_dict.items():
-                if entry["display_name"].lower() == model.lower() or k.lower() == model.lower():
-                    model_entry = entry
-                    break
-
-        if not model_entry:
-            await interaction.response.send_message(content="❌ This model is not allowed.", ephemeral=True)
-            return
-
-        is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(prompt)
-        if is_flagged:
-            log_moderation_violation(interaction.user.id, interaction.guild_id, flagged_cats, score)
-            if is_zero_tolerance:
-                ban_user(interaction.user.id, reason=f"Zero-tolerance violation: {', '.join(flagged_cats)}")
-                ban_view = BannedUserNoticeView(author=interaction.user)
-                await interaction.response.send_message(view=ban_view, ephemeral=True)
-                return
-
-            refusal_text = await generate_friendly_refusal(flagged_cats)
-            await interaction.response.send_message(content=refusal_text, ephemeral=True)
+            welcome_modal = build_welcome_terms_modal(on_agree_callback=on_agreed)
+            await interaction.response.send_modal(welcome_modal)
             return
 
         await interaction.response.defer(ephemeral=False)
-        start_time = time.time()
-
-        provider = model_entry.get("provider")
-        raw_model_id = model_entry.get("id")
-        display_label = model_entry.get("display_name", model)
-
-        if type.lower() == "image":
-            seed = random.randint(1, 99999999)
-            encoded_prompt = urllib.parse.quote(prompt.strip())
-            image_url = (
-                f"https://image.pollinations.ai/prompt/{encoded_prompt}?"
-                f"width=1024&height=1024&model={raw_model_id}&nologo=true&seed={seed}"
-            )
-
-            try:
-                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                    resp = await client.get(image_url, headers=DOWNLOAD_HEADERS)
-                    elapsed = max(0.1, time.time() - start_time)
-
-                    if resp.status_code == 200 and len(resp.content) > 5000:
-                        file_obj = discord.File(io.BytesIO(resp.content), filename=f"generated_{int(start_time)}.png")
-                        footer_text = f"> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
-                        await interaction.followup.send(content=footer_text, file=file_obj)
-                        return
-                    else:
-                        await interaction.followup.send(
-                            content=f"⚠️ Image generation failed ({resp.status_code}). Please try a different prompt."
-                        )
-                        return
-            except Exception as e:
-                logger.error(f"[/generate image error] {e}")
-                await interaction.followup.send(content=f"⚠️ Generation error: `{e}`")
-                return
-
-        elif type.lower() == "audio":
-            try:
-                import edge_tts
-                voice_id = raw_model_id or "en-US-ChristopherNeural"
-                communicate = edge_tts.Communicate(prompt.strip()[:1500], voice=voice_id)
-
-                audio_buffer = io.BytesIO()
-                async for chunk in communicate.stream():
-                    if chunk["type"] == "audio":
-                        audio_buffer.write(chunk["data"])
-
-                mp3_bytes = audio_buffer.getvalue()
-                elapsed = max(0.1, time.time() - start_time)
-
-                if len(mp3_bytes) > 100:
-                    approx_duration = max(1.0, len(mp3_bytes) / 16000.0)
-
-                    ogg_bytes = await mp3_to_ogg_opus(mp3_bytes)
-                    voice_sent = False
-
-                    if ogg_bytes and interaction.channel_id:
-                        voice_sent = await send_native_discord_voice_message(
-                            channel_id=interaction.channel_id,
-                            ogg_bytes=ogg_bytes,
-                            duration_secs=approx_duration
-                        )
-
-                    if voice_sent:
-                        try:
-                            await interaction.delete_original_response()
-                        except Exception:
-                            pass
-                        return
-
-                    audio_buffer.seek(0)
-                    file_obj = discord.File(audio_buffer, filename="voice-message.mp3")
-                    footer_text = f"> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
-                    await interaction.followup.send(content=footer_text, file=file_obj)
-                    return
-                else:
-                    await interaction.followup.send(content="⚠️ Failed to synthesize audio.")
-                    return
-            except Exception as e:
-                logger.error(f"[/generate audio error] {e}")
-                await interaction.followup.send(content=f"⚠️ Audio generation error: `{e}`")
-                return
-
-        else:
-            if provider == "groq":
-                if not GROQ_API_KEY:
-                    await interaction.followup.send(content="❌ This model is not allowed.")
-                    return
-
-                try:
-                    payload = {
-                        "model": raw_model_id,
-                        "messages": [{"role": "user", "content": prompt.strip()}],
-                        "temperature": 0.7
-                    }
-                    headers = {
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type": "application/json"
-                    }
-                    async with httpx.AsyncClient(timeout=35.0) as client:
-                        resp = await client.post(
-                            "https://api.groq.com/openai/v1/chat/completions",
-                            headers=headers,
-                            json=payload
-                        )
-                        elapsed = max(0.1, time.time() - start_time)
-
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            result_text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                            footer = f"\n\n> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
-
-                            if len(result_text) + len(footer) <= 2000:
-                                await interaction.followup.send(content=f"{result_text}{footer}")
-                            else:
-                                cutoff = 2000 - len(footer) - 5
-                                await interaction.followup.send(content=f"{result_text[:cutoff]}...{footer}")
-                            return
-                        else:
-                            await interaction.followup.send(content=f"⚠️ Provider returned HTTP {resp.status_code}.")
-                            return
-                except Exception as e:
-                    logger.error(f"[/generate text Groq error] {e}")
-                    await interaction.followup.send(content=f"⚠️ Generation error: `{e}`")
-                    return
-
-            elif provider == "openrouter":
-                if not OPENROUTER_API_KEY:
-                    await interaction.followup.send(content="❌ This model is not allowed.")
-                    return
-
-                if not raw_model_id.endswith(":free") and f"openrouter/{raw_model_id}" not in model_catalog.text_models:
-                    await interaction.followup.send(content="❌ This model is not allowed.")
-                    return
-
-                try:
-                    payload = {
-                        "model": raw_model_id,
-                        "messages": [{"role": "user", "content": prompt.strip()}],
-                        "temperature": 0.7
-                    }
-                    headers = {
-                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "HTTP-Referer": "https://github.com/PriestyAI",
-                        "X-Title": "PriestyAI Discord",
-                        "Content-Type": "application/json"
-                    }
-                    async with httpx.AsyncClient(timeout=45.0) as client:
-                        resp = await client.post(
-                            "https://openrouter.ai/api/v1/chat/completions",
-                            headers=headers,
-                            json=payload
-                        )
-                        elapsed = max(0.1, time.time() - start_time)
-
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            result_text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                            footer = f"\n\n> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
-
-                            if len(result_text) + len(footer) <= 2000:
-                                await interaction.followup.send(content=f"{result_text}{footer}")
-                            else:
-                                cutoff = 2000 - len(footer) - 5
-                                await interaction.followup.send(content=f"{result_text[:cutoff]}...{footer}")
-                            return
-                        else:
-                            await interaction.followup.send(content=f"⚠️ Provider returned HTTP {resp.status_code}.")
-                            return
-                except Exception as e:
-                    logger.error(f"[/generate text OpenRouter error] {e}")
-                    await interaction.followup.send(content=f"⚠️ Generation error: `{e}`")
-                    return
-
-            elif provider == "ollama":
-                try:
-                    payload = {
-                        "model": raw_model_id,
-                        "messages": [{"role": "user", "content": prompt.strip()}],
-                        "stream": False
-                    }
-                    async with httpx.AsyncClient(timeout=60.0) as client:
-                        resp = await client.post(f"{OLLAMA_URL}/v1/chat/completions", json=payload)
-                        elapsed = max(0.1, time.time() - start_time)
-
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            result_text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                            footer = f"\n\n> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
-
-                            if len(result_text) + len(footer) <= 2000:
-                                await interaction.followup.send(content=f"{result_text}{footer}")
-                            else:
-                                cutoff = 2000 - len(footer) - 5
-                                await interaction.followup.send(content=f"{result_text[:cutoff]}...{footer}")
-                            return
-                        else:
-                            await interaction.followup.send(content=f"⚠️ Local Ollama returned HTTP {resp.status_code}.")
-                            return
-                except Exception as e:
-                    logger.error(f"[/generate text Ollama error] {e}")
-                    await interaction.followup.send(content=f"⚠️ Local Ollama connection error: `{e}`")
-                    return
-
-            elif provider == "google":
-                client, key_idx, active_model = client_manager.get_client_for_model(raw_model_id)
-                if not client:
-                    await interaction.followup.send(content="⚠️ Gemini service is currently busy. Please try again.")
-                    return
-
-                try:
-                    res = await client.aio.models.generate_content(
-                        model=active_model,
-                        contents=prompt.strip()
-                    )
-                    elapsed = max(0.1, time.time() - start_time)
-                    response_text = res.text.strip() if (res and res.text) else "*No response generated.*"
-                    
-                    footer = f"\n\n> Took {elapsed:.1f}s • {display_label} • {BETA_EMOJI}"
-                    if len(response_text) + len(footer) <= 2000:
-                        await interaction.followup.send(content=f"{response_text}{footer}")
-                    else:
-                        cutoff = 2000 - len(footer) - 5
-                        await interaction.followup.send(content=f"{response_text[:cutoff]}...{footer}")
-                    return
-                except Exception as e:
-                    logger.error(f"[/generate text Gemini error] {e}")
-                    await interaction.followup.send(content=f"⚠️ Gemini error: `{e}`")
-                    return
-
-            else:
-                await interaction.followup.send(content="❌ This model is not allowed.")
+        await _execute_generate(interaction, type=type, model=model, prompt=prompt)
 
     @generate_command.error
     async def generate_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):

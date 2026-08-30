@@ -29,7 +29,9 @@ The Service is provided strictly on an "AS IS" and "AS AVAILABLE" basis without 
   https://github.com/Priestytheplushie/PriestyAI
 
 ### 3. Incorporation of Privacy Policy
-By agreeing to these Terms of Service, you acknowledge and agree that our Privacy Policy applies to your interaction with the Service. You understand how prompts, files, and contextual data are processed, cryptographically encrypted at rest, and transmitted to third-party inference sub-processors as detailed in the Privacy Policy.
+By agreeing to these Terms of Service, you acknowledge and agree that our Privacy Policy applies directly to your interaction with the Service:
+- Privacy Policy Access: Review the complete Privacy Policy at any time via /privacy.
+- Third-Party Inference Disclosures: You understand and consent to how prompts, files, and contextual data are processed, cryptographically encrypted at rest, and transmitted to third-party inference sub-processors (including Google Gemini API, Groq, OpenRouter, and Pollinations) as detailed in /privacy.
 
 ### 4. Acceptable Use & Prohibited Conduct
 You agree not to submit, generate, or solicit any of the following:
@@ -47,7 +49,7 @@ All interactions are subject to real-time automated safety filtering:
 To maintain conversational continuity and workspace features, the Service stores prompts, generated deliverables, and factual preferences:
 - Data Encryption: Sensitive personal facts, chat session logs, and personal credentials stored in our database are cryptographically encrypted at rest.
 - Passive Chat: Background chat from third parties who are not interacting with the bot is never stored.
-- Full self-service data management is available via </data:1541122763044163665> (inspect/delete) and </config:1541093516078485646> (memory opt-out).
+- Privacy & Self-Service: Review our full Privacy Policy via /privacy. Full self-service data management is available via </data:1541122763044163665> (inspect/delete) and </config:1541093516078485646> (memory opt-out).
 
 ### 7. Disclaimer of Output Accuracy
 The Service generates outputs using probabilistic machine learning models. Generated code, mathematical proofs, and technical explanations may occasionally contain bugs or inaccuracies. You are responsible for independently validating all outputs prior to execution."""
@@ -147,7 +149,7 @@ def build_welcome_terms_modal(on_agree_callback: Callable[[discord.Interaction],
 
 
 def build_terms_review_modal() -> DynamicModalV2:
-    review_content = f"{TERMS_DOCUMENT_TEXT}\n\n---\n-# Note: You agreed to these terms and are bound by them while using PriestyAI."
+    review_content = f"{TERMS_DOCUMENT_TEXT}\n\n---\n-# Note: You agreed to these terms and the Privacy Policy (/privacy) while interacting with PriestyAI."
     fields = [
         {
             "type": "text_display",
@@ -208,7 +210,7 @@ class WelcomeOnboardingCardView(LayoutView):
         welcome_text = (
             f"### Welcome to PriestyAI\n"
             f"Hello {self.author.mention}. Before we begin, please review our Terms of Service, "
-            f"Zero SLA Service Policy, and Privacy Policy.\n\n"
+            f"Zero SLA Service Policy, and Privacy Policy (/privacy).\n\n"
             f"-# This prompt will automatically expire in 90 seconds."
         )
         container.add_item(TextDisplay(welcome_text))

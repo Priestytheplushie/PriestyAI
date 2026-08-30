@@ -165,6 +165,101 @@ class FeedbackManager:
             cursor.execute(f"PRAGMA table_info({table_name})")
             return [col["name"] for col in cursor.fetchall()]
 
+    def get_table_pk_column(self, table_name: str) -> str:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            rows = cursor.fetchall()
+            for r in rows:
+                if r["pk"] > 0:
+                    return r["name"]
+            if rows:
+                return rows[0]["name"]
+            return "id"
+
+    def get_table_columns_info(self, table_name: str) -> list[dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            rows = cursor.fetchall()
+            return [
+                {
+                    "name": r["name"],
+                    "type": r["type"],
+                    "notnull": bool(r["notnull"]),
+                    "dflt_value": r["dflt_value"],
+                    "pk": bool(r["pk"])
+                }
+                for r in rows
+            ]
+
+    def get_table_row_by_pk(self, table_name: str, pk_col: str, pk_val: Any) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT * FROM {table_name} WHERE {pk_col} = ?", (str(pk_val),))
+            row = cursor.fetchone()
+            if row:
+                row_dict = dict(row)
+                for key, val in row_dict.items():
+                    if isinstance(val, str) and val.startswith("gAAAAA"):
+                        row_dict[key] = encryption_manager.decrypt_text(val)
+                return row_dict
+        return None
+
+    def update_table_row(self, table_name: str, pk_col: str, pk_val: Any, updated_dict: dict[str, Any]) -> bool:
+        if not updated_dict:
+            return False
+
+        sensitive_cols = {"memory_text", "history_json", "preferred_name", "special_instructions", "git_email", "content"}
+        set_clauses = []
+        params = []
+
+        for col, val in updated_dict.items():
+            set_clauses.append(f"{col} = ?")
+            if col in sensitive_cols and isinstance(val, str) and val.strip():
+                params.append(encryption_manager.encrypt_text(val.strip()))
+            else:
+                params.append(val)
+
+        params.append(str(pk_val))
+        set_str = ", ".join(set_clauses)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"UPDATE {table_name} SET {set_str} WHERE {pk_col} = ?", params)
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def insert_table_row(self, table_name: str, row_dict: dict[str, Any]) -> int:
+        if not row_dict:
+            return 0
+
+        sensitive_cols = {"memory_text", "history_json", "preferred_name", "special_instructions", "git_email", "content"}
+        cols = list(row_dict.keys())
+        placeholders = ", ".join(["?"] * len(cols))
+        cols_str = ", ".join(cols)
+        params = []
+
+        for col in cols:
+            val = row_dict[col]
+            if col in sensitive_cols and isinstance(val, str) and val.strip():
+                params.append(encryption_manager.encrypt_text(val.strip()))
+            else:
+                params.append(val)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"INSERT INTO {table_name} ({cols_str}) VALUES ({placeholders})", params)
+            conn.commit()
+            return cursor.lastrowid or 1
+
+    def delete_table_row(self, table_name: str, pk_col: str, pk_val: Any) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"DELETE FROM {table_name} WHERE {pk_col} = ?", (str(pk_val),))
+            conn.commit()
+            return cursor.rowcount > 0
+
     def get_table_rows(self, table_name: str, limit: int = 4, offset: int = 0) -> list[dict[str, Any]]:
         with self._get_connection() as conn:
             cursor = conn.cursor()

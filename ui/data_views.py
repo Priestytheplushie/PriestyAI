@@ -19,6 +19,8 @@ from core.config_manager import config_manager
 from core.feedback_manager import feedback_manager
 from config.settings import BOT_OWNER_ID
 from ui.modals import DynamicModalV2
+from agent.constants import OCTICONS_MAP
+from parsers.markdown_parser import DFM_EMOJI_MAP
 
 logger = logging.getLogger("PriestyAI.DataViews")
 
@@ -28,6 +30,12 @@ DATABASE_INFO_TEXT = (
     "• **Server Lore:** Shared knowledge and facts recorded for this server.\n"
     "• **Configs:** Your persona, preferred name, reasoning depth, and channel settings."
 )
+
+def truncate_str(text: str, max_chars: int = 160) -> str:
+    clean = str(text if text is not None else "").strip()
+    if len(clean) <= max_chars:
+        return clean
+    return clean[:max_chars].rstrip() + "..."
 
 def is_user_bot_admin(user: discord.User | discord.Member, client: discord.Client | None = None) -> bool:
     uid = str(user.id)
@@ -89,29 +97,29 @@ class DatabaseDashboardView(LayoutView):
                 label="Memories",
                 value="browse_memories",
                 description="View and edit your personal memories and preferences",
-                emoji="🧠"
+                emoji=OCTICONS_MAP["oct_checklist"]
             ),
             discord.SelectOption(
                 label="Server Lore",
                 value="browse_server_lore",
                 description="View and manage shared lore for this server",
-                emoji="🏰"
+                emoji=OCTICONS_MAP["oct_repo"]
             ),
             discord.SelectOption(
                 label="Configs",
                 value="browse_configs",
                 description="Inspect your persona, server settings, and channel rules",
-                emoji="⚙️"
+                emoji=OCTICONS_MAP["oct_terminal"]
             )
         ]
 
         if is_admin:
             browse_options.append(
                 discord.SelectOption(
-                    label="Admin Database & Feedback",
+                    label="Admin",
                     value="browse_admin",
-                    description="Owner & Team access: inspect all tables and review feedback",
-                    emoji="🛡️"
+                    description="Inspect all tables and review feedback",
+                    emoji=OCTICONS_MAP["oct_info"]
                 )
             )
 
@@ -235,7 +243,7 @@ class AdminDashboardView(LayoutView):
         tables = feedback_manager.get_all_tables()
 
         header_text = (
-            "# Admin Database & Feedback Panel\n"
+            f"# {OCTICONS_MAP['oct_info']} Admin Database & Feedback Panel\n"
             f"Logged in as Administrator: `{self.user.name}`\n\n"
             f"• **Feedback Tickets:** `{total_tickets}` total (`{total_open}` open)\n"
             f"• **Active Database Tables:** `{len(tables)}` tables"
@@ -248,13 +256,13 @@ class AdminDashboardView(LayoutView):
                 label="Feedback Tickets",
                 value="admin_feedback",
                 description=f"Inspect and resolve {total_tickets} feedback submissions",
-                emoji="📋"
+                emoji=OCTICONS_MAP["oct_checklist"]
             ),
             discord.SelectOption(
-                label="All Database Tables",
+                label="Data Explorer",
                 value="admin_tables",
-                description=f"Inspect decrypted rows across {len(tables)} SQLite tables",
-                emoji="🗄️"
+                description=f"Inspect and manage records across {len(tables)} tables",
+                emoji=OCTICONS_MAP["oct_repo"]
             )
         ]
 
@@ -312,8 +320,8 @@ class AdminFeedbackBrowserView(LayoutView):
         self.current_page = max(0, min(self.current_page, total_pages - 1))
 
         header_text = (
-            f"# Feedback Tickets ({self.status_filter.capitalize()})\n"
-            f"Showing `{total_tickets}` ticket(s) recorded in SQLite.\n"
+            f"# {OCTICONS_MAP['oct_checklist']} Feedback Tickets ({self.status_filter.capitalize()})\n"
+            f"Showing `{total_tickets}` ticket(s) recorded in database.\n"
             f"Click **View** on any ticket to inspect full details, attachments, and update status."
         )
         container.add_item(TextDisplay(header_text))
@@ -337,7 +345,7 @@ class AdminFeedbackBrowserView(LayoutView):
                 t_content = t.get("content", "").strip()
                 t_created = t.get("created_at", "")
 
-                preview_text = (t_content[:140] + "...") if len(t_content) > 140 else t_content
+                preview_text = truncate_str(t_content, max_chars=120)
                 snippet = f"**Feedback Ticket - #{t_id}**\n`{t_type}` • Submitted by {t_user} (<@{t_uid}>) • Status: `{t_status}`\n> {preview_text}\n-# Created: `{t_created}`"
 
                 view_btn = Button(
@@ -430,7 +438,7 @@ class AdminFeedbackDetailView(LayoutView):
 
         location_str = f"Guild ID: `{t_gid or 'DM'}` • Channel ID: `{t_cid or 'DM'}`"
         header_text = (
-            f"# Feedback Ticket #{t_id}\n"
+            f"# {OCTICONS_MAP['oct_checklist']} Feedback Ticket #{t_id}\n"
             f"• **Category:** `{t_type}`\n"
             f"• **Status:** `{t_status}`\n"
             f"• **Submitted by:** {t_user} (<@{t_uid}> • ID: `{t_uid}`)\n"
@@ -440,7 +448,7 @@ class AdminFeedbackDetailView(LayoutView):
         container.add_item(TextDisplay(header_text))
         container.add_item(Separator(visible=True))
 
-        body_block = f"### Content:\n{t_content}"
+        body_block = f"### Content:\n{truncate_str(t_content, max_chars=1800)}"
         container.add_item(TextDisplay(body_block))
 
         if attachments:
@@ -453,7 +461,7 @@ class AdminFeedbackDetailView(LayoutView):
             container.add_item(TextDisplay("\n".join(att_lines)))
 
         container.add_item(Separator(visible=True))
-        container.add_item(TextDisplay(f"### Admin Notes:\n{t_notes}"))
+        container.add_item(TextDisplay(f"### Admin Notes:\n{truncate_str(t_notes, max_chars=800)}"))
         container.add_item(Separator(visible=True))
 
         in_review_btn = Button(label="Mark In Review", style=discord.ButtonStyle.secondary, custom_id="btn_stat_review")
@@ -556,9 +564,8 @@ class AdminTableExplorerView(LayoutView):
             )
 
         header_text = (
-            f"# Dynamic SQLite Table Explorer\n"
-            f"Inspecting table: `{self.selected_table}` (Decrypted on-the-fly)\n"
-            f"Select a table from the menu below to view its contents."
+            f"# {OCTICONS_MAP['oct_repo']} Data Explorer\n"
+            f"Table: `{self.selected_table}` • Select a table below to browse, add, inspect, or edit records."
         )
         container.add_item(TextDisplay(header_text))
         container.add_item(Separator(visible=True))
@@ -572,29 +579,52 @@ class AdminTableExplorerView(LayoutView):
         container.add_item(ActionRow(table_select))
         container.add_item(Separator(visible=True))
 
-        page_size = 3
+        add_record_btn = Button(
+            label="+ Add Record",
+            style=discord.ButtonStyle.success,
+            custom_id="btn_add_table_row"
+        )
+        add_record_btn.callback = self._on_add_record_clicked
+        container.add_item(ActionRow(add_record_btn))
+        container.add_item(Separator(visible=True))
+
+        page_size = 2
         rows = feedback_manager.get_table_rows(
             table_name=self.selected_table,
             limit=page_size,
             offset=self.current_page * page_size
         )
+        pk_col = feedback_manager.get_table_pk_column(self.selected_table)
 
         if not rows:
             container.add_item(TextDisplay(f"*Table `{self.selected_table}` is currently empty.*"))
         else:
             for idx, r in enumerate(rows):
-                lines = [f"**Row #{self.current_page * page_size + idx + 1}:**"]
-                for col_k, col_v in r.items():
+                pk_val = r.get(pk_col, idx + 1)
+                lines = [f"**`{self.selected_table}` Record #{pk_val}**"]
+                
+                visible_items = list(r.items())[:5]
+                for col_k, col_v in visible_items:
                     if col_k == "embedding":
-                        lines.append(f"• **{col_k}:** `<768-dim float vector blob>`")
+                        lines.append(f"• **{col_k}:** `<768-dim float blob>`")
                     else:
-                        str_val = str(col_v)
-                        if len(str_val) > 200:
-                            str_val = str_val[:200] + "..."
+                        str_val = truncate_str(col_v, max_chars=55)
                         lines.append(f"• **{col_k}:** {str_val}")
-                container.add_item(TextDisplay("\n".join(lines)))
-                if idx < len(rows) - 1:
-                    container.add_item(Separator(visible=True))
+
+                if len(r) > 5:
+                    lines.append(f"-# ... and {len(r) - 5} more columns")
+
+                snippet_text = "\n".join(lines)
+
+                inspect_edit_btn = Button(
+                    label="Inspect / Edit ↗",
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=f"btn_open_rec_{pk_val}_{idx}"
+                )
+                inspect_edit_btn.callback = self._create_open_record_callback(pk_col, pk_val)
+
+                section = Section(TextDisplay(snippet_text), accessory=inspect_edit_btn)
+                container.add_item(section)
 
         container.add_item(Separator(visible=True))
 
@@ -624,6 +654,73 @@ class AdminTableExplorerView(LayoutView):
         container.add_item(ActionRow(*row_items))
         self.add_item(container)
 
+    def _create_open_record_callback(self, pk_col: str, pk_val: Any):
+        async def callback(interaction: discord.Interaction):
+            row_data = feedback_manager.get_table_row_by_pk(self.selected_table, pk_col, pk_val)
+            if not row_data:
+                await interaction.response.send_message(content="Record not found.", ephemeral=True)
+                return
+
+            editor_view = AdminRecordEditorView(
+                user=self.user,
+                guild=self.guild,
+                channel=self.channel,
+                client=self.client,
+                selected_table=self.selected_table,
+                pk_col=pk_col,
+                pk_val=pk_val,
+                parent_explorer_view=self,
+                current_page=0
+            )
+            await interaction.response.edit_message(view=editor_view)
+
+        return callback
+
+    async def _on_add_record_clicked(self, interaction: discord.Interaction):
+        cols = feedback_manager.get_table_columns_info(self.selected_table)
+        fields = [
+            {
+                "type": "text_display",
+                "content": f"Insert a new record into table `{self.selected_table}`."
+            }
+        ]
+
+        insertable_cols = [c for c in cols if c["name"] not in ("id", "embedding", "created_at", "updated_at", "last_accessed_at", "last_active_at")]
+        for col_info in insertable_cols[:4]:
+            cname = col_info["name"]
+            is_long = "json" in cname or "content" in cname or "prompt" in cname or "text" in cname
+            fields.append({
+                "type": "text_input",
+                "custom_id": f"new_{cname}",
+                "label": f"{cname}"[:45],
+                "placeholder": f"Enter {cname}...",
+                "style": "paragraph" if is_long else "short",
+                "required": col_info["notnull"] and col_info["dflt_value"] is None
+            })
+
+        async def on_add_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+            new_row_dict = {}
+            for col_info in insertable_cols[:4]:
+                cname = col_info["name"]
+                field_key = f"new_{cname}"
+                if field_key in data:
+                    new_row_dict[cname] = data[field_key]
+
+            if new_row_dict:
+                feedback_manager.insert_table_row(self.selected_table, new_row_dict)
+
+            self.current_page = 0
+            self._build_layout()
+            await sub_inter.response.edit_message(view=self)
+
+        modal = DynamicModalV2(
+            title=f"Add to `{self.selected_table}`"[:45],
+            custom_id=f"modal_add_row_{self.selected_table}",
+            fields_schema=fields,
+            on_submit_callback=on_add_submit
+        )
+        await interaction.response.send_modal(modal)
+
     async def _on_table_selected(self, interaction: discord.Interaction):
         if interaction.data and "values" in interaction.data and interaction.data["values"]:
             self.selected_table = interaction.data["values"][0]
@@ -634,6 +731,221 @@ class AdminTableExplorerView(LayoutView):
     async def _on_back_clicked(self, interaction: discord.Interaction):
         view = AdminDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
         await interaction.response.edit_message(view=view)
+
+
+class AdminRecordEditorView(LayoutView):
+    READ_ONLY_COLUMNS = {"id", "embedding", "created_at", "updated_at", "last_accessed_at", "last_active_at"}
+
+    def __init__(
+        self,
+        user: discord.User | discord.Member,
+        guild: discord.Guild | None,
+        channel: discord.abc.Messageable | None,
+        client: discord.Client | None,
+        selected_table: str,
+        pk_col: str,
+        pk_val: Any,
+        parent_explorer_view: AdminTableExplorerView,
+        current_page: int = 0
+    ):
+        super().__init__(timeout=600)
+        self.user = user
+        self.guild = guild
+        self.channel = channel
+        self.client = client
+        self.selected_table = selected_table
+        self.pk_col = pk_col
+        self.pk_val = pk_val
+        self.parent_explorer_view = parent_explorer_view
+        self.current_page = current_page
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        container = Container()
+
+        row_data = feedback_manager.get_table_row_by_pk(self.selected_table, self.pk_col, self.pk_val)
+        if not row_data:
+            container.add_item(TextDisplay(f"# Record Not Found\nRecord #{self.pk_val} in `{self.selected_table}` no longer exists."))
+            back_btn = Button(label=f"◀ Back to `{self.selected_table}`", style=discord.ButtonStyle.primary, custom_id="btn_rec_not_found_back")
+            back_btn.callback = self._on_back_clicked
+            container.add_item(ActionRow(back_btn))
+            self.add_item(container)
+            return
+
+        all_cols_info = feedback_manager.get_table_columns_info(self.selected_table)
+        total_cols = len(all_cols_info)
+        page_size = 4
+        total_pages = max(1, (total_cols + page_size - 1) // page_size)
+        self.current_page = max(0, min(self.current_page, total_pages - 1))
+
+        header_text = (
+            f"# {OCTICONS_MAP['oct_checklist']} Record Editor: `{self.selected_table}` (PK: {self.pk_val})\n"
+            f"Showing fields {self.current_page * page_size + 1}–{min(total_cols, (self.current_page + 1) * page_size)} of `{total_cols}` total fields.\n"
+            f"Click **Edit** next to any field to modify it."
+        )
+        container.add_item(TextDisplay(header_text))
+        container.add_item(Separator(visible=True))
+
+        start_idx = self.current_page * page_size
+        page_cols = all_cols_info[start_idx:start_idx + page_size]
+
+        for col in page_cols:
+            cname = col["name"]
+            ctype = col["type"] or "TEXT"
+            cval = row_data.get(cname, "")
+            is_read_only = cname in self.READ_ONLY_COLUMNS or (cname == self.pk_col and self.pk_col == "id")
+
+            if cname == "embedding":
+                val_disp = "<768-dim float vector blob>"
+            elif cval is None:
+                val_disp = "*NULL*"
+            else:
+                str_val = str(cval)
+                val_disp = truncate_str(str_val, max_chars=180) or "*(empty string)*"
+
+            ro_tag = " `(Read-Only)`" if is_read_only else ""
+            field_display = f"**`{cname}`** ({ctype}){ro_tag}\n```{val_disp}```"
+
+            edit_btn = Button(
+                label="Edit",
+                style=discord.ButtonStyle.secondary,
+                disabled=is_read_only,
+                custom_id=f"btn_edit_col_{cname}"
+            )
+            edit_btn.callback = self._create_field_edit_callback(cname, str(cval if cval is not None else ""))
+
+            section = Section(TextDisplay(field_display), accessory=edit_btn)
+            container.add_item(section)
+
+        container.add_item(Separator(visible=True))
+
+        row_items = []
+        if total_pages > 1:
+            prev_btn = Button(label="▲ Prev Fields", style=discord.ButtonStyle.secondary, disabled=(self.current_page == 0), custom_id="btn_field_prev")
+            ind_btn = Button(label=f"Fields {self.current_page + 1}/{total_pages}", style=discord.ButtonStyle.secondary, disabled=True, custom_id="btn_field_ind")
+            next_btn = Button(label="▼ Next Fields", style=discord.ButtonStyle.secondary, disabled=(self.current_page >= total_pages - 1), custom_id="btn_field_next")
+
+            async def on_prev(inter: discord.Interaction):
+                self.current_page -= 1
+                self._build_layout()
+                await inter.response.edit_message(view=self)
+
+            async def on_next(inter: discord.Interaction):
+                self.current_page += 1
+                self._build_layout()
+                await inter.response.edit_message(view=self)
+
+            prev_btn.callback = on_prev
+            next_btn.callback = on_next
+            row_items.extend([prev_btn, ind_btn, next_btn])
+
+        del_rec_btn = Button(label="Delete Record", style=discord.ButtonStyle.danger, custom_id=f"btn_del_rec_{self.pk_val}")
+        del_rec_btn.callback = self._on_delete_record_clicked
+        row_items.append(del_rec_btn)
+
+        container.add_item(ActionRow(*row_items))
+
+        back_btn = Button(label=f"◀ Back to `{self.selected_table}`", style=discord.ButtonStyle.primary, custom_id="btn_rec_back_table")
+        back_btn.callback = self._on_back_clicked
+        container.add_item(ActionRow(back_btn))
+
+        self.add_item(container)
+
+    def _create_field_edit_callback(self, col_name: str, current_value: str):
+        async def callback(interaction: discord.Interaction):
+            is_long = (
+                len(current_value) > 60
+                or "json" in col_name
+                or "content" in col_name
+                or "prompt" in col_name
+                or "text" in col_name
+                or "notes" in col_name
+            )
+
+            fields = [
+                {
+                    "type": "text_display",
+                    "content": f"Editing column **`{col_name}`** in table `{self.selected_table}` (PK: {self.pk_val})."
+                },
+                {
+                    "type": "text_input",
+                    "custom_id": f"input_{col_name}",
+                    "label": f"{col_name}"[:45],
+                    "value": current_value[:4000],
+                    "style": "paragraph" if is_long else "short",
+                    "required": False,
+                    "max_length": 4000
+                }
+            ]
+
+            async def on_field_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+                new_val = data.get(f"input_{col_name}", "")
+                feedback_manager.update_table_row(
+                    self.selected_table,
+                    self.pk_col,
+                    self.pk_val,
+                    {col_name: new_val}
+                )
+                self._build_layout()
+                await sub_inter.response.edit_message(view=self)
+
+            modal = DynamicModalV2(
+                title=f"Edit `{col_name}`"[:45],
+                custom_id=f"modal_edit_field_{col_name}",
+                fields_schema=fields,
+                on_submit_callback=on_field_submit
+            )
+            await interaction.response.send_modal(modal)
+
+        return callback
+
+    async def _on_delete_record_clicked(self, interaction: discord.Interaction):
+        fields = [
+            {
+                "type": "text_display",
+                "content": (
+                    f"{DFM_EMOJI_MAP['gfm_caution']} **WARNING: Delete Record**\n\n"
+                    f"This will permanently delete record **#{self.pk_val}** from table `{self.selected_table}`.\n\n"
+                    f"To proceed, type **CONFIRM** below."
+                )
+            },
+            {
+                "type": "text_input",
+                "custom_id": "confirm_code",
+                "label": "Confirmation",
+                "description": "Type CONFIRM in uppercase to proceed",
+                "placeholder": "CONFIRM",
+                "style": "short",
+                "required": True,
+                "max_length": 10
+            }
+        ]
+
+        async def on_confirm_delete(sub_inter: discord.Interaction, data: dict[str, Any]):
+            typed = data.get("confirm_code", "").strip().upper()
+            if typed != "CONFIRM":
+                await sub_inter.response.send_message(
+                    content=f"{DFM_EMOJI_MAP['gfm_caution']} **Deletion Cancelled:** The confirmation did not match `CONFIRM`.",
+                    ephemeral=True
+                )
+                return
+
+            feedback_manager.delete_table_row(self.selected_table, self.pk_col, self.pk_val)
+            self.parent_explorer_view._build_layout()
+            await sub_inter.response.edit_message(view=self.parent_explorer_view)
+
+        modal = DynamicModalV2(
+            title=f"Delete Record #{self.pk_val}"[:45],
+            custom_id=f"modal_del_rec_{self.pk_val}",
+            fields_schema=fields,
+            on_submit_callback=on_confirm_delete
+        )
+        await interaction.response.send_modal(modal)
+
+    async def _on_back_clicked(self, interaction: discord.Interaction):
+        self.parent_explorer_view._build_layout()
+        await interaction.response.edit_message(view=self.parent_explorer_view)
 
 
 
@@ -658,7 +970,7 @@ class MemoriesBrowserView(LayoutView):
         self.current_page = max(0, min(self.current_page, total_pages - 1))
 
         header_text = (
-            "# Personal Memories\n"
+            f"# {OCTICONS_MAP['oct_checklist']} Personal Memories\n"
             "Facts and preferences saved across your conversations.\n"
             "Click **Edit** to modify a fact, or clear the text to delete it."
         )
@@ -676,7 +988,8 @@ class MemoriesBrowserView(LayoutView):
                 mem_text = mem["memory_text"]
                 created_raw = mem.get("created_at", "")
                 
-                display_content = f"**Fact #{mem_id}:**\n> {mem_text}\n-# Added: `{created_raw}`"
+                snippet = truncate_str(mem_text, max_chars=180)
+                display_content = f"**Fact #{mem_id}:**\n> {snippet}\n-# Added: `{created_raw}`"
                 
                 edit_btn = Button(
                     label="Edit",
@@ -778,7 +1091,7 @@ class ServerLoreBrowserView(LayoutView):
         container = Container()
 
         if not self.guild:
-            container.add_item(TextDisplay("# Server Lore\n*Server Lore is only available inside Discord servers.*"))
+            container.add_item(TextDisplay(f"# {OCTICONS_MAP['oct_repo']} Server Lore\n*Server Lore is only available inside Discord servers.*"))
             back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_lore_back_dm")
             back_btn.callback = self._on_back_clicked
             container.add_item(ActionRow(back_btn))
@@ -796,7 +1109,7 @@ class ServerLoreBrowserView(LayoutView):
         self.current_page = max(0, min(self.current_page, total_pages - 1))
 
         header_text = (
-            f"# Server Lore: {self.guild.name}\n"
+            f"# {OCTICONS_MAP['oct_repo']} Server Lore: {self.guild.name}\n"
             "Shared lore and facts recorded for this server.\n"
             + ("Click **Edit** to modify or clear text to delete." if is_admin else "*Viewing mode (requires Manage Server permission to edit).*")
         )
@@ -814,7 +1127,8 @@ class ServerLoreBrowserView(LayoutView):
                 lore_text = lore["memory_text"]
                 created_raw = lore.get("created_at", "")
                 
-                display_content = f"**Lore #{lore_id}:**\n> {lore_text}\n-# Recorded: `{created_raw}`"
+                snippet = truncate_str(lore_text, max_chars=180)
+                display_content = f"**Lore #{lore_id}:**\n> {snippet}\n-# Recorded: `{created_raw}`"
                 
                 if is_admin:
                     edit_btn = Button(label="Edit", style=discord.ButtonStyle.secondary, custom_id=f"btn_edit_lore_{lore_id}")
@@ -915,12 +1229,12 @@ class ConfigsBrowserView(LayoutView):
         c_cfg = config_manager.get_channel_config(getattr(self.channel, "id", 0)) if self.channel else None
 
         p_name = u_cfg.get("preferred_name") or "*None (Using Discord display name)*"
-        habits = u_cfg.get("special_instructions") or "*None set*"
+        habits = truncate_str(u_cfg.get("special_instructions") or "*None set*", max_chars=120)
         r_level = u_cfg.get("preferred_reasoning_level", "AUTO")
         mem_pol = u_cfg.get("user_memory_policy", "read_write")
 
         user_block = (
-            f"### 👤 User Persona\n"
+            f"### {OCTICONS_MAP['oct_checklist']} User Persona\n"
             f"• **Preferred Name:** `{p_name}`\n"
             f"• **Personal Context:** {habits}\n"
             f"• **Reasoning Preference:** `{r_level}`\n"
@@ -929,14 +1243,14 @@ class ConfigsBrowserView(LayoutView):
 
         server_block = ""
         if s_cfg and self.guild:
-            s_bio = s_cfg.get("server_bio") or "*Default*"
-            s_prompt = s_cfg.get("system_prompt") or "*None set*"
+            s_bio = truncate_str(s_cfg.get("server_bio") or "*Default*", max_chars=100)
+            s_prompt = truncate_str(s_cfg.get("system_prompt") or "*None set*", max_chars=100)
             s_ai_chans = s_cfg.get("ai_channels", [])
             s_ai_str = ", ".join([f"<#{cid}>" for cid in s_ai_chans]) if s_ai_chans else "*None designated*"
             s_access = s_cfg.get("access_behavior", "blacklist").capitalize()
 
             server_block = (
-                f"\n\n### 🏰 Server Configs ({self.guild.name})\n"
+                f"\n\n### {OCTICONS_MAP['oct_repo']} Server Configs ({self.guild.name})\n"
                 f"• **Server Bio:** {s_bio}\n"
                 f"• **Server Prompt:** {s_prompt}\n"
                 f"• **AI Channels:** {s_ai_str}\n"
@@ -945,13 +1259,14 @@ class ConfigsBrowserView(LayoutView):
 
         channel_block = ""
         if c_cfg and self.channel and hasattr(self.channel, "name"):
-            c_prompt = c_cfg.get("system_prompt") or "*Inherits Server Prompt*"
+            c_prompt = truncate_str(c_cfg.get("system_prompt") or "*Inherits Server Prompt*", max_chars=100)
             channel_block = (
-                f"\n\n### 💬 Channel Directives (#{self.channel.name})\n"
+                f"\n\n### {OCTICONS_MAP['oct_terminal']} Channel Directives (#{self.channel.name})\n"
                 f"• **Prompt Override:** {c_prompt}"
             )
 
-        container.add_item(TextDisplay(f"# Configs\n{user_block}{server_block}{channel_block}"))
+        full_config_str = truncate_str(f"# Configs\n{user_block}{server_block}{channel_block}", max_chars=3200)
+        container.add_item(TextDisplay(full_config_str))
         container.add_item(Separator(visible=True))
 
         back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_cfg_back_dash")
@@ -982,7 +1297,7 @@ class SearchResultsView(LayoutView):
             query=self.query,
             user_id=self.user.id,
             guild_id=self.guild.id if self.guild else None,
-            top_k=6
+            top_k=4
         )
 
         user_mems = recalled.get("user_memories", [])
@@ -990,7 +1305,7 @@ class SearchResultsView(LayoutView):
         total_found = len(user_mems) + len(server_lore)
 
         header_text = (
-            f"# Search: \"{self.query}\"\n"
+            f"# {OCTICONS_MAP['oct_search']} Search: \"{self.query}\"\n"
             f"Found `{total_found}` matching record(s)."
         )
         container.add_item(TextDisplay(header_text))
@@ -1002,12 +1317,13 @@ class SearchResultsView(LayoutView):
             for mem in user_mems:
                 mem_id = mem["id"]
                 mem_text = mem["text"]
+                snippet = truncate_str(mem_text, max_chars=180)
 
                 edit_btn = Button(label="Edit", style=discord.ButtonStyle.secondary, custom_id=f"btn_s_edit_mem_{mem_id}")
                 edit_btn.callback = self._create_mem_edit_callback(mem_id, mem_text)
 
                 section = Section(
-                    TextDisplay(f"👤 **User Memory #{mem_id}:**\n> {mem_text}"),
+                    TextDisplay(f"{OCTICONS_MAP['oct_checklist']} **User Memory #{mem_id}:**\n> {snippet}"),
                     accessory=edit_btn
                 )
                 container.add_item(section)
@@ -1015,9 +1331,10 @@ class SearchResultsView(LayoutView):
             for lore in server_lore:
                 lore_id = lore["id"]
                 lore_text = lore["text"]
+                snippet = truncate_str(lore_text, max_chars=180)
 
                 section = Section(
-                    TextDisplay(f"🏰 **Server Lore #{lore_id}:**\n> {lore_text}")
+                    TextDisplay(f"{OCTICONS_MAP['oct_repo']} **Server Lore #{lore_id}:**\n> {snippet}")
                 )
                 container.add_item(section)
 
@@ -1088,8 +1405,8 @@ class DataDeletionView(LayoutView):
             is_admin = self.user.guild_permissions.administrator or (self.guild.owner_id == self.user.id)
 
         header_text = (
-            "# Delete Data\n"
-            "Choose what you want to remove. Deletions cannot be undone."
+            f"# {DFM_EMOJI_MAP['gfm_warning']} Delete Data\n"
+            "Choose what you want to remove. A confirmation prompt will appear before deleting."
         )
         container.add_item(TextDisplay(header_text))
         container.add_item(Separator(visible=True))
@@ -1099,19 +1416,19 @@ class DataDeletionView(LayoutView):
                 label="Delete Memories",
                 value="del_memories",
                 description="Deletes all personal memory facts and saved preferences",
-                emoji="🧠"
+                emoji=OCTICONS_MAP["oct_checklist"]
             ),
             discord.SelectOption(
                 label="Delete Configs",
                 value="del_configs",
                 description="Resets preferred name, custom instructions, and persona",
-                emoji="⚙️"
+                emoji=OCTICONS_MAP["oct_terminal"]
             ),
             discord.SelectOption(
                 label="Delete Everything",
                 value="del_everything",
                 description="Deletes all your memories, configs, and chat history",
-                emoji="💥"
+                emoji=DFM_EMOJI_MAP["gfm_caution"]
             )
         ]
 
@@ -1121,7 +1438,7 @@ class DataDeletionView(LayoutView):
                     label="Delete Server Lore",
                     value="del_server_lore",
                     description="Deletes all server lore recorded for this guild",
-                    emoji="🏰"
+                    emoji=OCTICONS_MAP["oct_repo"]
                 )
             )
 
@@ -1147,42 +1464,109 @@ class DataDeletionView(LayoutView):
 
         choice = interaction.data["values"][0]
 
-        if choice == "del_memories":
-            count = memory_manager.delete_all_user_memories(self.user.id)
-            msg = f"Deleted `{count}` personal memory record(s)."
-
-        elif choice == "del_configs":
-            config_manager.reset_config("user", self.user.id)
-            msg = "Your preferred name and custom persona settings have been reset."
-
-        elif choice == "del_everything":
-            res = memory_manager.purge_entire_user_data(self.user.id)
-            msg = (
-                f"All your data has been deleted:\n"
-                f"• Memories deleted: `{res.get('memories', 0)}`\n"
-                f"• Configs reset: `{res.get('user_configs', 0)}`\n"
-                f"• Chat sessions cleared: `{res.get('chat_sessions', 0)}`\n"
-                f"• Generation history cleared: `{res.get('message_generations', 0)}`"
+        warnings_map = {
+            "del_memories": (
+                "Delete Memories",
+                f"{DFM_EMOJI_MAP['gfm_warning']} **WARNING: Irreversible Action**\n\n"
+                "This will permanently delete all personal memories, facts, and conversation preferences saved for your account.\n\n"
+                "To proceed, type **CONFIRM** below."
+            ),
+            "del_configs": (
+                "Reset Configs",
+                f"{DFM_EMOJI_MAP['gfm_warning']} **WARNING: Irreversible Action**\n\n"
+                "This will reset your custom persona, preferred name, Git credentials, and reasoning settings back to defaults.\n\n"
+                "To proceed, type **CONFIRM** below."
+            ),
+            "del_everything": (
+                "Full Account Data Purge",
+                f"{DFM_EMOJI_MAP['gfm_caution']} **CRITICAL WARNING: Irreversible Action**\n\n"
+                "This will permanently delete ALL data associated with your account:\n"
+                "• All personal memories and preferences\n"
+                "• All user persona configurations and Git credentials\n"
+                "• All multi-turn chat session logs\n"
+                "• All message generation histories\n\n"
+                "To proceed, type **CONFIRM** below."
+            ),
+            "del_server_lore": (
+                "Delete Server Lore",
+                f"{DFM_EMOJI_MAP['gfm_warning']} **WARNING: Irreversible Action**\n\n"
+                f"This will permanently delete all shared server lore and project facts recorded for **{self.guild.name if self.guild else 'this server'}**.\n\n"
+                "To proceed, type **CONFIRM** below."
             )
+        }
 
-        elif choice == "del_server_lore" and self.guild:
-            count = memory_manager.delete_all_server_lore(self.guild.id)
-            msg = f"Removed `{count}` server lore record(s) for **{self.guild.name}**."
+        modal_title, warning_body = warnings_map.get(choice, ("Confirm Deletion", "Type CONFIRM below to execute deletion."))
 
-        else:
-            msg = "No action taken."
+        fields = [
+            {
+                "type": "text_display",
+                "content": warning_body
+            },
+            {
+                "type": "text_input",
+                "custom_id": "confirm_code",
+                "label": "Confirmation",
+                "description": "Type CONFIRM in uppercase to proceed",
+                "placeholder": "CONFIRM",
+                "style": "short",
+                "required": True,
+                "max_length": 10
+            }
+        ]
 
-        container = Container()
-        container.add_item(TextDisplay(f"# Deleted\n{msg}"))
-        container.add_item(Separator(visible=True))
+        async def on_modal_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+            typed_confirm = data.get("confirm_code", "").strip().upper()
+            if typed_confirm != "CONFIRM":
+                await sub_inter.response.send_message(
+                    content=f"{DFM_EMOJI_MAP['gfm_caution']} **Deletion Cancelled:** The confirmation text did not match `CONFIRM`. No data was deleted.",
+                    ephemeral=True
+                )
+                return
 
-        back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_del_done_back")
-        back_btn.callback = self._on_back_clicked
-        container.add_item(ActionRow(back_btn))
+            if choice == "del_memories":
+                count = memory_manager.delete_all_user_memories(self.user.id)
+                msg = f"Deleted `{count}` personal memory record(s)."
 
-        self.clear_items()
-        self.add_item(container)
-        await interaction.response.edit_message(view=self)
+            elif choice == "del_configs":
+                config_manager.reset_config("user", self.user.id)
+                msg = "Your preferred name and custom persona settings have been reset."
+
+            elif choice == "del_everything":
+                res = memory_manager.purge_entire_user_data(self.user.id)
+                msg = (
+                    f"All your data has been deleted:\n"
+                    f"• Memories deleted: `{res.get('memories', 0)}`\n"
+                    f"• Configs reset: `{res.get('user_configs', 0)}`\n"
+                    f"• Chat sessions cleared: `{res.get('chat_sessions', 0)}`\n"
+                    f"• Generation history cleared: `{res.get('message_generations', 0)}`"
+                )
+
+            elif choice == "del_server_lore" and self.guild:
+                count = memory_manager.delete_all_server_lore(self.guild.id)
+                msg = f"Removed `{count}` server lore record(s) for **{self.guild.name}**."
+
+            else:
+                msg = "No action taken."
+
+            container = Container()
+            container.add_item(TextDisplay(f"# {OCTICONS_MAP['oct_check']} Deleted\n{msg}"))
+            container.add_item(Separator(visible=True))
+
+            back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_del_done_back")
+            back_btn.callback = self._on_back_clicked
+            container.add_item(ActionRow(back_btn))
+
+            self.clear_items()
+            self.add_item(container)
+            await sub_inter.response.edit_message(view=self)
+
+        modal = DynamicModalV2(
+            title=f"{modal_title}"[:45],
+            custom_id=f"modal_confirm_delete_{choice}",
+            fields_schema=fields,
+            on_submit_callback=on_modal_submit
+        )
+        await interaction.response.send_modal(modal)
 
     async def _on_back_clicked(self, interaction: discord.Interaction):
         dash = DatabaseDashboardView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)

@@ -43,7 +43,7 @@ class GitManager:
     @staticmethod
     async def detect_code_changes(workspace_path: str) -> tuple[bool, list[str], dict[str, Any]]:
         if not os.path.exists(workspace_path):
-            return False, [], {"additions": 0, "deletions": 0}
+            return False, [], {"additions": 0, "deletions": 0, "total_files": 0}
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -67,7 +67,7 @@ class GitManager:
                         code_files.append(filepath)
 
             if not code_files:
-                return False, [], {"additions": 0, "deletions": 0}
+                return False, [], {"additions": 0, "deletions": 0, "total_files": 0}
 
             diff_proc = await asyncio.create_subprocess_exec(
                 "git", "diff", "--shortstat",
@@ -90,7 +90,7 @@ class GitManager:
 
         except Exception as e:
             logger.warning(f"[GitManager] Status detection failed: {e}")
-            return False, [], {"additions": 0, "deletions": 0}
+            return False, [], {"additions": 0, "deletions": 0, "total_files": 0}
 
     @staticmethod
     def format_feature_branch_name(prompt_or_title: str) -> str:
@@ -104,14 +104,15 @@ class GitManager:
         initial_prompt: str,
         changed_files: list[str],
         task_summary: str = ""
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, str]:
+        branch_slug = GitManager.format_feature_branch_name(initial_prompt)
         client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite", fallback=True)
         default_commit = f"feat: implement {initial_prompt[:45]}"
         default_pr_title = f"feat: {initial_prompt[:60]}"
         default_pr_desc = f"## Overview\n{task_summary or initial_prompt}\n\n### Modified Files\n" + "\n".join([f"- `{f}`" for f in changed_files[:10]])
 
         if not client:
-            return default_commit, default_pr_title, default_pr_desc
+            return default_commit, default_pr_title, default_pr_desc, branch_slug
 
         instruction = (
             "You are PriestyAI. Draft GitHub Pull Request metadata for these workspace code changes.\n"
@@ -143,19 +144,22 @@ class GitManager:
                 return (
                     data.get("commit_message", default_commit),
                     data.get("pr_title", default_pr_title),
-                    data.get("pr_description", default_pr_desc)
+                    data.get("pr_description", default_pr_desc),
+                    branch_slug
                 )
         except Exception as e:
             logger.debug(f"[GitManager] LLM PR metadata generation fallback: {e}")
 
-        return default_commit, default_pr_title, default_pr_desc
+        return default_commit, default_pr_title, default_pr_desc, branch_slug
 
     @staticmethod
     async def stage_and_commit(
         workspace_path: str,
         commit_message: str,
-        signoffs: list[dict[str, Any]]
+        signoffs: list[dict[str, Any]],
+        branch_name: str = "priestyai/feature-update"
     ) -> tuple[bool, str]:
+        
         await asyncio.create_subprocess_exec("git", "config", "user.name", GITHUB_APP_BOT_NAME, cwd=workspace_path)
         await asyncio.create_subprocess_exec("git", "config", "user.email", GITHUB_APP_BOT_EMAIL, cwd=workspace_path)
 
@@ -163,7 +167,7 @@ class GitManager:
         for s in signoffs:
             g_name = s.get("git_name", "").strip()
             g_email = s.get("git_email", "").strip()
-            if g_name and g_email and "@" in g_email:
+            if g_name and g_email and "@" in g_email and not s.get("is_anonymous"):
                 commit_body_lines.append(f"Co-authored-by: {g_name} <{g_email}>")
 
         full_commit_text = "\n".join(commit_body_lines).strip()
@@ -184,7 +188,7 @@ class GitManager:
             )
             stdout, stderr = await asyncio.wait_for(commit_proc.communicate(), timeout=8.0)
             if commit_proc.returncode == 0:
-                logger.info(f"[GitManager] Successfully committed {len(code_files)} code file(s).")
+                logger.info(f"[GitManager] Successfully committed {len(code_files)} code file(s) locally.")
                 return True, "Commit created successfully."
             else:
                 return False, f"Git commit failed: {stderr.decode()}"
@@ -200,18 +204,95 @@ class GitManager:
         branch_name: str,
         pr_title: str,
         pr_body: str,
-        token: str
+        signoffs: list[dict[str, Any]] | None = None,
+        token: str | None = None,
+        changed_files: list[str] | None = None
     ) -> dict[str, Any]:
         _, owner, repo = normalize_repo_url(repo_url)
         if not owner or not repo:
             return {"error": f"Invalid repository URL '{repo_url}'."}
 
-        auth_remote_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+        if not token:
+            token, _ = await github_app_client.get_installation_token_for_repo(owner, repo)
 
+        if not token:
+            return {"error": f"GitHub App is not installed on '{owner}/{repo}'. Please install the app to proceed."}
+
+        base_branch = await github_app_client.get_default_branch(owner, repo, token=token)
+
+        signoffs_list = signoffs or []
+        commit_body_lines = [pr_title.strip(), ""]
+        for s in signoffs_list:
+            g_name = s.get("git_name", "").strip()
+            g_email = s.get("git_email", "").strip()
+            if g_name and g_email and "@" in g_email and not s.get("is_anonymous"):
+                commit_body_lines.append(f"Co-authored-by: {g_name} <{g_email}>")
+
+        full_commit_msg = "\n".join(commit_body_lines).strip()
+
+        files_data: list[dict[str, Any]] = []
+        target_files = changed_files or []
+
+        if not target_files:
+            _, detected_files, _ = await GitManager.detect_code_changes(workspace_path)
+            target_files = detected_files
+
+        for rel_path in target_files:
+            if is_scratchpad_file(rel_path):
+                continue
+
+            full_f_path = os.path.join(workspace_path, rel_path)
+            if os.path.exists(full_f_path):
+                try:
+                    with open(full_f_path, "r", encoding="utf-8", errors="replace") as f_obj:
+                        file_text = f_obj.read()
+                    files_data.append({
+                        "path": rel_path.replace("\\", "/").lstrip("/"),
+                        "content": file_text
+                    })
+                except Exception as read_err:
+                    logger.warning(f"[GitManager] Failed to read {rel_path} for API commit: {read_err}")
+            else:
+                files_data.append({
+                    "path": rel_path.replace("\\", "/").lstrip("/"),
+                    "deleted": True
+                })
+
+        if files_data:
+            logger.info(f"[GitManager] Creating GitHub API verified commit ({len(files_data)} file(s)) on {owner}/{repo}...")
+            api_res = await github_app_client.create_api_verified_commit_and_branch(
+                owner=owner,
+                repo=repo,
+                branch_name=branch_name,
+                base_branch=base_branch,
+                commit_message=full_commit_msg,
+                files_data=files_data,
+                token=token
+            )
+
+            if "error" not in api_res:
+                logger.info(f"[GitManager] Verified commit successful ({api_res.get('commit_sha', '')[:7]}). Opening Pull Request...")
+                pr_res = await github_app_client.create_pull_request(
+                    owner=owner,
+                    repo=repo,
+                    title=pr_title,
+                    body=pr_body,
+                    head_branch=branch_name,
+                    base_branch=base_branch,
+                    token=token
+                )
+                if "error" not in pr_res:
+                    pr_res["verified"] = api_res.get("verified", True)
+                    pr_res["commit_sha"] = api_res.get("commit_sha")
+                    return pr_res
+            else:
+                logger.warning(f"[GitManager] API verified commit creation failed ({api_res['error']}). Falling back to git push...")
+
+        auth_remote_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
         try:
             await asyncio.create_subprocess_exec("git", "branch", "-M", branch_name, cwd=workspace_path)
+            logger.info(f"[GitManager] Pushing branch '{branch_name}' via CLI fallback...")
 
-            logger.info(f"[GitManager] Pushing branch '{branch_name}' to {owner}/{repo} via Installation Token...")
             push_proc = await asyncio.create_subprocess_exec(
                 "git", "push", "-u", auth_remote_url, branch_name, "--force",
                 cwd=workspace_path,
@@ -224,8 +305,6 @@ class GitManager:
                 err_str = stderr.decode("utf-8", errors="replace")
                 logger.error(f"[GitManager] git push failed ({push_proc.returncode}): {err_str}")
                 return {"error": f"Failed to push branch to GitHub: {err_str}"}
-
-            base_branch = await github_app_client.get_default_branch(owner, repo, token=token)
 
             pr_res = await github_app_client.create_pull_request(
                 owner=owner,

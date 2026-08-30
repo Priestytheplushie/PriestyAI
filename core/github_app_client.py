@@ -291,7 +291,7 @@ class GitHubAppClient:
         branch_name: str,
         base_branch: str,
         commit_message: str,
-        files_data: list[dict[str, str]],
+        files_data: list[dict[str, Any]],
         token: str
     ) -> dict[str, Any]:
         headers = {
@@ -301,26 +301,65 @@ class GitHubAppClient:
             "User-Agent": "PriestyAI-DiscordBot"
         }
 
-        async with httpx.AsyncClient(timeout=25.0) as client:
-            ref_resp = await client.get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/ref/heads/{base_branch}", headers=headers)
-            if ref_resp.status_code != 200:
-                return {"error": f"Base branch '{base_branch}' not found: {ref_resp.text}"}
+        clean_branch = branch_name.replace("refs/heads/", "")
+        clean_base = base_branch.replace("refs/heads/", "")
 
-            parent_commit_sha = ref_resp.json()["object"]["sha"]
-            commit_resp = await client.get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/commits/{parent_commit_sha}", headers=headers)
-            if commit_resp.status_code != 200:
-                return {"error": f"Could not fetch parent commit: {commit_resp.text}"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            branch_ref_resp = await client.get(
+                f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/ref/heads/{clean_branch}",
+                headers=headers
+            )
+            is_branch_update = (branch_ref_resp.status_code == 200)
 
-            base_tree_sha = commit_resp.json()["tree"]["sha"]
+            if is_branch_update:
+                parent_commit_sha = branch_ref_resp.json()["object"]["sha"]
+                logger.info(f"[GitHubApp] Branch '{clean_branch}' exists. Stacking on top of commit {parent_commit_sha[:7]}...")
+            else:
+                base_ref_resp = await client.get(
+                    f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/ref/heads/{clean_base}",
+                    headers=headers
+                )
+                if base_ref_resp.status_code != 200:
+                    return {"error": f"Base branch '{clean_base}' not found: {base_ref_resp.text}"}
+                parent_commit_sha = base_ref_resp.json()["object"]["sha"]
+                logger.info(f"[GitHubApp] Creating new branch '{clean_branch}' off base '{clean_base}' ({parent_commit_sha[:7]})...")
+
+            commit_info_resp = await client.get(
+                f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/commits/{parent_commit_sha}",
+                headers=headers
+            )
+            if commit_info_resp.status_code != 200:
+                return {"error": f"Could not fetch parent commit object: {commit_info_resp.text}"}
+
+            base_tree_sha = commit_info_resp.json()["tree"]["sha"]
 
             tree_entries = []
             for f in files_data:
-                tree_entries.append({
-                    "path": f["path"],
-                    "mode": "100644",
-                    "type": "blob",
-                    "content": f["content"]
-                })
+                f_path = f["path"].replace("\\", "/").lstrip("/")
+                if f.get("deleted"):
+                    tree_entries.append({
+                        "path": f_path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": None
+                    })
+                elif "content" in f:
+                    tree_entries.append({
+                        "path": f_path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "content": f["content"]
+                    })
+                elif "sha" in f:
+                    tree_entries.append({
+                        "path": f_path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": f["sha"]
+                    })
+
+            if not tree_entries:
+                return {"error": "No file changes provided for verified commit creation."}
 
             tree_resp = await client.post(
                 f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees",
@@ -349,12 +388,15 @@ class GitHubAppClient:
             new_commit_data = c_resp.json()
             new_commit_sha = new_commit_data["sha"]
             verification = new_commit_data.get("verification", {})
-            logger.info(f"[GitHubApp] Created API commit {new_commit_sha[:7]} (Verified: {verification.get('verified')})")
+            is_verified = bool(verification.get("verified", False))
+            logger.info(
+                f"[GitHubApp] Created API commit {new_commit_sha[:7]} "
+                f"(Verified Badge: {is_verified}, Reason: '{verification.get('reason')}')"
+            )
 
-            check_ref_resp = await client.get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/ref/heads/{branch_name}", headers=headers)
-            if check_ref_resp.status_code == 200:
+            if is_branch_update:
                 update_ref_resp = await client.patch(
-                    f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{branch_name}",
+                    f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}",
                     headers=headers,
                     json={"sha": new_commit_sha, "force": True}
                 )
@@ -364,7 +406,7 @@ class GitHubAppClient:
                 create_ref_resp = await client.post(
                     f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs",
                     headers=headers,
-                    json={"ref": f"refs/heads/{branch_name}", "sha": new_commit_sha}
+                    json={"ref": f"refs/heads/{clean_branch}", "sha": new_commit_sha}
                 )
                 if create_ref_resp.status_code not in (200, 201):
                     return {"error": f"Failed to create branch ref: {create_ref_resp.text}"}
@@ -372,8 +414,9 @@ class GitHubAppClient:
             return {
                 "status": "success",
                 "commit_sha": new_commit_sha,
-                "branch": branch_name,
-                "verified": verification.get("verified", False)
+                "branch": clean_branch,
+                "verified": is_verified,
+                "verification_reason": verification.get("reason", "valid")
             }
 
     async def create_pull_request(
@@ -399,11 +442,14 @@ class GitHubAppClient:
             "User-Agent": "PriestyAI-DiscordBot"
         }
 
+        clean_head = head_branch.replace("refs/heads/", "").strip()
+        clean_base = base_branch.replace("refs/heads/", "").strip()
+
         payload = {
             "title": title.strip(),
             "body": body.strip(),
-            "head": head_branch.strip(),
-            "base": base_branch.strip(),
+            "head": clean_head,
+            "base": clean_base,
             "maintainer_can_modify": True
         }
 
@@ -413,7 +459,7 @@ class GitHubAppClient:
                 resp = await client.post(url, headers=headers, json=payload)
                 if resp.status_code in (200, 201):
                     data = resp.json()
-                    logger.info(f"[GitHubApp] Successfully created PR #{data.get('number')} on {owner}/{repo}: {data.get('html_url')}")
+                    logger.info(f"[GitHubApp] Successfully opened PR #{data.get('number')} on {owner}/{repo}: {data.get('html_url')}")
                     return {
                         "status": "created",
                         "pr_number": data.get("number"),
@@ -422,10 +468,37 @@ class GitHubAppClient:
                         "state": data.get("state"),
                         "created_at": data.get("created_at")
                     }
-                else:
-                    err_msg = resp.json().get("message", resp.text)
-                    logger.warning(f"[GitHubApp] PR creation returned {resp.status_code}: {err_msg}")
-                    return {"error": f"GitHub API error ({resp.status_code}): {err_msg}"}
+
+                if resp.status_code == 422:
+                    logger.info(f"[GitHubApp] PR for {clean_head} already exists. Querying existing open pull request...")
+                    list_resp = await client.get(
+                        f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls?head={owner}:{clean_head}&state=open",
+                        headers=headers
+                    )
+                    if list_resp.status_code == 200:
+                        existing_prs = list_resp.json()
+                        if existing_prs and len(existing_prs) > 0:
+                            existing_pr = existing_prs[0]
+                            pr_num = existing_pr["number"]
+                            
+                            await client.patch(
+                                f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_num}",
+                                headers=headers,
+                                json={"title": title.strip(), "body": body.strip()}
+                            )
+                            logger.info(f"[GitHubApp] Updated existing PR #{pr_num} on {owner}/{repo}")
+                            return {
+                                "status": "updated",
+                                "pr_number": pr_num,
+                                "html_url": existing_pr.get("html_url"),
+                                "title": title.strip(),
+                                "state": existing_pr.get("state"),
+                                "created_at": existing_pr.get("created_at")
+                            }
+
+                err_msg = resp.json().get("message", resp.text)
+                logger.warning(f"[GitHubApp] PR creation returned {resp.status_code}: {err_msg}")
+                return {"error": f"GitHub API error ({resp.status_code}): {err_msg}"}
         except Exception as e:
             logger.error(f"[GitHubApp] Failed to create pull request: {e}")
             return {"error": f"Failed to connect to GitHub API: {str(e)}"}

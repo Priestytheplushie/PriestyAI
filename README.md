@@ -168,7 +168,7 @@ The policies outlined below apply exclusively to users interacting with the **of
 
 ---
 
-## Third-Party Notices
+## Third-Party Licenses
 
 This project utilizes several open-source libraries, frameworks, and assets. For a full list of third-party attributions and licenses, please see the [NOTICE.md](NOTICE.md) file.
 

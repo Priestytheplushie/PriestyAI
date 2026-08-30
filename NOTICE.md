@@ -4,7 +4,7 @@ PriestyAI is built with and inspired by the following incredible open-source pro
 
 ### Core Frameworks & Runtimes
 *   **discord.py:** [MIT License](https://github.com/Rapptz/discord.py/blob/master/LICENSE)
-*   **Google Generative AI SDK for Python:** [Apache-2.0 License](https://github.com/google-gemini/generative-ai-python/blob/main/LICENSE)
+*   **Google Generative AI SDK for Python:** [Apache-2.0 License](https://github.com/googleapis/python-genai/blob/main/LICENSE)
 *   **SearXNG Metasearch Engine:** [AGPL-3.0 License](https://github.com/searxng/searxng/blob/master/LICENSE)
 *   **Playwright for Python:** [Apache-2.0 License](https://github.com/microsoft/playwright-python/blob/main/LICENSE)
 

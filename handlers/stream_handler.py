@@ -616,8 +616,6 @@ class DiscordStreamDispatcher:
             )
 
         self.sent_messages: list[discord.Message] = [existing_response_msg] if existing_response_msg else []
-        self.interaction_overflow_count = 1 if interaction else 0
-
         self.timeline: list[dict[str, Any]] = []
         self.staged_followups: list[dict[str, Any]] = []
         self.raw_attachment_buffers: list[dict[str, Any]] = []
@@ -839,13 +837,45 @@ class DiscordStreamDispatcher:
                                 await self.interaction.edit_original_response(view=layout_view, attachments=attachments_list)
                             else:
                                 await self.interaction.edit_original_response(view=layout_view)
+
+                            if not self.primary_message:
+                                try:
+                                    self.primary_message = await self.interaction.original_response()
+                                    if not self.sent_messages:
+                                        self.sent_messages.append(self.primary_message)
+                                    else:
+                                        self.sent_messages[0] = self.primary_message
+                                except Exception:
+                                    pass
                         else:
-                            if i >= self.interaction_overflow_count:
-                                if attachments_list is not discord.utils.MISSING:
-                                    await self.interaction.followup.send(view=layout_view, files=slice_files, ephemeral=self.is_ephemeral)
-                                else:
-                                    await self.interaction.followup.send(view=layout_view, ephemeral=self.is_ephemeral)
-                                self.interaction_overflow_count += 1
+                            if i < len(self.sent_messages):
+                                existing_followup = self.sent_messages[i]
+                                try:
+                                    if attachments_list is not discord.utils.MISSING:
+                                        await self.interaction.followup.edit_message(existing_followup.id, view=layout_view, attachments=attachments_list)
+                                    else:
+                                        await self.interaction.followup.edit_message(existing_followup.id, view=layout_view)
+                                except Exception as e:
+                                    logger.debug(f"Failed to edit followup message #{existing_followup.id}: {e}")
+                            else:
+                                try:
+                                    if slice_files:
+                                        new_followup = await self.interaction.followup.send(
+                                            view=layout_view,
+                                            files=slice_files,
+                                            ephemeral=self.is_ephemeral,
+                                            wait=True
+                                        )
+                                    else:
+                                        new_followup = await self.interaction.followup.send(
+                                            view=layout_view,
+                                            ephemeral=self.is_ephemeral,
+                                            wait=True
+                                        )
+                                    if new_followup:
+                                        self.sent_messages.append(new_followup)
+                                except Exception as e:
+                                    logger.warning(f"Failed to send interaction followup message: {e}")
                     else:
                         if i < len(self.sent_messages):
                             msg = self.sent_messages[i]
@@ -908,3 +938,10 @@ class DiscordStreamDispatcher:
         )
         if not self.primary_message and self.sent_messages:
             self.primary_message = self.sent_messages[0]
+        elif not self.primary_message and self.interaction:
+            try:
+                self.primary_message = await self.interaction.original_response()
+                if self.primary_message and self.primary_message not in self.sent_messages:
+                    self.sent_messages.insert(0, self.primary_message)
+            except Exception:
+                pass

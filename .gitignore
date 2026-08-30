@@ -1,26 +1,23 @@
-﻿.env
-*.env
+﻿# Environment & Secrets (NEVER COMMIT)
+.env
+.env.*
+!.env.example
 *.pem
 *.key
 *.p12
+*.cert
+token.txt
 github_app.pem
 
-temp/
-/temp/
-**/temp/
-temp_*.mp4
-archive/
-clean_project.py
-*.tmp
+# Python Virtual Environments & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
 .venv/
 venv/
 ENV/
 env/
 ENV/local/
-
-__pycache__/
-*.py[cod]
-*$py.class
 build/
 develop-eggs/
 dist/
@@ -38,21 +35,33 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
 .pytest_cache/
 .coverage
 htmlcov/
 .mypy_cache/
 
+# Databases, Workspaces & Temp Files
+*.db
+*.sqlite
+*.sqlite3
+priestyai.db
+temp/
+/temp/
+**/temp/
+temp_*.mp4
+archive/
+images/
+priesty_agent_workspaces/
+clean_project.py
+*.tmp
 prepare_assets.py
-print_project_tree.py
-tree_checker.py
 
+# OS, Editors & Backup Files
+.DS_Store
+Thumbs.db
 .vscode/
 *.code-workspace
 .idea/
 *.swp
 *~
-.DS_Store
-Thumbs.db
-*.db
+*.bak

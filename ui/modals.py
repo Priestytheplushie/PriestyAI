@@ -173,7 +173,7 @@ class DynamicModalV2(ui.Modal):
     def to_dict(self) -> dict[str, Any]:
         components_payload = []
         total_text_chars = 0
-        max_allowed_chars = 3750
+        max_allowed_chars = 3999
 
         for idx, field in enumerate(self.fields_schema):
             if isinstance(field, str):

@@ -15,12 +15,12 @@ We do not monitor, parse, or store passive channel messages from members who are
 ### 3. Third-Party Inference Sub-Processors & Data Handling
 To generate responses, user prompts and relevant context are transmitted to external AI providers via encrypted TLS connections:
 
-#### A. Default Bot Operations (Chat, Reasoning, Autonomous Agents, Search):
+### A. Default Bot Operations (Chat, Reasoning, Autonomous Agents, Search):
 - **Google LLC (Gemini API & Google AI Studio):** Handles general reasoning, embeddings, code analysis, and agent planning.
   - *Notice regarding Unpaid/Free Tier API Usage:* When operating on Google's unpaid API tiers, Google's terms specify that prompts and outputs may be processed and reviewed to develop and improve Google machine learning products and services. Do not submit unencrypted passwords, API secrets, or private personal credentials.
 - **Pollinations AI:** Serves fallback AI image generation requests.
 
-#### B. Multi-Model Generation Command (`/generate`):
+### B. Multi-Model Generation Command (`/generate`):
 The following external providers are ONLY invoked when you explicitly run the `/generate` command:
 - **Groq, Inc.:** High-speed LPU inference when selecting Groq models via `/generate`.
 - **OpenRouter:** Multi-model API gateway when selecting OpenRouter free-tier models via `/generate`.

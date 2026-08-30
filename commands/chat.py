@@ -32,8 +32,7 @@ from tools.registry import ToolExecutionContext
 from ui.modals import DynamicModalV2
 from ui.onboarding_views import (
     build_welcome_terms_modal,
-    build_terms_review_modal,
-    build_privacy_modal,
+    LegalDocumentViewerLayoutView,
     BannedUserNoticeView
 )
 
@@ -334,26 +333,15 @@ def setup_chat_commands(tree: app_commands.CommandTree):
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def terms_command(interaction: discord.Interaction):
-        if not config_manager.has_user_agreed(interaction.user.id):
-            async def on_terms_agreed(sub_inter: discord.Interaction):
-                await sub_inter.response.send_message(
-                    content="Terms Accepted: Thank you for agreeing to the Terms of Service & Safety Guidelines. You can now use all PriestyAI features.",
-                    ephemeral=True
-                )
-
-            modal = build_welcome_terms_modal(on_agree_callback=on_terms_agreed)
-            await interaction.response.send_modal(modal)
-            return
-
-        modal = build_terms_review_modal()
-        await interaction.response.send_modal(modal)
+        viewer = LegalDocumentViewerLayoutView(doc_type="terms", user=interaction.user, page=0)
+        await interaction.response.send_message(view=viewer, ephemeral=True)
 
     @tree.command(name="privacy", description="Review PriestyAI's Privacy Policy, data retention rules, and third-party disclosures")
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def privacy_command(interaction: discord.Interaction):
-        modal = build_privacy_modal()
-        await interaction.response.send_modal(modal)
+        viewer = LegalDocumentViewerLayoutView(doc_type="privacy", user=interaction.user, page=0)
+        await interaction.response.send_message(view=viewer, ephemeral=True)
 
     @tree.command(name="ask", description="Ask PriestyAI a quick question anywhere on Discord")
     @app_commands.allowed_installs(guilds=True, users=True)

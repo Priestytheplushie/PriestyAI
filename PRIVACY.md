@@ -1,7 +1,9 @@
 # Privacy Policy
 
 ### 1. Overview
-This Privacy Policy describes how PriestyAI ("the Service", "we", "our") collects, processes, and manages data when you interact with our Discord bot, commands, and autonomous workspace tools.
+This Privacy Policy describes how the **official, hosted instance** of PriestyAI ("the Service", "we", "our") collects, processes, and manages data when you interact with our Discord bot, slash commands, and autonomous workspace tools.
+
+*Note for Self-Hosters:* Independent self-hosted instances run on your own hardware, infrastructure, and API keys. Data storage, retention policies, and compliance obligations for self-hosted instances are entirely managed by the respective self-hoster.
 
 ### 2. Information Collected
 We collect only the minimum data required to facilitate conversational continuity and autonomous task execution:
@@ -32,9 +34,10 @@ The following external providers are ONLY invoked when you explicitly run the `/
 - **Encryption at Rest:** Sensitive database fields—including personal memory facts, multi-turn chat session logs, and personal configuration credentials—are cryptographically encrypted at rest using authenticated symmetric encryption (Fernet / AES with PBKDF2-HMAC-SHA256 key derivation).
 - **Workspace Isolation:** Temporary agent workspace directories and sandbox containers are automatically pruned after 24 hours of inactivity or upon session closure.
 
-### 5. User Control & Data Deletion (Right to Erasure)
+### 5. User Control & Data Deletion (Right to Erasure & Access)
 You maintain complete control over your stored data:
-- **Inspect Data:** Run `/data` at any time to inspect all stored personal facts, server lore, and configuration profiles.
+- **Export Data (Right of Access):** Run `/data` and click **Export** to immediately download a complete, decrypted JSON file containing all stored memories, custom personas, and chat history.
+- **Inspect Data:** Run `/data` at any time to inspect stored personal facts, server lore, and configuration profiles.
 - **Permanently Erase Data:** Select Delete in `/data` to immediately purge all memories, chat sessions, and generation history from our database.
 - **Opt Out of Memory:** Set your personal memory policy to Read-Only or Disabled in `/config` to prevent the bot from recording future facts.
 

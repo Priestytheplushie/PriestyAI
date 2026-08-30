@@ -325,7 +325,49 @@ class MemoryManager:
             conn.commit()
             return cursor.rowcount
 
+    def export_user_data_bundle(self, user_id: str | int) -> dict[str, Any]:
+        from core.config_manager import config_manager
+        uid_str = str(user_id)
+        u_cfg = config_manager.get_user_config(uid_str)
+        mems = self.get_all_memories_for_entity("user", uid_str)
+
+        sessions = []
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT session_id, channel_id, guild_id, history_json, created_at, last_active_at FROM chat_sessions WHERE creator_user_id = ?", (uid_str,))
+            for row in cursor.fetchall():
+                try:
+                    decrypted = encryption_manager.decrypt_text(row["history_json"])
+                    sessions.append({
+                        "session_id": row["session_id"],
+                        "channel_id": row["channel_id"],
+                        "guild_id": row["guild_id"],
+                        "history": json.loads(decrypted),
+                        "created_at": row["created_at"],
+                        "last_active_at": row["last_active_at"]
+                    })
+                except Exception:
+                    pass
+
+        return {
+            "user_id": uid_str,
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "user_config": u_cfg,
+            "memories": [
+                {
+                    "id": m["id"],
+                    "memory_text": m["memory_text"],
+                    "importance_score": m.get("importance_score", 0.7),
+                    "access_count": m.get("access_count", 0),
+                    "created_at": m.get("created_at", "")
+                }
+                for m in mems
+            ],
+            "chat_sessions": sessions
+        }
+
     def purge_entire_user_data(self, user_id: str | int) -> dict[str, int]:
+        from core.config_manager import config_manager
         uid_str = str(user_id)
         counts = {}
         with self._get_connection() as conn:

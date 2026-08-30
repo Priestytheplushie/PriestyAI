@@ -3,6 +3,9 @@
 ### 1. Overview & Service Scope
 PriestyAI ("the Service") is an open-source autonomous AI assistant, code reasoning engine, and workspace agent designed for Discord. By accessing, invoking, or interacting with the Service, you agree to comply with these Terms of Service, Discord's Community Guidelines, and applicable laws.
 
+**Scope of Agreement (Official Hosted Instance vs. Self-Hosting):**
+These Terms of Service govern your interaction with the **official, hosted instance** of PriestyAI on Discord. If you are self-hosting an independent instance from our open-source codebase, you operate on your own infrastructure and API credentials; the project authors assume zero liability, warranty, or operational responsibility for third-party self-hosted deployments.
+
 ### 2. Service Availability & Zero SLA Disclaimer
 The Service is provided strictly on an "AS IS" and "AS AVAILABLE" basis without any Service Level Agreement (Zero SLA) or warranty of uninterrupted 24/7 availability:
 - **Uptime & Maintenance:** The Service may experience unexpected outages, API rate limit delays, maintenance downtime, or functional modifications at any time without notice or liability.
@@ -31,7 +34,7 @@ All interactions are subject to real-time automated safety filtering:
 To maintain conversational continuity and workspace features, the Service stores prompts, generated deliverables, and factual preferences:
 - **Data Encryption:** Sensitive personal facts, chat session logs, and personal credentials stored in our database are cryptographically encrypted at rest.
 - **Passive Chat:** Background chat from third parties who are not interacting with the bot is never stored.
-- **Privacy & Self-Service:** Full self-service data management is available via `/data` (inspect/delete) and `/config` (memory opt-out).
+- **Privacy & Self-Service:** Full self-service data management is available via `/data` (export/inspect/delete) and `/config` (memory opt-out).
 
 ### 7. Disclaimer of Output Accuracy
 The Service generates outputs using probabilistic machine learning models. Generated code, mathematical proofs, and technical explanations may occasionally contain bugs or inaccuracies. You are responsible for independently validating all outputs prior to execution.

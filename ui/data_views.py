@@ -25,10 +25,11 @@ from parsers.markdown_parser import DFM_EMOJI_MAP
 logger = logging.getLogger("PriestyAI.DataViews")
 
 DATABASE_INFO_TEXT = (
-    "View, edit, or delete the data PriestyAI stores about you and your server.\n\n"
+    "View, export, edit, or delete the data PriestyAI stores about you and your server.\n\n"
     "• **Memories:** Facts and preferences saved from your conversations.\n"
     "• **Server Lore:** Shared knowledge and facts recorded for this server.\n"
-    "• **Configs:** Your persona, preferred name, reasoning depth, and channel settings."
+    "• **Configs:** Your persona, preferred name, reasoning depth, and channel settings.\n"
+    "• **Export:** 1-click download of all personal data in decrypted JSON format."
 )
 
 def truncate_str(text: str, max_chars: int = 160) -> str:
@@ -140,6 +141,14 @@ class DatabaseDashboardView(LayoutView):
         )
         close_btn.callback = self._on_close_clicked
 
+        export_btn = Button(
+            label="Export Data",
+            style=discord.ButtonStyle.secondary,
+            emoji="📥",
+            custom_id="btn_db_export"
+        )
+        export_btn.callback = self._on_export_clicked
+
         search_btn = Button(
             label="Search",
             style=discord.ButtonStyle.primary,
@@ -154,7 +163,7 @@ class DatabaseDashboardView(LayoutView):
         )
         delete_btn.callback = self._on_delete_nav_clicked
 
-        container.add_item(ActionRow(close_btn, search_btn, delete_btn))
+        container.add_item(ActionRow(close_btn, export_btn, search_btn, delete_btn))
         self.add_item(container)
 
     async def _on_browse_selected(self, interaction: discord.Interaction):
@@ -189,6 +198,19 @@ class DatabaseDashboardView(LayoutView):
             except Exception:
                 pass
 
+    async def _on_export_clicked(self, interaction: discord.Interaction):
+        data_bundle = memory_manager.export_user_data_bundle(self.user.id)
+        json_bytes = json.dumps(data_bundle, indent=2, ensure_ascii=False).encode("utf-8")
+        file_obj = discord.File(
+            io.BytesIO(json_bytes),
+            filename=f"priestyai_data_export_{self.user.id}.json"
+        )
+        await interaction.response.send_message(
+            content="📥 **Your Data Export is Ready:** Attached is a full, decrypted JSON file of all personal facts, user persona settings, and chat sessions stored for your account.",
+            file=file_obj,
+            ephemeral=True
+        )
+
     async def _on_search_clicked(self, interaction: discord.Interaction):
         fields = [
             {
@@ -222,7 +244,6 @@ class DatabaseDashboardView(LayoutView):
     async def _on_delete_nav_clicked(self, interaction: discord.Interaction):
         view = DataDeletionView(user=self.user, guild=self.guild, channel=self.channel, client=self.client)
         await interaction.response.edit_message(view=view)
-
 
 
 class AdminDashboardView(LayoutView):

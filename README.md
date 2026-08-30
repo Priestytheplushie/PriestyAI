@@ -156,6 +156,18 @@ PriestyAI/
 
 ---
 
+## Terms & Privacy (Official Hosted Instance)
+
+The policies outlined below apply exclusively to users interacting with the **official, hosted instance** of PriestyAI on Discord:
+
+* **[Terms of Service](TERMS.md)**: Governs service availability (Zero SLA disclaimer), acceptable use policies, safety filtering, and moderation enforcement.
+* **[Privacy Policy](PRIVACY.md)**: Details data collection, at-rest database encryption, third-party inference sub-processors (Google Gemini, Groq, OpenRouter), and user rights (GDPR right-to-erasure via `/data`).
+
+> [!NOTE]
+> **Note for Self-Hosters:** If you are self-hosting your own independent instance of PriestyAI from this open-source repository, you are running on your own infrastructure and API credentials. You are solely responsible for managing your own data retention, privacy compliance, security, and user policies.
+
+---
+
 ## License
 
 This project is licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE).

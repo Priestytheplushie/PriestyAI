@@ -278,11 +278,24 @@ async def execute_chat_turn(
             b64 = base64.b64encode(raw_att["bytes"]).decode("utf-8")
             stored_attachments.append({"filename": raw_att["filename"], "data_b64": b64})
 
+        sanitized_artifacts = []
         for art in tool_context.staged_artifacts:
             art_bytes = art.get("data_bytes", b"")
             art_fname = art.get("filename", "artifact.zip")
-            if art_bytes:
-                stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
+            b64_art = base64.b64encode(art_bytes).decode("utf-8") if art_bytes else ""
+            clean_art = {k: v for k, v in art.items() if k != "data_bytes"}
+            clean_art["data_b64"] = b64_art
+            sanitized_artifacts.append(clean_art)
+
+        root_msg = stream_dispatcher.primary_message
+        if not root_msg:
+            try:
+                root_msg = await interaction.original_response()
+                stream_dispatcher.primary_message = root_msg
+            except Exception:
+                pass
+
+        target_id = root_msg.id if root_msg else "temp"
 
         await stream_dispatcher.finalize(
             staged_artifacts=tool_context.staged_artifacts,
@@ -292,10 +305,51 @@ async def execute_chat_turn(
             has_thoughts=has_reasoning,
             show_reply_button=show_reply,
             active_version=1,
-            total_versions=1
+            total_versions=1,
+            message_id=target_id
         )
 
         final_text = stream_dispatcher.get_accumulated_text()
+
+        if root_msg:
+            parsed_initial_content = apply_message_parsers(final_text, guild)
+            raw_collected_thoughts = "".join(accumulated_thoughts)
+            sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(root_msg.id)]
+
+            has_quiz_in_blocks = any(b.get("type") == "quiz" for b in stream_dispatcher.timeline)
+
+            initial_v_data = {
+                "version_idx": 1,
+                "content": parsed_initial_content,
+                "timeline_blocks": stream_dispatcher.timeline,
+                "duration_seconds": final_dur,
+                "has_thoughts": has_reasoning,
+                "thoughts": raw_collected_thoughts,
+                "formatted_thoughts": None,
+                "model": active_model_used,
+                "is_quiz": has_quiz_in_blocks,
+                "tool_calls": tool_call_history,
+                "attachments": stored_attachments,
+                "staged_components": tool_context.staged_components,
+                "staged_artifacts": sanitized_artifacts,
+                "staged_followups": stream_dispatcher.staged_followups,
+                "staged_modals": tool_context.staged_modals,
+                "message_ids": sent_msg_ids,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "status": "ready"
+            }
+
+            branch_manager.save_generation(
+                message_id=root_msg.id,
+                channel_id=getattr(channel, "id", 0),
+                guild_id=guild.id if guild else None,
+                author_id=user.id,
+                prompt_text=prompt_text,
+                attachments=[],
+                context_xml=context_xml,
+                initial_version_data=initial_v_data
+            )
+
         if final_text.strip():
             existing_history = memory_manager.get_chat_session(session_id)
             existing_history.append({
@@ -415,6 +469,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
 
         accumulated_thoughts = []
         tool_call_history = []
+        active_model_used = "gemma-4-31b-it"
 
         try:
             async for event_type, payload in ChatEngine.stream_chat(
@@ -423,7 +478,10 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                 bot_user_id=interaction.client.user.id,
                 tool_context=tool_context
             ):
-                if event_type == "RECALLED_MEMORIES":
+                if event_type == "ACTIVE_MODEL":
+                    active_model_used = str(payload)
+
+                elif event_type == "RECALLED_MEMORIES":
                     count = payload.get("count", 0)
                     tool_call_history.insert(0, {
                         "name": "recall_memories",
@@ -465,18 +523,32 @@ def setup_chat_commands(tree: app_commands.CommandTree):
             await artifact_parser.finish()
 
             final_dur = max(1, int(time.time() - thinking_start_time))
-            has_reasoning = bool(accumulated_thoughts or tool_call_history)
+            active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
+            has_reasoning = bool(accumulated_thoughts or active_tools)
 
             stored_attachments = []
             for raw_att in stream_dispatcher.raw_attachment_buffers:
                 b64 = base64.b64encode(raw_att["bytes"]).decode("utf-8")
                 stored_attachments.append({"filename": raw_att["filename"], "data_b64": b64})
 
+            sanitized_artifacts = []
             for art in tool_context.staged_artifacts:
                 art_bytes = art.get("data_bytes", b"")
                 art_fname = art.get("filename", "artifact.zip")
-                if art_bytes:
-                    stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
+                b64_art = base64.b64encode(art_bytes).decode("utf-8") if art_bytes else ""
+                clean_art = {k: v for k, v in art.items() if k != "data_bytes"}
+                clean_art["data_b64"] = b64_art
+                sanitized_artifacts.append(clean_art)
+
+            root_msg = stream_dispatcher.primary_message
+            if not root_msg:
+                try:
+                    root_msg = await interaction.original_response()
+                    stream_dispatcher.primary_message = root_msg
+                except Exception:
+                    pass
+
+            target_id = root_msg.id if root_msg else "temp"
 
             await stream_dispatcher.finalize(
                 staged_artifacts=tool_context.staged_artifacts,
@@ -486,8 +558,49 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                 has_thoughts=has_reasoning,
                 show_reply_button=show_reply,
                 active_version=1,
-                total_versions=1
+                total_versions=1,
+                message_id=target_id
             )
+
+            if root_msg:
+                final_text = stream_dispatcher.get_accumulated_text()
+                parsed_initial_content = apply_message_parsers(final_text, interaction.guild)
+                raw_collected_thoughts = "".join(accumulated_thoughts)
+                sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(root_msg.id)]
+
+                has_quiz_in_blocks = any(b.get("type") == "quiz" for b in stream_dispatcher.timeline)
+
+                initial_v_data = {
+                    "version_idx": 1,
+                    "content": parsed_initial_content,
+                    "timeline_blocks": stream_dispatcher.timeline,
+                    "duration_seconds": final_dur,
+                    "has_thoughts": has_reasoning,
+                    "thoughts": raw_collected_thoughts,
+                    "formatted_thoughts": None,
+                    "model": active_model_used,
+                    "is_quiz": has_quiz_in_blocks,
+                    "tool_calls": tool_call_history,
+                    "attachments": stored_attachments,
+                    "staged_components": tool_context.staged_components,
+                    "staged_artifacts": sanitized_artifacts,
+                    "staged_followups": stream_dispatcher.staged_followups,
+                    "staged_modals": tool_context.staged_modals,
+                    "message_ids": sent_msg_ids,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "status": "ready"
+                }
+
+                branch_manager.save_generation(
+                    message_id=root_msg.id,
+                    channel_id=getattr(interaction.channel, "id", 0),
+                    guild_id=interaction.guild_id,
+                    author_id=interaction.user.id,
+                    prompt_text=query,
+                    attachments=[],
+                    context_xml="<context></context>",
+                    initial_version_data=initial_v_data
+                )
 
         except Exception as e:
             logger.exception(f"Error in /ask command: {e}")

@@ -7,7 +7,7 @@ import asyncio
 import logging
 import mimetypes
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 import discord
@@ -119,7 +119,6 @@ def get_tool_subtext(tool_name: str, args: dict[str, Any]) -> str | None:
     elif tool_name == "clone_repo":
         repo = args.get("repo", "repository")
         return f"Cloning `{repo}`..."
-
     elif tool_name in ["github_repo", "fetch_github"]:
         action = str(args.get("action", "inspect")).replace("_", " ").title()
         path = args.get("path") or args.get("repo", "Repository")
@@ -172,17 +171,16 @@ def format_placeholder_content(witty_text: str, subtext: str | None = None) -> s
     return content
 
 async def update_placeholder_loop(
-    get_message_func,
+    get_message_func: Callable[[], discord.Message | None],
     placeholder_view: PlaceholderLayoutView,
     statuses: list[str],
-    get_active_subtext_func,
+    get_active_subtext_func: Callable[[], str | None],
     start_time: float,
     stop_event: asyncio.Event,
     interval: float = 1.0
 ):
     idx = 0
     last_status_change = time.time()
-    current_status = statuses[0] if statuses else "Thinking"
 
     while not stop_event.is_set():
         try:
@@ -191,22 +189,23 @@ async def update_placeholder_loop(
                 break
 
             now = time.time()
-            if (now - last_status_change) >= 4.0 and statuses:
+            if (now - last_status_change) >= 3.5 and statuses:
                 idx = (idx + 1) % len(statuses)
-                current_status = statuses[idx]
                 last_status_change = now
 
-            elapsed = int(now - start_time)
+            current_status = statuses[idx % len(statuses)] if statuses else "Thinking"
+            elapsed = max(0, int(now - start_time))
             subtext = get_active_subtext_func()
             full_text = format_placeholder_content(current_status, subtext)
 
             placeholder_view.update_state(full_text, elapsed)
             msg = get_message_func()
             if msg:
-                await msg.edit(view=placeholder_view)
+                try:
+                    await msg.edit(view=placeholder_view)
+                except (discord.HTTPException, discord.NotFound):
+                    break
             await placeholder_view.push_live_update()
-        except discord.HTTPException:
-            break
         except Exception:
             break
 
@@ -496,7 +495,16 @@ class ChatHandler:
                 ):
                     if event_type == "ROUTED":
                         if payload.witty_statuses:
-                            active_witty_statuses = payload.witty_statuses
+                            active_witty_statuses[:] = payload.witty_statuses
+                            if placeholder_view and not answer_now_event.is_set():
+                                curr_txt = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
+                                placeholder_view.update_state(curr_txt, max(0, int(time.time() - thinking_start_time)))
+                                if response_msg:
+                                    try:
+                                        await response_msg.edit(view=placeholder_view)
+                                    except Exception:
+                                        pass
+
                         if getattr(payload, "is_quiz", False):
                             is_quiz_turn = True
                             if placeholder_view:
@@ -891,7 +899,16 @@ class ChatHandler:
                 ):
                     if event_type == "ROUTED":
                         if payload.witty_statuses:
-                            active_witty_statuses = payload.witty_statuses
+                            active_witty_statuses[:] = payload.witty_statuses
+                            if placeholder_view and not answer_now_event.is_set():
+                                curr_txt = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
+                                placeholder_view.update_state(curr_txt, max(0, int(time.time() - thinking_start_time)))
+                                if response_msg:
+                                    try:
+                                        await response_msg.edit(view=placeholder_view)
+                                    except Exception:
+                                        pass
+
                         if getattr(payload, "is_quiz", False):
                             is_quiz_turn = True
                             if placeholder_view:

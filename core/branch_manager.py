@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import base64
 import difflib
 import sqlite3
 import asyncio
@@ -11,6 +12,13 @@ logger = logging.getLogger("PriestyAI.BranchManager")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "priestyai.db")
+
+def safe_json_default(obj: Any) -> Any:
+    if isinstance(obj, bytes):
+        return base64.b64encode(obj).decode("utf-8")
+    if hasattr(obj, "to_dict") and callable(obj.to_dict):
+        return obj.to_dict()
+    return str(obj)
 
 def compute_code_diff(old_code: str, new_code: str, filename: str, v_old: int, v_new: int) -> tuple[str, int, int]:
     old_lines = old_code.splitlines(keepends=True)
@@ -137,7 +145,6 @@ class BranchManager:
 
             conn.commit()
 
-
     def save_quiz(
         self,
         channel_id: str | int,
@@ -164,7 +171,7 @@ class BranchManager:
                 title.strip() or "Quiz",
                 topic.strip() or "General Knowledge",
                 difficulty.strip().capitalize() or "Medium",
-                json.dumps(questions)
+                json.dumps(questions, default=safe_json_default)
             ))
             conn.commit()
 
@@ -216,7 +223,7 @@ class BranchManager:
                 str(user_id),
                 int(total_questions),
                 int(current_idx),
-                json.dumps(answers)
+                json.dumps(answers, default=safe_json_default)
             ))
             conn.commit()
         return attempt_id
@@ -261,9 +268,9 @@ class BranchManager:
                 int(skipped),
                 int(total_questions - 1),
                 headline.strip(),
-                json.dumps(answers),
-                json.dumps(strengths),
-                json.dumps(focus_areas)
+                json.dumps(answers, default=safe_json_default),
+                json.dumps(strengths, default=safe_json_default),
+                json.dumps(focus_areas, default=safe_json_default)
             ))
             conn.commit()
         logger.info(f"[BranchManager] Finalized quiz attempt '{attempt_id}' for user {user_id} on quiz {quiz_id} (Score: {score}/{total_questions})")
@@ -301,7 +308,6 @@ class BranchManager:
             )
             conn.commit()
             return cursor.rowcount > 0
-
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         with self._get_connection() as conn:
@@ -392,7 +398,7 @@ class BranchManager:
                 UPDATE conversation_artifacts
                 SET versions_json = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE artifact_id = ?
-            """, (json.dumps(versions), str(artifact_id)))
+            """, (json.dumps(versions, default=safe_json_default), str(artifact_id)))
             conn.commit()
             logger.info(f"[BranchManager] In-place auto-saved artifact '{artifact_id}' (v{active_v}, {len(files)} files)")
             return True
@@ -451,7 +457,7 @@ class BranchManager:
                     UPDATE conversation_artifacts
                     SET title = ?, active_version = ?, versions_json = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE artifact_id = ?
-                """, (clean_title, v_new, json.dumps(versions), str(artifact_id)))
+                """, (clean_title, v_new, json.dumps(versions, default=safe_json_default), str(artifact_id)))
                 conn.commit()
 
             logger.info(f"[Artifacts] Auto-updated '{clean_fn}' -> v{v_new} (+{additions} -{deletions})")
@@ -490,7 +496,7 @@ class BranchManager:
                     INSERT INTO conversation_artifacts (
                         artifact_id, channel_id, filename, title, active_version, versions_json
                     ) VALUES (?, ?, ?, ?, 1, ?)
-                """, (str(artifact_id), str(channel_id), clean_fn, clean_title, json.dumps(versions)))
+                """, (str(artifact_id), str(channel_id), clean_fn, clean_title, json.dumps(versions, default=safe_json_default)))
                 conn.commit()
 
             logger.info(f"[Artifacts] Created initial '{clean_fn}' (v1)")
@@ -516,7 +522,6 @@ class BranchManager:
             pass
 
         return result_payload
-
 
     def create_branch(
         self,
@@ -548,7 +553,7 @@ class BranchManager:
                 str(creator_id),
                 title,
                 str(root_message_id),
-                json.dumps(messages)
+                json.dumps(messages, default=safe_json_default)
             ))
             conn.commit()
 
@@ -591,7 +596,7 @@ class BranchManager:
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("UPDATE branches SET messages_json = ? WHERE thread_id = ?", (json.dumps(msgs), str(thread_id)))
+            cursor.execute("UPDATE branches SET messages_json = ? WHERE thread_id = ?", (json.dumps(msgs, default=safe_json_default), str(thread_id)))
             conn.commit()
 
     def prune_branch_message(self, branch_id: str, message_index: int) -> bool:
@@ -604,7 +609,7 @@ class BranchManager:
             msgs.pop(message_index)
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("UPDATE branches SET messages_json = ? WHERE branch_id = ?", (json.dumps(msgs), str(branch_id)))
+                cursor.execute("UPDATE branches SET messages_json = ? WHERE branch_id = ?", (json.dumps(msgs, default=safe_json_default), str(branch_id)))
                 conn.commit()
             return True
         return False
@@ -614,7 +619,6 @@ class BranchManager:
             cursor = conn.cursor()
             cursor.execute("UPDATE branches SET is_active = 0 WHERE branch_id = ?", (str(branch_id),))
             conn.commit()
-
 
     def save_generation(
         self,
@@ -648,9 +652,9 @@ class BranchManager:
                 str(guild_id) if guild_id else None,
                 str(author_id),
                 prompt_text,
-                json.dumps(attachments),
+                json.dumps(attachments, default=safe_json_default),
                 context_xml,
-                json.dumps(versions)
+                json.dumps(versions, default=safe_json_default)
             ))
             conn.commit()
 
@@ -697,7 +701,7 @@ class BranchManager:
                 UPDATE message_generations 
                 SET versions_json = ?, active_version = ?
                 WHERE message_id = ?
-            """, (json.dumps(versions), new_active_idx, str(root_id)))
+            """, (json.dumps(versions, default=safe_json_default), new_active_idx, str(root_id)))
             conn.commit()
 
         return new_active_idx
@@ -715,7 +719,7 @@ class BranchManager:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE message_generations SET versions_json = ? WHERE message_id = ?
-                """, (json.dumps(versions), str(root_id)))
+                """, (json.dumps(versions, default=safe_json_default), str(root_id)))
                 conn.commit()
 
     def set_active_version(self, message_id: str | int, version_idx: int) -> dict[str, Any] | None:
@@ -752,7 +756,7 @@ class BranchManager:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE message_generations SET versions_json = ? WHERE message_id = ?
-                """, (json.dumps(versions), str(root_id)))
+                """, (json.dumps(versions, default=safe_json_default), str(root_id)))
                 conn.commit()
 
 branch_manager = BranchManager()

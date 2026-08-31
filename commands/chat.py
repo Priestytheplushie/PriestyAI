@@ -27,8 +27,13 @@ from handlers.stream_handler import (
     build_v2_message_layout,
     should_show_reply_button
 )
+from handlers.chat_handler import (
+    format_placeholder_content,
+    get_tool_subtext
+)
 from parsers.artifact_parser import ArtifactStreamParser
 from tools.registry import ToolExecutionContext
+from ui.thought_container import PlaceholderLayoutView
 from ui.modals import DynamicModalV2
 from ui.onboarding_views import (
     build_welcome_terms_modal,
@@ -37,6 +42,43 @@ from ui.onboarding_views import (
 )
 
 logger = logging.getLogger("PriestyAI.Commands.Chat")
+
+async def update_interaction_placeholder_loop(
+    interaction: discord.Interaction,
+    placeholder_view: PlaceholderLayoutView,
+    statuses: list[str],
+    get_active_subtext_func: Callable[[], str | None],
+    start_time: float,
+    stop_event: asyncio.Event,
+    interval: float = 1.0
+):
+    idx = 0
+    last_status_change = time.time()
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.sleep(interval)
+            if stop_event.is_set():
+                break
+
+            now = time.time()
+            if (now - last_status_change) >= 3.5 and statuses:
+                idx = (idx + 1) % len(statuses)
+                last_status_change = now
+
+            current_status = statuses[idx % len(statuses)] if statuses else "Thinking"
+            elapsed = max(0, int(now - start_time))
+            subtext = get_active_subtext_func()
+            full_text = format_placeholder_content(current_status, subtext)
+
+            placeholder_view.update_state(full_text, elapsed)
+            try:
+                await interaction.edit_original_response(view=placeholder_view)
+            except (discord.HTTPException, discord.NotFound):
+                break
+            await placeholder_view.push_live_update()
+        except Exception:
+            break
 
 def build_user_chat_modal(on_submit: Callable[[discord.Interaction, dict[str, Any]], Any]) -> DynamicModalV2:
     fields = [
@@ -206,6 +248,9 @@ async def execute_chat_turn(
     )
 
     thinking_start_time = time.time()
+    answer_now_event = asyncio.Event()
+    stop_placeholder_loop = asyncio.Event()
+
     stream_dispatcher = DiscordStreamDispatcher(
         interaction=interaction,
         is_ephemeral=is_ephemeral,
@@ -216,17 +261,75 @@ async def execute_chat_turn(
 
     accumulated_thoughts = []
     tool_call_history = []
+    active_tool_start_times = {}
     active_model_used = "gemma-4-31b-it"
+
+    active_witty_statuses = ["Thinking", "Consulting neural cores", "Formulating response"]
+    active_tool_subtext: str | None = None
+    first_content_received = False
+    is_quiz_turn = False
+
+    def get_active_subtext():
+        return active_tool_subtext
+
+    async def on_answer_now_clicked(inter: discord.Interaction):
+        try:
+            if not inter.response.is_done():
+                await inter.response.defer(ephemeral=True)
+        except Exception:
+            pass
+        answer_now_event.set()
+        stop_placeholder_loop.set()
+        if placeholder_task and not placeholder_task.done():
+            placeholder_task.cancel()
+
+    placeholder_view = PlaceholderLayoutView(
+        loading_text=format_placeholder_content(active_witty_statuses[0], active_tool_subtext),
+        duration_seconds=0,
+        is_enabled=False,
+        on_answer_now_callback=on_answer_now_clicked,
+        thought_data={"thoughts": "", "tool_calls": [], "model": active_model_used, "is_quiz": is_quiz_turn},
+        model_name=active_model_used,
+        is_quiz=is_quiz_turn
+    )
+
+    try:
+        await interaction.edit_original_response(view=placeholder_view)
+    except Exception as ex:
+        logger.debug(f"Failed to display initial interaction placeholder: {ex}")
+
+    placeholder_task = asyncio.create_task(
+        update_interaction_placeholder_loop(
+            interaction, placeholder_view, active_witty_statuses, get_active_subtext, thinking_start_time, stop_placeholder_loop
+        )
+    )
 
     try:
         async for event_type, payload in ChatEngine.stream_chat(
             prompt=multimodal_prompt,
             context_xml=context_xml,
             bot_user_id=interaction.client.user.id,
-            tool_context=tool_context
+            tool_context=tool_context,
+            answer_now_event=answer_now_event
         ):
-            if event_type == "ACTIVE_MODEL":
+            if event_type == "ROUTED":
+                if payload.witty_statuses:
+                    active_witty_statuses[:] = payload.witty_statuses
+                    curr_txt = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
+                    placeholder_view.update_state(curr_txt, max(0, int(time.time() - thinking_start_time)))
+                    try:
+                        await interaction.edit_original_response(view=placeholder_view)
+                    except Exception:
+                        pass
+
+                if getattr(payload, "is_quiz", False):
+                    is_quiz_turn = True
+                    placeholder_view.is_quiz = True
+                    placeholder_view.thought_data["is_quiz"] = True
+
+            elif event_type == "ACTIVE_MODEL":
                 active_model_used = str(payload)
+                placeholder_view.model_name = active_model_used
 
             elif event_type == "RECALLED_MEMORIES":
                 count = payload.get("count", 0)
@@ -237,20 +340,36 @@ async def execute_chat_turn(
                     "duration_ms": 0,
                     "order": -1.0
                 })
+                placeholder_view.thought_data["tool_calls"] = tool_call_history
 
             elif event_type == "THOUGHT":
                 accumulated_thoughts.append(payload)
+                placeholder_view.enable_thinking()
+                placeholder_view.thought_data["thoughts"] = "".join(accumulated_thoughts)
 
             elif event_type == "TOOL_START":
-                t_name = payload.get("name", "")
-                t_args = payload.get("args", {})
-                if t_name in ["create_artifact", "update_artifact"]:
-                    stream_dispatcher.add_artifact_placeholder(t_name, t_args)
+                tool_name = payload.get("name", "")
+                args = payload.get("args", {})
+                active_tool_start_times[tool_name] = time.perf_counter()
+                active_tool_subtext = get_tool_subtext(tool_name, args)
+                placeholder_view.enable_thinking()
+                if tool_name in ["create_artifact", "update_artifact"]:
+                    stream_dispatcher.add_artifact_placeholder(tool_name, args)
 
             elif event_type == "TOOL_END":
-                t_name = payload.get("name", "")
-                tool_call_history.append(payload)
-                if t_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
+                tool_name = payload.get("name", "")
+                st = active_tool_start_times.pop(tool_name, time.perf_counter())
+                dur_ms = int((time.perf_counter() - st) * 1000)
+                tool_call_history.append({
+                    "name": tool_name,
+                    "args": payload.get("args", {}),
+                    "result": payload.get("result", {}),
+                    "duration_ms": dur_ms
+                })
+                active_tool_subtext = None
+                placeholder_view.thought_data["tool_calls"] = tool_call_history
+
+                if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
                     last_art = tool_context.staged_artifacts[-1]
                     stream_dispatcher.update_artifact_ready(last_art)
                     art_bytes = last_art.get("data_bytes", b"")
@@ -258,16 +377,25 @@ async def execute_chat_turn(
                     if art_bytes:
                         stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
 
-                elif t_name in ["search_image", "search_gif", "generate_image", "edit_image", "execute_code"] and tool_context.staged_image_bytes:
+                elif tool_name in ["search_image", "search_gif", "generate_image", "edit_image", "execute_code"] and tool_context.staged_image_bytes:
                     img_fname = tool_context.staged_image_filename
                     img_bytes = tool_context.staged_image_bytes
                     stream_dispatcher.add_media_block(img_fname, img_bytes)
                     tool_context.staged_image_bytes = None
 
             elif event_type == "CONTENT":
+                if not first_content_received:
+                    first_content_received = True
+                    stop_placeholder_loop.set()
+                    if placeholder_task and not placeholder_task.done():
+                        placeholder_task.cancel()
+
                 await artifact_parser.feed(payload)
 
         await artifact_parser.finish()
+        stop_placeholder_loop.set()
+        if placeholder_task and not placeholder_task.done():
+            placeholder_task.cancel()
 
         final_dur = max(1, int(time.time() - thinking_start_time))
         active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
@@ -316,12 +444,21 @@ async def execute_chat_turn(
             raw_collected_thoughts = "".join(accumulated_thoughts)
             sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(root_msg.id)]
 
-            has_quiz_in_blocks = any(b.get("type") == "quiz" for b in stream_dispatcher.timeline)
+            sanitized_timeline: list[dict[str, Any]] = []
+            for b in stream_dispatcher.timeline:
+                b_copy = dict(b)
+                if b_copy.get("type") == "artifact" and "artifact" in b_copy:
+                    art_copy = dict(b_copy["artifact"])
+                    art_copy.pop("data_bytes", None)
+                    b_copy["artifact"] = art_copy
+                sanitized_timeline.append(b_copy)
+
+            has_quiz_in_blocks = any(b.get("type") == "quiz" for b in sanitized_timeline)
 
             initial_v_data = {
                 "version_idx": 1,
                 "content": parsed_initial_content,
-                "timeline_blocks": stream_dispatcher.timeline,
+                "timeline_blocks": sanitized_timeline,
                 "duration_seconds": final_dur,
                 "has_thoughts": has_reasoning,
                 "thoughts": raw_collected_thoughts,
@@ -380,6 +517,10 @@ async def execute_chat_turn(
             await interaction.edit_original_response(view=err_view)
         except discord.HTTPException:
             pass
+    finally:
+        stop_placeholder_loop.set()
+        if placeholder_task and not placeholder_task.done():
+            placeholder_task.cancel()
 
 def setup_chat_commands(tree: app_commands.CommandTree):
 
@@ -458,6 +599,9 @@ def setup_chat_commands(tree: app_commands.CommandTree):
         )
 
         thinking_start_time = time.time()
+        answer_now_event = asyncio.Event()
+        stop_placeholder_loop = asyncio.Event()
+
         stream_dispatcher = DiscordStreamDispatcher(
             interaction=interaction,
             is_ephemeral=is_ephemeral,
@@ -469,17 +613,75 @@ def setup_chat_commands(tree: app_commands.CommandTree):
 
         accumulated_thoughts = []
         tool_call_history = []
+        active_tool_start_times = {}
         active_model_used = "gemma-4-31b-it"
+
+        active_witty_statuses = ["Thinking", "Consulting neural cores", "Formulating response"]
+        active_tool_subtext: str | None = None
+        first_content_received = False
+        is_quiz_turn = False
+
+        def get_active_subtext():
+            return active_tool_subtext
+
+        async def on_answer_now_clicked(inter: discord.Interaction):
+            try:
+                if not inter.response.is_done():
+                    await inter.response.defer(ephemeral=True)
+            except Exception:
+                pass
+            answer_now_event.set()
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
+
+        placeholder_view = PlaceholderLayoutView(
+            loading_text=format_placeholder_content(active_witty_statuses[0], active_tool_subtext),
+            duration_seconds=0,
+            is_enabled=False,
+            on_answer_now_callback=on_answer_now_clicked,
+            thought_data={"thoughts": "", "tool_calls": [], "model": active_model_used, "is_quiz": is_quiz_turn},
+            model_name=active_model_used,
+            is_quiz=is_quiz_turn
+        )
+
+        try:
+            await interaction.edit_original_response(view=placeholder_view)
+        except Exception as ex:
+            logger.debug(f"Failed to display initial ask placeholder: {ex}")
+
+        placeholder_task = asyncio.create_task(
+            update_interaction_placeholder_loop(
+                interaction, placeholder_view, active_witty_statuses, get_active_subtext, thinking_start_time, stop_placeholder_loop
+            )
+        )
 
         try:
             async for event_type, payload in ChatEngine.stream_chat(
                 prompt=query,
                 context_xml="<context></context>",
                 bot_user_id=interaction.client.user.id,
-                tool_context=tool_context
+                tool_context=tool_context,
+                answer_now_event=answer_now_event
             ):
-                if event_type == "ACTIVE_MODEL":
+                if event_type == "ROUTED":
+                    if payload.witty_statuses:
+                        active_witty_statuses[:] = payload.witty_statuses
+                        curr_txt = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
+                        placeholder_view.update_state(curr_txt, max(0, int(time.time() - thinking_start_time)))
+                        try:
+                            await interaction.edit_original_response(view=placeholder_view)
+                        except Exception:
+                            pass
+
+                    if getattr(payload, "is_quiz", False):
+                        is_quiz_turn = True
+                        placeholder_view.is_quiz = True
+                        placeholder_view.thought_data["is_quiz"] = True
+
+                elif event_type == "ACTIVE_MODEL":
                     active_model_used = str(payload)
+                    placeholder_view.model_name = active_model_used
 
                 elif event_type == "RECALLED_MEMORIES":
                     count = payload.get("count", 0)
@@ -490,20 +692,36 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                         "duration_ms": 0,
                         "order": -1.0
                     })
+                    placeholder_view.thought_data["tool_calls"] = tool_call_history
 
                 elif event_type == "THOUGHT":
                     accumulated_thoughts.append(payload)
+                    placeholder_view.enable_thinking()
+                    placeholder_view.thought_data["thoughts"] = "".join(accumulated_thoughts)
 
                 elif event_type == "TOOL_START":
-                    t_name = payload.get("name", "")
-                    t_args = payload.get("args", {})
-                    if t_name in ["create_artifact", "update_artifact"]:
-                        stream_dispatcher.add_artifact_placeholder(t_name, t_args)
+                    tool_name = payload.get("name", "")
+                    args = payload.get("args", {})
+                    active_tool_start_times[tool_name] = time.perf_counter()
+                    active_tool_subtext = get_tool_subtext(tool_name, args)
+                    placeholder_view.enable_thinking()
+                    if tool_name in ["create_artifact", "update_artifact"]:
+                        stream_dispatcher.add_artifact_placeholder(tool_name, args)
 
                 elif event_type == "TOOL_END":
-                    t_name = payload.get("name", "")
-                    tool_call_history.append(payload)
-                    if t_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
+                    tool_name = payload.get("name", "")
+                    st = active_tool_start_times.pop(tool_name, time.perf_counter())
+                    dur_ms = int((time.perf_counter() - st) * 1000)
+                    tool_call_history.append({
+                        "name": tool_name,
+                        "args": payload.get("args", {}),
+                        "result": payload.get("result", {}),
+                        "duration_ms": dur_ms
+                    })
+                    active_tool_subtext = None
+                    placeholder_view.thought_data["tool_calls"] = tool_call_history
+
+                    if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
                         last_art = tool_context.staged_artifacts[-1]
                         stream_dispatcher.update_artifact_ready(last_art)
                         art_bytes = last_art.get("data_bytes", b"")
@@ -511,16 +729,25 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                         if art_bytes:
                             stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
 
-                    elif t_name in ["search_image", "search_gif", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
+                    elif tool_name in ["search_image", "search_gif", "generate_image", "execute_code"] and tool_context.staged_image_bytes:
                         img_fname = tool_context.staged_image_filename
                         img_bytes = tool_context.staged_image_bytes
                         stream_dispatcher.add_media_block(img_fname, img_bytes)
                         tool_context.staged_image_bytes = None
 
                 elif event_type == "CONTENT":
+                    if not first_content_received:
+                        first_content_received = True
+                        stop_placeholder_loop.set()
+                        if placeholder_task and not placeholder_task.done():
+                            placeholder_task.cancel()
+
                     await artifact_parser.feed(payload)
 
             await artifact_parser.finish()
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
 
             final_dur = max(1, int(time.time() - thinking_start_time))
             active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
@@ -568,12 +795,21 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                 raw_collected_thoughts = "".join(accumulated_thoughts)
                 sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(root_msg.id)]
 
-                has_quiz_in_blocks = any(b.get("type") == "quiz" for b in stream_dispatcher.timeline)
+                sanitized_timeline: list[dict[str, Any]] = []
+                for b in stream_dispatcher.timeline:
+                    b_copy = dict(b)
+                    if b_copy.get("type") == "artifact" and "artifact" in b_copy:
+                        art_copy = dict(b_copy["artifact"])
+                        art_copy.pop("data_bytes", None)
+                        b_copy["artifact"] = art_copy
+                    sanitized_timeline.append(b_copy)
+
+                has_quiz_in_blocks = any(b.get("type") == "quiz" for b in sanitized_timeline)
 
                 initial_v_data = {
                     "version_idx": 1,
                     "content": parsed_initial_content,
-                    "timeline_blocks": stream_dispatcher.timeline,
+                    "timeline_blocks": sanitized_timeline,
                     "duration_seconds": final_dur,
                     "has_thoughts": has_reasoning,
                     "thoughts": raw_collected_thoughts,
@@ -609,6 +845,10 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                 await interaction.edit_original_response(view=err_view)
             except discord.HTTPException:
                 pass
+        finally:
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
 
     @tree.command(name="chat", description="Start or continue a multi-turn conversation anywhere on Discord")
     @app_commands.allowed_installs(guilds=True, users=True)

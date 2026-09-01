@@ -20,7 +20,6 @@ server:
   image_proxy: false
 
 engines:
-  # --- Disable generic stock photo engines ---
   - name: unsplash
     engine: unsplash
     disabled: true
@@ -34,7 +33,6 @@ engines:
     engine: pixabay
     disabled: true
 
-  # --- Enable top-tier web image indexers ---
   - name: bing images
     engine: bing_images
     shortcut: bi

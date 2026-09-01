@@ -985,15 +985,6 @@ def setup_context_menus(tree: app_commands.CommandTree):
                 await sub_inter.followup.send(content="Translation service is currently busy.", ephemeral=True)
                 return
 
-            placeholder_view = PlaceholderLayoutView(
-                loading_text=format_placeholder_content("Translating", None),
-                duration_seconds=0,
-                is_enabled=False,
-                thought_data={"thoughts": "", "tool_calls": [], "model": active_model, "is_quiz": False},
-                model_name=active_model
-            )
-            placeholder_msg = await sub_inter.followup.send(view=placeholder_view, ephemeral=is_ephemeral)
-
             instruction = (
                 f"You are a professional linguistic translator. Translate the following text into {target_lang}.\n"
                 "Maintain exact meaning, tone, Markdown structures, lists, and code blocks.\n"
@@ -1011,20 +1002,14 @@ def setup_context_menus(tree: app_commands.CommandTree):
                 parsed_translation = apply_message_parsers(cleaned_translation, sub_inter.guild)
                 
                 formatted_resp = f"### Translated to {target_lang.title()}\n{parsed_translation}"
-                final_view = build_v2_message_layout(raw_text=formatted_resp, guild=sub_inter.guild)
+                final_view = build_v2_message_layout(raw_text=formatted_resp, guild=sub_inter.guild, show_reply_button=False)
                 
-                if placeholder_msg:
-                    await placeholder_msg.edit(view=final_view)
-                else:
-                    await sub_inter.followup.send(view=final_view, ephemeral=is_ephemeral)
+                await sub_inter.followup.send(view=final_view, ephemeral=is_ephemeral)
 
             except Exception as e:
                 logger.exception(f"Translation error: {e}")
-                err_view = build_v2_message_layout(raw_text=f"Translation error: `{e}`", guild=sub_inter.guild)
-                if placeholder_msg:
-                    await placeholder_msg.edit(view=err_view)
-                else:
-                    await sub_inter.followup.send(view=err_view, ephemeral=True)
+                err_view = build_v2_message_layout(raw_text=f"Translation error: `{e}`", guild=sub_inter.guild, show_reply_button=False)
+                await sub_inter.followup.send(view=err_view, ephemeral=True)
 
         modal = DynamicModalV2(
             title="Translate Message",

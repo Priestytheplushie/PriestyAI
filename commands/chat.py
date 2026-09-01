@@ -269,7 +269,6 @@ def build_scribe_modal(on_submit: Callable[[discord.Interaction, dict[str, Any]]
             "description": "Target language to translate into",
             "placeholder": "e.g. English, Spanish, Japanese, German...",
             "style": "short",
-            "value": "English",
             "required": False,
             "max_length": 60
         },
@@ -391,7 +390,7 @@ async def _execute_scribe(
         "     > [!WARNING]\n"
         "     > Content...\n\n"
         "     > [!CAUTION]\n"
-        "     > Content...\n"
+        "     > Content...\n\n"
         "   - CRITICAL: Keep the bracketed tag keyword ([!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION]) in standard English "
         "so the DFM parser can recognize and render it, but translate the body text inside the blockquote (>).\n"
         "   - If the input contains pre-rendered callout emojis or headers (e.g. `<:gfm_tip:...> **Tip**`, `<:gfm_note:...> **Note**`, or similar), "
@@ -427,17 +426,10 @@ async def _execute_scribe(
         if not status_fetch_task.done():
             status_fetch_task.cancel()
 
-        show_reply = should_show_reply_button(
-            bot=interaction.client,
-            guild=interaction.guild,
-            channel=interaction.channel,
-            interaction=interaction
-        )
-
         final_view = build_v2_message_layout(
             raw_text=parsed_result,
             guild=interaction.guild,
-            show_reply_button=show_reply,
+            show_reply_button=False,
             message_id=placeholder_msg.id if placeholder_msg else None
         )
 
@@ -454,7 +446,7 @@ async def _execute_scribe(
             status_fetch_task.cancel()
         logger.exception(f"Scribe error: {e}")
         try:
-            err_view = build_v2_message_layout(raw_text=f"Scribing error: `{e}`", guild=interaction.guild)
+            err_view = build_v2_message_layout(raw_text=f"Scribing error: `{e}`", guild=interaction.guild, show_reply_button=False)
             if placeholder_msg:
                 await placeholder_msg.edit(view=err_view)
             else:

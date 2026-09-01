@@ -18,3 +18,4 @@ Pillow>=10.3.0
 edge-tts>=6.1.0
 numpy>=1.26.0
 playwright>=1.44.0
+pycountry

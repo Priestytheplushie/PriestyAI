@@ -4,13 +4,17 @@ import base64
 import asyncio
 import logging
 import aiohttp
+import re
 from typing import Any, Callable
 from datetime import datetime, timezone
 import discord
 from discord import app_commands
+import pycountry
 from google.genai import types
 
+from config.settings import WORKHORSE_DENSE_MODEL
 from core.engine import ChatEngine
+from core.client_manager import client_manager
 from core.memory_manager import memory_manager, get_user_chat_session_id
 from core.config_manager import config_manager
 from core.branch_manager import branch_manager
@@ -32,6 +36,7 @@ from handlers.chat_handler import (
     get_tool_subtext
 )
 from parsers.artifact_parser import ArtifactStreamParser
+from parsers.markdown_parser import apply_dfm
 from tools.registry import ToolExecutionContext
 from ui.thought_container import PlaceholderLayoutView
 from ui.modals import DynamicModalV2
@@ -43,6 +48,105 @@ from ui.onboarding_views import (
 
 logger = logging.getLogger("PriestyAI.Commands.Chat")
 
+POPULAR_SCRIBE_LANGUAGES = [
+    "English",
+    "Spanish",
+    "Japanese",
+    "French",
+    "German",
+    "Chinese (Mandarin)",
+    "Korean",
+    "Portuguese",
+    "Russian",
+    "Italian",
+    "Arabic",
+    "Hindi",
+    "Dutch",
+    "Polish",
+    "Turkish",
+    "Swedish",
+    "Vietnamese",
+    "Greek",
+    "Hebrew",
+    "Thai",
+    "Indonesian",
+    "Ukrainian",
+    "Czech",
+    "Danish",
+    "Finnish"
+]
+
+DEFAULT_SCRIBE_STATUSES = [
+    "Consulting linguistic archives",
+    "Untangling grammatical nuances",
+    "Channeling cultural idioms",
+    "Polishing prose and punctuation",
+    "Adapting tone and styling",
+    "Brewing creative localization"
+]
+
+async def scribe_language_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+) -> list[app_commands.Choice[str]]:
+    q = current.lower().strip()
+    if not q:
+        return [app_commands.Choice(name=lang, value=lang) for lang in POPULAR_SCRIBE_LANGUAGES[:25]]
+
+    choices: list[app_commands.Choice[str]] = []
+    seen: set[str] = set()
+
+    for lang in POPULAR_SCRIBE_LANGUAGES:
+        if q in lang.lower() and lang not in seen:
+            choices.append(app_commands.Choice(name=lang, value=lang))
+            seen.add(lang)
+
+    for lang in pycountry.languages:
+        name = getattr(lang, "name", None)
+        if not name or name in seen:
+            continue
+        code_2 = getattr(lang, "alpha_2", "")
+        code_3 = getattr(lang, "alpha_3", "")
+        if q in name.lower() or q == code_2.lower() or q == code_3.lower():
+            choices.append(app_commands.Choice(name=name, value=name))
+            seen.add(name)
+            if len(choices) >= 25:
+                break
+
+    return choices[:25]
+
+async def generate_scribe_witty_statuses(content: str, target_lang: str, instructions: str) -> list[str]:
+    client, _, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite", fallback=True)
+    if not client:
+        return DEFAULT_SCRIBE_STATUSES
+
+    prompt = (
+        f"Content sample: \"{content[:250]}\"\n"
+        f"Target language: {target_lang}\n"
+        f"Tone directives: \"{instructions[:150]}\"\n"
+        "Generate 5 funny, witty, 3-5 word loading status messages about translating, localizing, or stylizing this text.\n"
+        "Output ONLY a JSON array of strings, e.g. [\"Consulting Spanish dictionary\", \"Channeling Shakespearean slang\", ...]"
+    )
+    try:
+        res = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=active_model,
+                contents=prompt
+            ),
+            timeout=2.0
+        )
+        if res.text:
+            cleaned = res.text.strip()
+            if cleaned.startswith("```"):
+                cleaned = re.sub(r"^```[a-zA-Z]*\n|\n```$", "", cleaned).strip()
+            arr = json.loads(cleaned)
+            if isinstance(arr, list) and arr:
+                return [str(s).strip() for s in arr if str(s).strip()]
+    except Exception as e:
+        logger.debug(f"Failed to generate custom scribe witty statuses: {e}")
+
+    return DEFAULT_SCRIBE_STATUSES
+
 async def update_interaction_placeholder_loop(
     interaction: discord.Interaction,
     placeholder_view: PlaceholderLayoutView,
@@ -50,7 +154,8 @@ async def update_interaction_placeholder_loop(
     get_active_subtext_func: Callable[[], str | None],
     start_time: float,
     stop_event: asyncio.Event,
-    interval: float = 1.0
+    interval: float = 1.0,
+    target_message: discord.Message | None = None
 ):
     idx = 0
     last_status_change = time.time()
@@ -62,7 +167,7 @@ async def update_interaction_placeholder_loop(
                 break
 
             now = time.time()
-            if (now - last_status_change) >= 3.5 and statuses:
+            if (now - last_status_change) >= 3.0 and statuses:
                 idx = (idx + 1) % len(statuses)
                 last_status_change = now
 
@@ -73,7 +178,10 @@ async def update_interaction_placeholder_loop(
 
             placeholder_view.update_state(full_text, elapsed)
             try:
-                await interaction.edit_original_response(view=placeholder_view)
+                if target_message:
+                    await target_message.edit(view=placeholder_view)
+                else:
+                    await interaction.edit_original_response(view=placeholder_view)
             except (discord.HTTPException, discord.NotFound):
                 break
             await placeholder_view.push_live_update()
@@ -125,6 +233,234 @@ def build_user_chat_modal(on_submit: Callable[[discord.Interaction, dict[str, An
         fields_schema=fields,
         on_submit_callback=on_submit
     )
+
+def build_scribe_modal(on_submit: Callable[[discord.Interaction, dict[str, Any]], Any]) -> DynamicModalV2:
+    fields = [
+        {
+            "type": "text_display",
+            "content": (
+                "Translate, localize, and adapt text with custom creative tone and style instructions."
+            )
+        },
+        {
+            "type": "text_input",
+            "custom_id": "content",
+            "label": "Content to Scribe",
+            "description": "The text you want to translate, adapt, or rewrite",
+            "placeholder": "Paste or type the text here...",
+            "style": "paragraph",
+            "required": True,
+            "max_length": 3500
+        },
+        {
+            "type": "text_input",
+            "custom_id": "instructions",
+            "label": "Tone & Style Instructions",
+            "description": "Specify tone, persona, dialect, or formatting constraints (Optional)",
+            "placeholder": "e.g. Formal business email, casual gaming slang, 17th century pirate, preserve rhymes...",
+            "style": "paragraph",
+            "required": False,
+            "max_length": 1500
+        },
+        {
+            "type": "text_input",
+            "custom_id": "target_language",
+            "label": "Language",
+            "description": "Target language to translate into",
+            "placeholder": "e.g. English, Spanish, Japanese, German...",
+            "style": "short",
+            "value": "English",
+            "required": False,
+            "max_length": 60
+        },
+        {
+            "type": "radio_group",
+            "custom_id": "visibility",
+            "label": "Visibility",
+            "description": "Choose who can see the scribed output",
+            "value": "public",
+            "options": [
+                {
+                    "label": "Public",
+                    "value": "public",
+                    "description": "Visible to all members",
+                    "default": True
+                },
+                {
+                    "label": "Ephemeral",
+                    "value": "private",
+                    "description": "Only visible to you"
+                }
+            ],
+            "required": True
+        }
+    ]
+
+    return DynamicModalV2(
+        title="Scribe with PriestyAI",
+        custom_id="modal_scribe_generator",
+        fields_schema=fields,
+        on_submit_callback=on_submit
+    )
+
+async def _execute_scribe(
+    interaction: discord.Interaction,
+    content: str,
+    target_language: str = "English",
+    instructions: str = "",
+    is_ephemeral: bool = False
+):
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=is_ephemeral)
+
+    clean_content = content.strip()
+    clean_lang = (target_language or "English").strip()
+    clean_inst = instructions.strip()
+
+    if not clean_content:
+        await interaction.followup.send(content="Content cannot be empty.", ephemeral=True)
+        return
+
+    is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(clean_content)
+    if is_flagged:
+        log_moderation_violation(interaction.user.id, interaction.guild_id, flagged_cats, score)
+        if is_zero_tolerance:
+            ban_user(interaction.user.id, reason=f"Zero-tolerance violation in scribe: {', '.join(flagged_cats)}")
+            ban_view = BannedUserNoticeView(author=interaction.user)
+            await interaction.followup.send(view=ban_view, ephemeral=True)
+            return
+
+        refusal_text = await generate_friendly_refusal(flagged_cats)
+        await interaction.followup.send(content=refusal_text, ephemeral=True)
+        return
+
+    target_model_name = WORKHORSE_DENSE_MODEL if clean_inst else "gemini-3.5-flash-lite"
+    client, key_idx, active_model = client_manager.get_client_for_model(target_model_name, fallback=True)
+    if not client:
+        await interaction.followup.send(content="Scribe engine is currently busy. Please try again.", ephemeral=True)
+        return
+
+    active_statuses = list(DEFAULT_SCRIBE_STATUSES)
+
+    async def fetch_dynamic_statuses():
+        dynamic_statuses = await generate_scribe_witty_statuses(clean_content, clean_lang, clean_inst)
+        if dynamic_statuses:
+            active_statuses[:] = dynamic_statuses
+
+    status_fetch_task = asyncio.create_task(fetch_dynamic_statuses())
+
+    start_time = time.time()
+    stop_placeholder_loop = asyncio.Event()
+
+    placeholder_view = PlaceholderLayoutView(
+        loading_text=format_placeholder_content(active_statuses[0], None),
+        duration_seconds=0,
+        is_enabled=False,
+        thought_data={"thoughts": "", "tool_calls": [], "model": active_model, "is_quiz": False},
+        model_name=active_model
+    )
+
+    placeholder_msg = await interaction.followup.send(view=placeholder_view, ephemeral=is_ephemeral)
+
+    placeholder_task = asyncio.create_task(
+        update_interaction_placeholder_loop(
+            interaction=interaction,
+            placeholder_view=placeholder_view,
+            statuses=active_statuses,
+            get_active_subtext_func=lambda: None,
+            start_time=start_time,
+            stop_event=stop_placeholder_loop,
+            target_message=placeholder_msg
+        )
+    )
+
+    sys_instruction = (
+        f"You are PriestyAI's creative localization specialist and master linguistic scribe.\n"
+        f"Your task is to translate, localize, and adapt the provided text into {clean_lang}.\n\n"
+        "STRICT STYLISTIC & DFM DIRECTIVES:\n"
+        "1. TONE & INSTRUCTIONS: Faithfully follow any custom tone, persona, dialect, or style rules specified by the user.\n"
+        "2. ACCURACY & NATURAL PHRASING: Preserve the core message while ensuring natural phrasing and cultural localization.\n"
+        "3. DISCORD-FLAVORED MARKDOWN (DFM) & CALLOUT PRESERVATION:\n"
+        "   - Standard callouts MUST use canonical GitHub/Discord alert syntax:\n"
+        "     > [!NOTE]\n"
+        "     > Content...\n\n"
+        "     > [!TIP]\n"
+        "     > Content...\n\n"
+        "     > [!IMPORTANT]\n"
+        "     > Content...\n\n"
+        "     > [!WARNING]\n"
+        "     > Content...\n\n"
+        "     > [!CAUTION]\n"
+        "     > Content...\n"
+        "   - CRITICAL: Keep the bracketed tag keyword ([!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION]) in standard English "
+        "so the DFM parser can recognize and render it, but translate the body text inside the blockquote (>).\n"
+        "   - If the input contains pre-rendered callout emojis or headers (e.g. `<:gfm_tip:...> **Tip**`, `<:gfm_note:...> **Note**`, or similar), "
+        "RECONSTRUCT them into standard clean markdown callouts (e.g. `> [!TIP]\\n> Translated body...`).\n"
+        "   - Ensure all lines within a callout box start with the blockquote character `>`.\n"
+        "4. PRESERVE TECHNICAL ELEMENTS:\n"
+        "   - Keep code blocks (```lang ... ```), inline code (`...`), file paths, URLs, and commands intact.\n"
+        "   - Keep Discord subtext (`-# ...`), timestamps (`<t:...>`), custom emojis (`<:...:...>`), and user/channel mentions (`<@...>`, `<#...>`).\n"
+        "5. NO XML/ARTIFACT TAGS: Do NOT emit any <artifact>, <quiz>, or <followup> tags.\n"
+        "6. Output ONLY the scribed/localized response with zero meta-commentary."
+    )
+
+    prompt_payload = f"Target Language: {clean_lang}\n"
+    if clean_inst:
+        prompt_payload += f"Creative Tone & Directives:\n{clean_inst}\n\n"
+    prompt_payload += f"Content to Scribe:\n{clean_content}"
+
+    try:
+        res = await client.aio.models.generate_content(
+            model=active_model,
+            contents=prompt_payload,
+            config=types.GenerateContentConfig(
+                system_instruction=sys_instruction
+            )
+        )
+        raw_result = res.text.strip() if (res and res.text) else "Scribing failed."
+        cleaned_result = re.sub(r'<artifact[^>]*>.*?</artifact>', '', raw_result, flags=re.DOTALL).strip()
+        parsed_result = apply_message_parsers(cleaned_result, interaction.guild)
+
+        stop_placeholder_loop.set()
+        if placeholder_task and not placeholder_task.done():
+            placeholder_task.cancel()
+        if not status_fetch_task.done():
+            status_fetch_task.cancel()
+
+        show_reply = should_show_reply_button(
+            bot=interaction.client,
+            guild=interaction.guild,
+            channel=interaction.channel,
+            interaction=interaction
+        )
+
+        final_view = build_v2_message_layout(
+            raw_text=parsed_result,
+            guild=interaction.guild,
+            show_reply_button=show_reply,
+            message_id=placeholder_msg.id if placeholder_msg else None
+        )
+
+        if placeholder_msg:
+            await placeholder_msg.edit(view=final_view)
+        else:
+            await interaction.followup.send(view=final_view, ephemeral=is_ephemeral)
+
+    except Exception as e:
+        stop_placeholder_loop.set()
+        if placeholder_task and not placeholder_task.done():
+            placeholder_task.cancel()
+        if not status_fetch_task.done():
+            status_fetch_task.cancel()
+        logger.exception(f"Scribe error: {e}")
+        try:
+            err_view = build_v2_message_layout(raw_text=f"Scribing error: `{e}`", guild=interaction.guild)
+            if placeholder_msg:
+                await placeholder_msg.edit(view=err_view)
+            else:
+                await interaction.followup.send(view=err_view, ephemeral=True)
+        except Exception:
+            pass
 
 def build_chat_session_context_xml(
     session_id: str,
@@ -251,23 +587,11 @@ async def execute_chat_turn(
     answer_now_event = asyncio.Event()
     stop_placeholder_loop = asyncio.Event()
 
-    stream_dispatcher = DiscordStreamDispatcher(
-        interaction=interaction,
-        is_ephemeral=is_ephemeral,
-        guild=guild,
-        show_reply_button=show_reply
-    )
-    artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(channel, "id", "global"))
-
-    accumulated_thoughts = []
-    tool_call_history = []
-    active_tool_start_times = {}
-    active_model_used = "gemma-4-31b-it"
-
     active_witty_statuses = ["Thinking", "Consulting neural cores", "Formulating response"]
     active_tool_subtext: str | None = None
     first_content_received = False
     is_quiz_turn = False
+    active_model_used = "gemma-4-31b-it"
 
     def get_active_subtext():
         return active_tool_subtext
@@ -293,14 +617,30 @@ async def execute_chat_turn(
         is_quiz=is_quiz_turn
     )
 
-    try:
-        await interaction.edit_original_response(view=placeholder_view)
-    except Exception as ex:
-        logger.debug(f"Failed to display initial interaction placeholder: {ex}")
+    placeholder_msg = await interaction.followup.send(view=placeholder_view, ephemeral=is_ephemeral)
+
+    stream_dispatcher = DiscordStreamDispatcher(
+        interaction=interaction,
+        is_ephemeral=is_ephemeral,
+        guild=guild,
+        show_reply_button=show_reply,
+        existing_response_msg=placeholder_msg
+    )
+    artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(channel, "id", "global"))
+
+    accumulated_thoughts = []
+    tool_call_history = []
+    active_tool_start_times = {}
 
     placeholder_task = asyncio.create_task(
         update_interaction_placeholder_loop(
-            interaction, placeholder_view, active_witty_statuses, get_active_subtext, thinking_start_time, stop_placeholder_loop
+            interaction=interaction,
+            placeholder_view=placeholder_view,
+            statuses=active_witty_statuses,
+            get_active_subtext_func=get_active_subtext,
+            start_time=thinking_start_time,
+            stop_event=stop_placeholder_loop,
+            target_message=placeholder_msg
         )
     )
 
@@ -318,7 +658,8 @@ async def execute_chat_turn(
                     curr_txt = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
                     placeholder_view.update_state(curr_txt, max(0, int(time.time() - thinking_start_time)))
                     try:
-                        await interaction.edit_original_response(view=placeholder_view)
+                        if placeholder_msg:
+                            await placeholder_msg.edit(view=placeholder_view)
                     except Exception:
                         pass
 
@@ -383,6 +724,10 @@ async def execute_chat_turn(
                     stream_dispatcher.add_media_block(img_fname, img_bytes)
                     tool_context.staged_image_bytes = None
 
+                elif tool_name in ["github_repo", "fetch_github"] and hasattr(tool_context, "staged_github_files"):
+                    for g_file in tool_context.staged_github_files:
+                        stream_dispatcher.add_raw_attachment(g_file["filename"], g_file["bytes"])
+
             elif event_type == "CONTENT":
                 if not first_content_received:
                     first_content_received = True
@@ -415,14 +760,7 @@ async def execute_chat_turn(
             clean_art["data_b64"] = b64_art
             sanitized_artifacts.append(clean_art)
 
-        root_msg = stream_dispatcher.primary_message
-        if not root_msg:
-            try:
-                root_msg = await interaction.original_response()
-                stream_dispatcher.primary_message = root_msg
-            except Exception:
-                pass
-
+        root_msg = stream_dispatcher.primary_message or placeholder_msg
         target_id = root_msg.id if root_msg else "temp"
 
         await stream_dispatcher.finalize(
@@ -514,8 +852,11 @@ async def execute_chat_turn(
         logger.exception(f"Error in /chat turn: {e}")
         try:
             err_view = build_v2_message_layout(raw_text=f"Error: `{e}`", guild=guild)
-            await interaction.edit_original_response(view=err_view)
-        except discord.HTTPException:
+            if placeholder_msg:
+                await placeholder_msg.edit(view=err_view)
+            else:
+                await interaction.followup.send(view=err_view, ephemeral=True)
+        except Exception:
             pass
     finally:
         stop_placeholder_loop.set()
@@ -543,8 +884,8 @@ def setup_chat_commands(tree: app_commands.CommandTree):
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     @app_commands.describe(query="The prompt or question to ask", visibility="Public or Ephemeral response")
     @app_commands.choices(visibility=[
-        app_commands.Choice(name="Public", value="public"),
-        app_commands.Choice(name="Ephemeral", value="private")
+        app_commands.Choice(name="Public (Visible to all members)", value="public"),
+        app_commands.Choice(name="Ephemeral (Only visible to you)", value="private")
     ])
     async def ask_command(interaction: discord.Interaction, query: str, visibility: str = "public"):
         if is_user_banned(interaction.user.id):
@@ -602,15 +943,8 @@ def setup_chat_commands(tree: app_commands.CommandTree):
         answer_now_event = asyncio.Event()
         stop_placeholder_loop = asyncio.Event()
 
-        stream_dispatcher = DiscordStreamDispatcher(
-            interaction=interaction,
-            is_ephemeral=is_ephemeral,
-            guild=interaction.guild,
-            show_reply_button=show_reply
-        )
         tool_context = ToolExecutionContext(channel=interaction.channel, guild=interaction.guild, author=interaction.user, bot=interaction.client)
-        artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
-
+        
         accumulated_thoughts = []
         tool_call_history = []
         active_tool_start_times = {}
@@ -645,14 +979,26 @@ def setup_chat_commands(tree: app_commands.CommandTree):
             is_quiz=is_quiz_turn
         )
 
-        try:
-            await interaction.edit_original_response(view=placeholder_view)
-        except Exception as ex:
-            logger.debug(f"Failed to display initial ask placeholder: {ex}")
+        placeholder_msg = await interaction.followup.send(view=placeholder_view, ephemeral=is_ephemeral)
+
+        stream_dispatcher = DiscordStreamDispatcher(
+            interaction=interaction,
+            is_ephemeral=is_ephemeral,
+            guild=interaction.guild,
+            show_reply_button=show_reply,
+            existing_response_msg=placeholder_msg
+        )
+        artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
 
         placeholder_task = asyncio.create_task(
             update_interaction_placeholder_loop(
-                interaction, placeholder_view, active_witty_statuses, get_active_subtext, thinking_start_time, stop_placeholder_loop
+                interaction=interaction,
+                placeholder_view=placeholder_view,
+                statuses=active_witty_statuses,
+                get_active_subtext_func=get_active_subtext,
+                start_time=thinking_start_time,
+                stop_event=stop_placeholder_loop,
+                target_message=placeholder_msg
             )
         )
 
@@ -670,7 +1016,8 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                         curr_txt = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
                         placeholder_view.update_state(curr_txt, max(0, int(time.time() - thinking_start_time)))
                         try:
-                            await interaction.edit_original_response(view=placeholder_view)
+                            if placeholder_msg:
+                                await placeholder_msg.edit(view=placeholder_view)
                         except Exception:
                             pass
 
@@ -767,14 +1114,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                 clean_art["data_b64"] = b64_art
                 sanitized_artifacts.append(clean_art)
 
-            root_msg = stream_dispatcher.primary_message
-            if not root_msg:
-                try:
-                    root_msg = await interaction.original_response()
-                    stream_dispatcher.primary_message = root_msg
-                except Exception:
-                    pass
-
+            root_msg = stream_dispatcher.primary_message or placeholder_msg
             target_id = root_msg.id if root_msg else "temp"
 
             await stream_dispatcher.finalize(
@@ -842,8 +1182,11 @@ def setup_chat_commands(tree: app_commands.CommandTree):
             logger.exception(f"Error in /ask command: {e}")
             try:
                 err_view = build_v2_message_layout(raw_text=f"Error: `{e}`", guild=interaction.guild)
-                await interaction.edit_original_response(view=err_view)
-            except discord.HTTPException:
+                if placeholder_msg:
+                    await placeholder_msg.edit(view=err_view)
+                else:
+                    await interaction.followup.send(view=err_view, ephemeral=True)
+            except Exception:
                 pass
         finally:
             stop_placeholder_loop.set()
@@ -930,4 +1273,70 @@ def setup_chat_commands(tree: app_commands.CommandTree):
             )
 
         modal = build_user_chat_modal(on_submit=on_modal_submit)
+        await interaction.response.send_modal(modal)
+
+    @tree.command(name="scribe", description="Translate, localize, and adapt text with custom creative tone and style instructions")
+    @app_commands.allowed_installs(guilds=True, users=True)
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    @app_commands.describe(
+        text="The text to scribe or translate (leave blank to open interactive modal)",
+        language="Target language to translate into",
+        instructions="Tone or creative style directives (e.g. formal, slang, poetic)",
+        visibility="Choose between Public or Ephemeral response"
+    )
+    @app_commands.choices(visibility=[
+        app_commands.Choice(name="Public (Visible to all members)", value="public"),
+        app_commands.Choice(name="Ephemeral (Only visible to you)", value="private")
+    ])
+    @app_commands.autocomplete(language=scribe_language_autocomplete)
+    async def scribe_command(
+        interaction: discord.Interaction,
+        text: str | None = None,
+        language: str = "English",
+        instructions: str = "",
+        visibility: str = "public"
+    ):
+        if is_user_banned(interaction.user.id):
+            ban_view = BannedUserNoticeView(author=interaction.user)
+            await interaction.response.send_message(view=ban_view, ephemeral=True)
+            return
+
+        if not config_manager.has_user_agreed(interaction.user.id):
+            async def on_agreed(sub_inter: discord.Interaction):
+                await sub_inter.response.send_message("Terms accepted. You can now use /scribe.", ephemeral=True)
+
+            modal = build_welcome_terms_modal(on_agree_callback=on_agreed)
+            await interaction.response.send_modal(modal)
+            return
+
+        if text and text.strip():
+            is_ephemeral = (str(visibility).strip().lower() == "private")
+            await _execute_scribe(
+                interaction=interaction,
+                content=text.strip(),
+                target_language=language or "English",
+                instructions=instructions or "",
+                is_ephemeral=is_ephemeral
+            )
+            return
+
+        async def on_modal_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+            m_content = data.get("content", "").strip()
+            m_inst = data.get("instructions", "").strip()
+            m_lang = data.get("target_language", "English").strip() or "English"
+            
+            raw_vis = data.get("visibility", "public")
+            if isinstance(raw_vis, list):
+                raw_vis = raw_vis[0] if raw_vis else "public"
+            m_ephemeral = (str(raw_vis).strip().lower() == "private")
+
+            await _execute_scribe(
+                interaction=sub_inter,
+                content=m_content,
+                target_language=m_lang,
+                instructions=m_inst,
+                is_ephemeral=m_ephemeral
+            )
+
+        modal = build_scribe_modal(on_submit=on_modal_submit)
         await interaction.response.send_modal(modal)

@@ -40,8 +40,17 @@ BENIGN TECHNICAL INQUIRIES (DO NOT FLAG):
 
 Be accurate, objective, and return flagged=true only when a clear violation is present."""
 
+def _get_moderation_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
 def _init_moderation_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = _get_moderation_connection()
     with conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -70,7 +79,7 @@ _init_moderation_db()
 
 def is_user_banned(user_id: str | int) -> bool:
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _get_moderation_connection()
         with conn:
             cursor = conn.cursor()
             cursor.execute("SELECT user_id FROM banned_users WHERE user_id = ?", (str(user_id),))
@@ -83,7 +92,7 @@ def is_user_banned(user_id: str | int) -> bool:
 
 def ban_user(user_id: str | int, reason: str = "Zero-tolerance safety violation"):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _get_moderation_connection()
         with conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -100,7 +109,7 @@ def ban_user(user_id: str | int, reason: str = "Zero-tolerance safety violation"
 
 def log_moderation_violation(user_id: str | int, guild_id: str | int | None, categories: list[str], max_score: float):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _get_moderation_connection()
         with conn:
             cursor = conn.cursor()
             cursor.execute("""

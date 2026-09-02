@@ -100,6 +100,18 @@ THREAD_CHAT_AGENT_TOOLS = {
     "calc"
 }
 
+def extract_plan_text_from_artifact(art: dict[str, Any] | None) -> str:
+    if not art:
+        return ""
+    if art.get("content") and art["content"].strip():
+        return art["content"].strip()
+    files = art.get("files", [])
+    if files and isinstance(files, list):
+        for f in files:
+            if f.get("content") and f["content"].strip():
+                return f["content"].strip()
+    return ""
+
 def compact_conversation_history(contents: list[types.Content], keep_recent_turns: int = 4) -> list[types.Content]:
     if len(contents) <= (keep_recent_turns * 2 + 1):
         return contents
@@ -739,18 +751,26 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
                 art_filename = plan_art.get("filename", "plan.md")
                 art_title = plan_art.get("title", "Plan & Scope")
+                extracted_plan_body = extract_plan_text_from_artifact(plan_art)
 
                 branch_manager.save_or_update_artifact(
                     channel_id=thread.id,
                     filename=art_filename,
                     title=art_title,
-                    content=plan_art.get("content", ""),
+                    content=extracted_plan_body,
                     change_summary="Plan & Scope Deliverable"
                 )
 
+                try:
+                    target_disk_path = os.path.join(session["workspace_path"], art_filename)
+                    with open(target_disk_path, "w", encoding="utf-8", errors="replace") as f_out:
+                        f_out.write(extracted_plan_body)
+                except Exception as ex:
+                    logger.debug(f"[Agent] Could not write plan to disk: {ex}")
+
                 async def handle_approved(sub_inter: discord.Interaction):
                     await sub_inter.followup.send(content=f"{OCTICONS_MAP['oct_check']} **Plan Approved!** Starting autonomous execution...", ephemeral=False)
-                    await cls.start_execution_phase(thread, session, approved_plan_text=plan_art.get("content", ""))
+                    await cls.start_execution_phase(thread, session, approved_plan_text=extracted_plan_body)
 
                 app_view = AgentPlanApprovalView(
                     conversational_text=clean_text or "I have drafted the plan based on the research and requirements. Please review and approve to proceed:",
@@ -844,13 +864,24 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
         exec_header_task = asyncio.create_task(exec_header_loop())
 
-        if not approved_plan_text:
+        if not approved_plan_text or not approved_plan_text.strip():
             for candidate_fn in ["research_plan.md", "plan.md"]:
-                art_db = branch_manager.get_artifact_by_channel_and_file(thread.id, candidate_fn)
-                if art_db:
-                    versions = art_db.get("versions", [])
-                    approved_plan_text = versions[-1].get("content", "") if versions else ""
-                    break
+                disk_path = os.path.join(session["workspace_path"], candidate_fn)
+                if os.path.exists(disk_path):
+                    try:
+                        with open(disk_path, "r", encoding="utf-8", errors="replace") as f_in:
+                            approved_plan_text = f_in.read().strip()
+                        if approved_plan_text:
+                            break
+                    except Exception:
+                        pass
+
+                if not approved_plan_text:
+                    art_db = branch_manager.get_artifact_by_channel_and_file(thread.id, candidate_fn)
+                    if art_db:
+                        approved_plan_text = extract_plan_text_from_artifact(art_db)
+                        if approved_plan_text:
+                            break
 
         resolved_cfg = config_manager.resolve_effective_config(
             thread.guild.id if thread.guild else None,

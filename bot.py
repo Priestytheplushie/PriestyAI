@@ -340,6 +340,12 @@ class PriestyBot(discord.Client):
                 return target_msg.attachments[0].url
             return None
 
+        if custom_id.startswith("clear_staged_ctx_"):
+            chan_id = custom_id.replace("clear_staged_ctx_", "")
+            memory_manager.clear_staged_chat_context(chan_id, interaction.user.id)
+            await interaction.response.send_message("🗑️ **Queued context cleared for this channel.**", ephemeral=True)
+            return
+
         if custom_id.startswith("chat_reply:") or custom_id == "btn_chat_reply":
             if is_user_banned(interaction.user.id):
                 ban_view = BannedUserNoticeView(author=interaction.user)

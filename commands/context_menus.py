@@ -22,6 +22,7 @@ from core.engine import ChatEngine
 from core.client_manager import client_manager
 from core.branch_manager import branch_manager
 from core.config_manager import config_manager
+from core.memory_manager import memory_manager
 from handlers.stream_handler import (
     DiscordStreamDispatcher,
     build_v2_message_layout,
@@ -68,6 +69,12 @@ DEFAULT_SUMMARIZE_STATUSES = [
     "Condensing points of interest",
     "Polishing summary structure"
 ]
+
+def is_foreign_context(interaction: discord.Interaction) -> bool:
+    if not interaction.guild_id:
+        return True
+    bot_guild = interaction.client.get_guild(interaction.guild_id)
+    return bot_guild is None or getattr(bot_guild, "me", None) is None
 
 async def generate_retry_witty_statuses(prompt: str, version_idx: int) -> list[str]:
     client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite")
@@ -1028,7 +1035,12 @@ def setup_context_menus(tree: app_commands.CommandTree):
             await interaction.response.send_message(view=ban_view, ephemeral=True)
             return
 
-        is_guild_text = interaction.guild is not None and isinstance(interaction.channel, discord.TextChannel)
+        is_foreign = is_foreign_context(interaction)
+        is_guild_text = (
+            not is_foreign
+            and interaction.guild is not None
+            and isinstance(interaction.channel, discord.TextChannel)
+        )
 
         select_options = [
             {
@@ -1061,6 +1073,13 @@ def setup_context_menus(tree: app_commands.CommandTree):
                 "description": "Fork discussion into an isolated thread"
             })
 
+        if is_foreign:
+            select_options.append({
+                "label": "Add to Chat Context",
+                "value": "add_to_context",
+                "description": "Queues this message into your next /chat query"
+            })
+
         fields = [
             {
                 "type": "text_display",
@@ -1086,7 +1105,38 @@ def setup_context_menus(tree: app_commands.CommandTree):
             if isinstance(selected, list) and selected:
                 selected = selected[0]
 
-            if selected == "summarize":
+            if selected == "add_to_context":
+                chan_id = str(message.channel.id if message.channel else "dm")
+                uid = str(sub_inter.user.id)
+                extracted_content = extract_text_from_v2_message(message)
+
+                staged_entry = {
+                    "id": str(message.id),
+                    "author": message.author.display_name,
+                    "author_id": str(message.author.id),
+                    "content": extracted_content[:3000]
+                }
+
+                count = memory_manager.add_staged_chat_context(chan_id, uid, staged_entry)
+
+                clear_view = View()
+                clear_btn = Button(
+                    label="Clear Queued Context",
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=f"clear_staged_ctx_{chan_id}"
+                )
+                clear_view.add_item(clear_btn)
+
+                await sub_inter.response.send_message(
+                    content=(
+                        f"📎 **Added message from {message.author.mention} to your `/chat` context queue.**\n"
+                        f"-# Total queued in this channel: `{count}` message(s). Will be included in your next `/chat` turn."
+                    ),
+                    view=clear_view,
+                    ephemeral=True
+                )
+
+            elif selected == "summarize":
                 await _execute_summarize(sub_inter, message)
             elif selected == "run_as_prompt":
                 await _execute_run_as_prompt(sub_inter, message)

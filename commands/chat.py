@@ -476,6 +476,20 @@ def build_chat_session_context_xml(
             f'  </server_info>'
         )
 
+    chan_str = str(getattr(channel, "id", "dm"))
+    uid_str = str(user.id)
+    staged_context_items = memory_manager.get_staged_chat_context(chan_str, uid_str)
+    if staged_context_items:
+        s_lines = ['  <user_staged_context description="Messages explicitly queued by user to provide context">']
+        for s_item in staged_context_items:
+            m_author = s_item.get("author", "User")
+            m_id = s_item.get("id", "")
+            m_time = s_item.get("created_at", "")
+            m_content = s_item.get("content", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            s_lines.append(f'    <quoted_message author="{m_author}" id="{m_id}" timestamp="{m_time}">\n      {m_content}\n    </quoted_message>')
+        s_lines.append('  </user_staged_context>')
+        envelope.append("\n".join(s_lines))
+
     if participant_entities and guild:
         p_lines = ['  <channel_participants>']
         for ent_id in participant_entities:
@@ -574,6 +588,8 @@ async def execute_chat_turn(
         user=user,
         participant_entities=participant_entities
     )
+
+    memory_manager.pop_staged_chat_context(str(interaction.channel_id or "dm"), str(user.id))
 
     thinking_start_time = time.time()
     answer_now_event = asyncio.Event()
@@ -932,28 +948,66 @@ def setup_chat_commands(tree: app_commands.CommandTree):
         )
 
         thinking_start_time = time.time()
-        tool_context = ToolExecutionContext(
-            channel=interaction.channel,
-            guild=interaction.guild,
-            author=interaction.user,
-            bot=interaction.client
-        )
+        answer_now_event = asyncio.Event()
+        stop_placeholder_loop = asyncio.Event()
+
+        tool_context = ToolExecutionContext(channel=interaction.channel, guild=interaction.guild, author=interaction.user, bot=interaction.client)
         
         accumulated_thoughts = []
         tool_call_history = []
         active_tool_start_times = {}
         active_model_used = "gemma-4-31b-it"
 
+        active_witty_statuses = ["Thinking", "Consulting neural cores", "Formulating response"]
+        active_tool_subtext: str | None = None
+        first_content_received = False
+        is_quiz_turn = False
+
+        def get_active_subtext():
+            return active_tool_subtext
+
+        async def on_answer_now_clicked(inter: discord.Interaction):
+            try:
+                if not inter.response.is_done():
+                    await inter.response.defer(ephemeral=True)
+            except Exception:
+                pass
+            answer_now_event.set()
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
+
+        placeholder_view = PlaceholderLayoutView(
+            loading_text=format_placeholder_content(active_witty_statuses[0], active_tool_subtext),
+            duration_seconds=0,
+            is_enabled=False,
+            on_answer_now_callback=on_answer_now_clicked,
+            thought_data={"thoughts": "", "tool_calls": [], "model": active_model_used, "is_quiz": is_quiz_turn},
+            model_name=active_model_used,
+            is_quiz=is_quiz_turn
+        )
+
+        placeholder_msg = await interaction.followup.send(view=placeholder_view, ephemeral=is_ephemeral)
+
         stream_dispatcher = DiscordStreamDispatcher(
             interaction=interaction,
             is_ephemeral=is_ephemeral,
             guild=interaction.guild,
-            show_reply_button=show_reply
+            show_reply_button=show_reply,
+            existing_response_msg=placeholder_msg
         )
-        artifact_parser = ArtifactStreamParser(
-            stream_dispatcher,
-            tool_context,
-            channel_id=getattr(interaction.channel, "id", "global")
+        artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
+
+        placeholder_task = asyncio.create_task(
+            update_interaction_placeholder_loop(
+                interaction=interaction,
+                placeholder_view=placeholder_view,
+                statuses=active_witty_statuses,
+                get_active_subtext_func=get_active_subtext,
+                start_time=thinking_start_time,
+                stop_event=stop_placeholder_loop,
+                target_message=placeholder_msg
+            )
         )
 
         try:
@@ -961,10 +1015,28 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                 prompt=query,
                 context_xml="<context></context>",
                 bot_user_id=interaction.client.user.id,
-                tool_context=tool_context
+                tool_context=tool_context,
+                answer_now_event=answer_now_event
             ):
-                if event_type == "ACTIVE_MODEL":
+                if event_type == "ROUTED":
+                    if payload.witty_statuses:
+                        active_witty_statuses[:] = payload.witty_statuses
+                        curr_txt = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
+                        placeholder_view.update_state(curr_txt, max(0, int(time.time() - thinking_start_time)))
+                        try:
+                            if placeholder_msg:
+                                await placeholder_msg.edit(view=placeholder_view)
+                        except Exception:
+                            pass
+
+                    if getattr(payload, "is_quiz", False):
+                        is_quiz_turn = True
+                        placeholder_view.is_quiz = True
+                        placeholder_view.thought_data["is_quiz"] = True
+
+                elif event_type == "ACTIVE_MODEL":
                     active_model_used = str(payload)
+                    placeholder_view.model_name = active_model_used
 
                 elif event_type == "RECALLED_MEMORIES":
                     count = payload.get("count", 0)
@@ -975,14 +1047,19 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                         "duration_ms": 0,
                         "order": -1.0
                     })
+                    placeholder_view.thought_data["tool_calls"] = tool_call_history
 
                 elif event_type == "THOUGHT":
                     accumulated_thoughts.append(payload)
+                    placeholder_view.enable_thinking()
+                    placeholder_view.thought_data["thoughts"] = "".join(accumulated_thoughts)
 
                 elif event_type == "TOOL_START":
                     tool_name = payload.get("name", "")
                     args = payload.get("args", {})
                     active_tool_start_times[tool_name] = time.perf_counter()
+                    active_tool_subtext = get_tool_subtext(tool_name, args)
+                    placeholder_view.enable_thinking()
                     if tool_name in ["create_artifact", "update_artifact"]:
                         stream_dispatcher.add_artifact_placeholder(tool_name, args)
 
@@ -996,6 +1073,8 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                         "result": payload.get("result", {}),
                         "duration_ms": dur_ms
                     })
+                    active_tool_subtext = None
+                    placeholder_view.thought_data["tool_calls"] = tool_call_history
 
                     if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
                         last_art = tool_context.staged_artifacts[-1]
@@ -1012,9 +1091,18 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                         tool_context.staged_image_bytes = None
 
                 elif event_type == "CONTENT":
+                    if not first_content_received:
+                        first_content_received = True
+                        stop_placeholder_loop.set()
+                        if placeholder_task and not placeholder_task.done():
+                            placeholder_task.cancel()
+
                     await artifact_parser.feed(payload)
 
             await artifact_parser.finish()
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
 
             final_dur = max(1, int(time.time() - thinking_start_time))
             active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
@@ -1034,7 +1122,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                 clean_art["data_b64"] = b64_art
                 sanitized_artifacts.append(clean_art)
 
-            root_msg = stream_dispatcher.primary_message
+            root_msg = stream_dispatcher.primary_message or placeholder_msg
             target_id = root_msg.id if root_msg else "temp"
 
             await stream_dispatcher.finalize(
@@ -1102,33 +1190,77 @@ def setup_chat_commands(tree: app_commands.CommandTree):
             logger.exception(f"Error in /ask command: {e}")
             try:
                 err_view = build_v2_message_layout(raw_text=f"Error: `{e}`", guild=interaction.guild)
-                await interaction.followup.send(view=err_view, ephemeral=True)
+                if placeholder_msg:
+                    await placeholder_msg.edit(view=err_view)
+                else:
+                    await interaction.followup.send(view=err_view, ephemeral=True)
             except Exception:
                 pass
+        finally:
+            stop_placeholder_loop.set()
+            if placeholder_task and not placeholder_task.done():
+                placeholder_task.cancel()
 
     @tree.command(name="chat", description="Start or continue a multi-turn conversation anywhere on Discord")
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    @app_commands.describe(input="Type a prompt or 'reset' to clear session, or leave blank to open the rich chat modal")
-    async def chat_command(interaction: discord.Interaction, input: str | None = None):
+    @app_commands.describe(
+        input="Instant prompt to bypass modal (leave blank to open modal)",
+        action="Session management options (Reset history or clear queued context)"
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Reset Session (Wipes conversation history)", value="reset_history"),
+        app_commands.Choice(name="Clear Queued Context (Removes staged messages)", value="clear_context"),
+        app_commands.Choice(name="Reset All (Wipes history + staged context)", value="reset_all")
+    ])
+    async def chat_command(
+        interaction: discord.Interaction,
+        input: str | None = None,
+        action: str | None = None
+    ):
         if is_user_banned(interaction.user.id):
             ban_view = BannedUserNoticeView(author=interaction.user)
             await interaction.response.send_message(view=ban_view, ephemeral=True)
             return
 
         session_id = get_user_chat_session_id(interaction.channel_id, interaction.user.id)
+        chan_id = str(interaction.channel_id or "dm")
+        uid = str(interaction.user.id)
 
-        if input and input.strip().lower() in ["reset", "clear", "--reset", "-r", "clean"]:
+        if action and not input:
+            if action == "reset_history":
+                memory_manager.delete_chat_session(session_id)
+                await interaction.response.send_message(
+                    content="🧹 **Session Reset:** Conversation history for this channel has been cleared.",
+                    ephemeral=True
+                )
+                return
+
+            elif action == "clear_context":
+                memory_manager.clear_staged_chat_context(chan_id, uid)
+                await interaction.response.send_message(
+                    content="🗑️ **Context Cleared:** Staged quote messages have been removed.",
+                    ephemeral=True
+                )
+                return
+
+            elif action == "reset_all":
+                memory_manager.delete_chat_session(session_id)
+                memory_manager.clear_staged_chat_context(chan_id, uid)
+                await interaction.response.send_message(
+                    content="🧹 **Full Reset:** Conversation history and queued context have both been cleared.",
+                    ephemeral=True
+                )
+                return
+
+        if action in ["reset_history", "reset_all"]:
             memory_manager.delete_chat_session(session_id)
-            await interaction.response.send_message(
-                content="Chat Session Reset: Your conversation history for this channel has been cleared. Your next message will start fresh.",
-                ephemeral=True
-            )
-            return
+        if action in ["clear_context", "reset_all"]:
+            memory_manager.clear_staged_chat_context(chan_id, uid)
 
         if not config_manager.has_user_agreed(interaction.user.id):
             async def on_agreed(sub_inter: discord.Interaction):
-                await sub_inter.response.send_message("Terms accepted. You can now use /chat.", ephemeral=True)
+                await sub_inter.response.send_message("Terms accepted. You can now use `/chat`.", ephemeral=True)
 
             modal = build_welcome_terms_modal(on_agree_callback=on_agreed)
             await interaction.response.send_modal(modal)

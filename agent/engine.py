@@ -54,6 +54,14 @@ from tools.registry import tool_registry, ToolExecutionContext
 
 logger = logging.getLogger("PriestyAI.Agent.Engine")
 
+PRIMARY_AGENT_MODEL = "gemma-4-31b-it"
+AGENT_FALLBACK_CASCADE = [
+    "gemma-4-31b-it",
+    "gemma-4-26b-a4b-it",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite"
+]
+
 PLANNING_ALLOWED_TOOLS = {
     "agent_read_file",
     "agent_list_dir",
@@ -236,25 +244,25 @@ class AgentEngine:
     async def bootstrap_thread_meta(prompt: str) -> tuple[str, list[str], str]:
         default_title = "Agent Session"
         default_statuses = [
-            "Analyzing research objective and workspace",
-            "Synthesizing dependencies and reference materials",
-            "Evaluating architectural constraints and findings",
-            "Conducting multi-hop investigation",
-            "Drafting plan steps and report structure",
-            "Finalizing research summary and citations"
+            "Analyzing workspace structure",
+            "Synthesizing dependencies and entry points",
+            "Evaluating architectural components",
+            "Scoping implementation plan",
+            "Drafting plan steps and schema",
+            "Finalizing task outline"
         ]
 
         now_utc = datetime.now(timezone.utc)
         current_year_str = str(now_utc.year)
 
-        instruction = f"""Analyze this agent prompt. Real-world year is {current_year_str}.
+        instruction = f"""Analyze this agent prompt. Real-world year is {current_year_str} [1].
 Classify the task into:
 - task_type: "research" (deep research, comparisons, market study, report writing), "coding" (software development, bug fixes, refactoring), or "hybrid" (researching libraries/APIs first, then implementing in repo).
 Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSON:
 {{"title": "Title Here", "task_type": "coding"|"research"|"hybrid", "statuses": ["status 1", "status 2", ...]}}"""
 
         attempted_keys = set()
-        for attempt in range(client_manager.key_count):
+        for _ in range(client_manager.key_count):
             client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash-lite", exclude_keys=attempted_keys, fallback=False)
             if not client:
                 break
@@ -280,7 +288,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                     return title, statuses, task_type
             except Exception as e:
                 client_manager.report_error(key_idx, active_model, e)
-                logger.warning(f"[AgentBootstrap] Fast meta generation error on Key #{key_idx}: {e}")
+                logger.warning(f"[AgentBootstrap] Meta generation error on Key #{key_idx}: {e}")
 
         return default_title, default_statuses, "general"
 
@@ -292,9 +300,9 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
         prompt_instruction = (
             f"You are PriestyAI. You just completed the user's objective: '{objective}'.\n"
-            f"Files created in workspace: {', '.join(workspace_files[:10]) or 'report.html'}\n\n"
+            f"Files created or modified in workspace: {', '.join(workspace_files[:10]) or 'report.html'}\n\n"
             f"Write a friendly, natural, 2-paragraph conversational breakdown directly in chat explaining "
-            f"the research findings and what was built/verified. Speak directly like a collaborative software engineer. "
+            f"what was implemented, tested, and verified. Speak directly like a collaborative software engineer. "
             f"DO NOT use robotic headers like 'Executive Summary'."
         )
 
@@ -308,7 +316,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         except Exception as e:
             logger.debug(f"Failed to generate fallback summary: {e}")
 
-        return "Successfully investigated the technical requirements, verified all implementations, and compiled the deliverables into the workspace."
+        return "Successfully implemented the requirements, verified all components, and compiled the deliverables into the workspace."
 
     @classmethod
     async def start_planning_turn(cls, thread: discord.Thread, session: dict[str, Any], feedback: str | None = None):
@@ -325,7 +333,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             _, _, dynamic_task_type = await cls.bootstrap_thread_meta(prompt)
             session_manager.update_session(session_id, task_type=dynamic_task_type)
             session["task_type"] = dynamic_task_type
-            logger.info(f"[AgentPlanning] Multi-Task #{len(tasks_history) + 1} dynamically classified as: '{dynamic_task_type}'")
+            logger.info(f"[AgentPlanning] Multi-Task #{len(tasks_history) + 1} classified as: '{dynamic_task_type}'")
 
         logger.info(f"[AgentPlanning] Starting planning turn for session #{session_id} in thread {thread.id}...")
 
@@ -357,19 +365,22 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             idx = 0
             while not stop_header_loop.is_set():
                 try:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(2.5)
                     if stop_header_loop.is_set() or abort_event.is_set():
                         break
                     elapsed = max(1, int(time.time() - t_start))
-                    if elapsed % 4 == 0:
+                    if elapsed % 5 == 0:
                         idx = (idx + 1) % len(witty_statuses)
                     curr_txt = witty_statuses[idx]
                     h_view = build_agent_header_layout(curr_txt, duration_seconds=elapsed, session_id=session_id, phase="planning")
                     await header_msg.edit(view=h_view)
                     active_thought_record["duration_seconds"] = elapsed
                     session_manager.save_session_thoughts(session_id, active_thought_record["thoughts"], active_thought_record["tool_calls"], elapsed)
-                except Exception:
+                except (discord.NotFound, discord.Forbidden):
                     break
+                except Exception as ex:
+                    logger.debug(f"[AgentHeaderLoop] Transient edit warning: {ex}")
+                    await asyncio.sleep(3.0)
 
         header_task = asyncio.create_task(header_loop())
         step_counter = 0
@@ -396,7 +407,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
         dir_res = await agent_list_dir(subpath="", context=tool_context)
         file_list = dir_res.get("files", [])
-        file_list_summary = "\n".join([f"• `{f}`" for f in file_list[:50]]) or "*Empty workspace (research/greenfield)*"
+        file_list_summary = "\n".join([f"• `{f}`" for f in file_list[:50]]) or "*Empty workspace*"
 
         extracted_urls = re.findall(r'https?://[^\s<>"]+', prompt)
         priority_links_xml = ""
@@ -443,7 +454,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             f"  <workspace_root>./</workspace_root>\n"
             f"  <files_indexed total='{len(file_list)}'>\n{file_list_summary}\n  </files_indexed>{priority_links_xml}{completed_tasks_xml}{thread_chat_xml}\n"
             f"</agent_workspace>\n\n"
-            f"Execute your planning turn. Scope the requirements and draft the plan artifact (`research_plan.md` or `plan.md`). If user URLs are present in <user_priority_sources>, call `agent_read_link` on them FIRST."
+            f"Execute your planning turn. Inspect at most 3-5 key entry/schema files to understand data structures, and immediately draft `<artifact filename='plan.md'>` (or `research_plan.md`)."
         )
 
         turn_contents: list[types.Content] = [
@@ -470,8 +481,6 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=thread.id)
 
         accumulated_thoughts = []
-        candidate_models = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.5-flash-lite"]
-
         formatted_planning_instruction = (
             AGENT_PLANNING_SYSTEM_INSTRUCTION
             .replace("{current_date}", current_date_str)
@@ -481,7 +490,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         was_aborted = False
 
         try:
-            for tool_turn in range(25):
+            for tool_turn in range(8):
                 if abort_event.is_set():
                     was_aborted = True
                     break
@@ -492,12 +501,12 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
                 working_turn_contents = compact_conversation_history(turn_contents, keep_recent_turns=3)
 
-                for model_cand in candidate_models:
+                for model_cand in AGENT_FALLBACK_CASCADE:
                     if abort_event.is_set():
                         was_aborted = True
                         break
 
-                    eff_thinking = "HIGH" if "gemma" in model_cand else "HIGH"
+                    eff_thinking = "HIGH"
                     attempted_keys = set()
                     consecutive_503s = 0
 
@@ -562,7 +571,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                             if "503" in err_desc or "unavailable" in err_desc.lower():
                                 consecutive_503s += 1
                                 if consecutive_503s >= 2:
-                                    logger.warning(f"[AgentPlanning] '{model_cand}' experiencing high demand. Cascading immediately to next model candidate...")
+                                    logger.warning(f"[AgentPlanning] '{model_cand}' overloaded. Stepping down immediately...")
                                     break
                             if ChatEngine._is_retryable_error(err_desc):
                                 continue
@@ -619,7 +628,51 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                 if was_aborted:
                     break
 
+                if tool_turn >= 4 and not tool_context.staged_artifacts:
+                    fres_parts.append(types.Part(text="\n[SYSTEM DIRECTIVE]: You have finished inspecting files. Do NOT call any more tools. Summarize your plan and emit <artifact filename='plan.md'> (or research_plan.md)."))
+
                 turn_contents.append(types.Content(role="user", parts=fres_parts))
+
+            if not tool_context.staged_artifacts and not was_aborted and "<question" not in stream_dispatcher.get_accumulated_text():
+                logger.info("[AgentPlanning] Executing guaranteed final plan synthesis turn (tools=None)...")
+                synthesis_contents = compact_conversation_history(turn_contents, keep_recent_turns=4)
+                synthesis_contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(text="Now synthesize all architectural findings, provide a conversational overview of the approach, and emit the plan deliverable as <artifact filename='plan.md' title='Implementation Plan'> (or research_plan.md).")]
+                    )
+                )
+
+                for model_cand in AGENT_FALLBACK_CASCADE:
+                    attempted_keys = set()
+                    synth_done = False
+                    while True:
+                        client, key_idx, active_model = client_manager.get_client_for_model(model_cand, exclude_keys=attempted_keys, fallback=False)
+                        if not client or key_idx in attempted_keys:
+                            break
+                        attempted_keys.add(key_idx)
+                        try:
+                            config = types.GenerateContentConfig(
+                                system_instruction=formatted_planning_instruction,
+                                thinking_config=types.ThinkingConfig(thinking_level="HIGH", include_thoughts=True),
+                                tools=None,
+                                temperature=0.3
+                            )
+                            stream = await client.aio.models.generate_content_stream(model=active_model, contents=synthesis_contents, config=config)
+                            async for chunk in stream:
+                                if chunk.candidates and chunk.candidates[0].content:
+                                    for p in chunk.candidates[0].content.parts:
+                                        if getattr(p, "thought", False) and p.text:
+                                            accumulated_thoughts.append(p.text)
+                                        elif p.text:
+                                            await artifact_parser.feed(p.text)
+                            synth_done = True
+                            break
+                        except Exception as e:
+                            client_manager.report_error(key_idx, active_model, e)
+                            continue
+                    if synth_done:
+                        break
 
             await artifact_parser.finish()
             
@@ -749,9 +802,9 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         await session_manager.ensure_docker_container(session)
 
         witty_statuses = session.get("witty_statuses") or [
-            "Conducting multi-hop investigation",
-            "Synthesizing primary source documents",
-            "Verifying benchmark data and code patterns",
+            "Implementing codebase modifications",
+            "Applying surgical file patches",
+            "Running automated test suites",
             "Compiling final deliverables"
         ]
         initial_exec_txt = witty_statuses[0]
@@ -772,19 +825,22 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             idx = 0
             while not stop_exec_loop.is_set():
                 try:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(2.5)
                     if stop_exec_loop.is_set() or abort_event.is_set():
                         break
                     elapsed = max(1, int(time.time() - t_exec_start))
-                    if elapsed % 4 == 0:
+                    if elapsed % 5 == 0:
                         idx = (idx + 1) % len(witty_statuses)
                     curr_txt = witty_statuses[idx]
                     h_view = build_agent_header_layout(curr_txt, duration_seconds=elapsed, session_id=session_id, phase="execution")
                     await exec_header_msg.edit(view=h_view)
                     active_exec_thought_record["duration_seconds"] = elapsed
                     session_manager.save_session_thoughts(session_id, active_exec_thought_record["thoughts"], active_exec_thought_record["tool_calls"], elapsed)
-                except Exception:
+                except (discord.NotFound, discord.Forbidden):
                     break
+                except Exception as ex:
+                    logger.debug(f"[AgentExecHeaderLoop] Transient edit warning: {ex}")
+                    await asyncio.sleep(3.0)
 
         exec_header_task = asyncio.create_task(exec_header_loop())
 
@@ -840,14 +896,13 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
             f"  <workspace_root>./</workspace_root>\n"
             f"  <approved_plan>\n{approved_plan_text}\n  </approved_plan>{completed_tasks_xml}\n"
             f"</agent_execution_context>\n\n"
-            f"Begin Phase 2 execution. If this is a research task, execute multi-hop searches and call `agent_read_link` on at least 3-6 primary sources, then compile the final `<artifact filename=\"report.html\">` deliverable as a technical whitepaper. When finished, conclude with `<finalize_artifact />`."
+            f"Begin Phase 2 execution. Directly implement or patch the files specified in <approved_plan> starting immediately in Turn 1. Run tests to verify your implementation, and conclude with `<finalize_artifact />`."
         )
 
         turn_contents: list[types.Content] = [
             types.Content(role="user", parts=[types.Part(text=exec_prompt)])
         ]
 
-        candidate_models = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.5-flash-lite"]
         step_counter = len(active_exec_thought_record["tool_calls"])
         accumulated_exec_thoughts = []
         final_summary_text = ""
@@ -876,7 +931,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
 
                 working_turn_contents = compact_conversation_history(turn_contents, keep_recent_turns=3)
 
-                for model_cand in candidate_models:
+                for model_cand in AGENT_FALLBACK_CASCADE:
                     if abort_event.is_set():
                         was_aborted = True
                         break
@@ -948,7 +1003,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                             if "503" in err_desc or "unavailable" in err_desc.lower():
                                 consecutive_503s += 1
                                 if consecutive_503s >= 2:
-                                    logger.warning(f"[AgentExecution] '{model_cand}' experiencing high demand. Cascading immediately to next model candidate...")
+                                    logger.warning(f"[AgentExecution] '{model_cand}' overloaded. Stepping down immediately...")
                                     break
                             if ChatEngine._is_retryable_error(err_desc):
                                 continue
@@ -1022,7 +1077,52 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
                 if was_aborted:
                     break
 
+                if tool_turn >= 20 and "<finalize_artifact" not in final_summary_text:
+                    fres_parts.append(types.Part(text="\n[SYSTEM DIRECTIVE]: Finalize your code changes now. Run tests to verify your implementation, summarize your work, and output <finalize_artifact />."))
+
                 turn_contents.append(types.Content(role="user", parts=fres_parts))
+
+            if "<finalize_artifact" not in final_summary_text and not was_aborted:
+                logger.info("[AgentExecution] Executing guaranteed final execution synthesis turn (tools=None)...")
+                synthesis_contents = compact_conversation_history(turn_contents, keep_recent_turns=4)
+                synthesis_contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(text="Synthesize your completed work, provide a conversational overview of the implementation and tests verified, and conclude with <finalize_artifact />.")]
+                    )
+                )
+
+                for model_cand in AGENT_FALLBACK_CASCADE:
+                    attempted_keys = set()
+                    synth_done = False
+                    while True:
+                        client, key_idx, active_model = client_manager.get_client_for_model(model_cand, exclude_keys=attempted_keys, fallback=False)
+                        if not client or key_idx in attempted_keys:
+                            break
+                        attempted_keys.add(key_idx)
+                        try:
+                            config = types.GenerateContentConfig(
+                                system_instruction=formatted_exec_instruction,
+                                thinking_config=types.ThinkingConfig(thinking_level="HIGH", include_thoughts=True),
+                                tools=None,
+                                temperature=0.3
+                            )
+                            stream = await client.aio.models.generate_content_stream(model=active_model, contents=synthesis_contents, config=config)
+                            async for chunk in stream:
+                                if chunk.candidates and chunk.candidates[0].content:
+                                    for p in chunk.candidates[0].content.parts:
+                                        if getattr(p, "thought", False) and p.text:
+                                            accumulated_exec_thoughts.append(p.text)
+                                        elif p.text:
+                                            final_summary_text += p.text
+                                            await artifact_parser.feed(p.text)
+                            synth_done = True
+                            break
+                        except Exception as e:
+                            client_manager.report_error(key_idx, active_model, e)
+                            continue
+                    if synth_done:
+                        break
 
             await artifact_parser.finish()
             
@@ -1289,7 +1389,7 @@ Generate a short 3-5 word thread title and 15 witty loading statuses. Output JSO
         accumulated_thoughts = []
         tool_call_history = []
         active_tool_start_times = {}
-        active_model_used = "gemma-4-31b-it"
+        active_model_used = PRIMARY_AGENT_MODEL
 
         thinking_start_time = time.time()
         answer_now_event = asyncio.Event()

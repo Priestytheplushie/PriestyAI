@@ -1611,7 +1611,7 @@
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = protocol + '//' + window.location.host + '/ws/terminal/' + ARTIFACT_ID;
         
-        try {
+        try:
           termSocket = new WebSocket(wsUrl);
           termSocket.onopen = function() {
             if (autoExecuteCmd) {
@@ -1955,14 +1955,15 @@
         gfm: true,
         breaks: true,
         renderer: {
-          code(token) {
-            const text = token.text || '';
-            const lang = token.lang || '';
+          code(codeOrToken, infoString) {
+            const text = (typeof codeOrToken === 'object' && codeOrToken !== null) ? (codeOrToken.text || '') : (codeOrToken || '');
+            const rawLang = (typeof codeOrToken === 'object' && codeOrToken !== null) ? (codeOrToken.lang || '') : (infoString || '');
+            const lang = (rawLang || '').trim().split(/\s+/)[0];
             const validLang = !!(lang && window.hljs && hljs.getLanguage(lang));
             const highlighted = validLang 
               ? hljs.highlight(text, { language: lang }).value 
-              : (window.hljs ? hljs.highlightAuto(text).value : text);
-            return '<pre><code class="hljs ' + (validLang ? lang : '') + '">' + highlighted + '<' + '/code><' + '/pre>';
+              : (window.hljs ? hljs.highlightAuto(text).value : text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+            return '<pre><code class="hljs ' + (validLang ? lang : '') + '">' + highlighted + '</code></pre>';
           }
         }
       });
@@ -1997,7 +1998,7 @@
 '      background-color: #313338 !important;\n' +
 '      color: #dbdee1 !important;\n' +
 '      margin: 0;\n' +
-'      padding: 16px;\n' +
+'      padding: 24px;\n' +
 '      box-sizing: border-box;\n' +
 '      font-family: "gg sans", "Noto Sans", "Inter", -apple-system, BlinkMacSystemFont, sans-serif;\n' +
 '      zoom: ' + zoomVal + ';\n' +
@@ -2023,20 +2024,31 @@
 '      padding: 14px;\n' +
 '      overflow: auto;\n' +
 '    }\n' +
-'    code {\n' +
+'    pre code, pre code.hljs {\n' +
 '      font-family: "JetBrains Mono", Consolas, monospace !important;\n' +
+'      color: #dbdee1 !important;\n' +
+'      background: transparent !important;\n' +
+'      padding: 0 !important;\n' +
+'      font-size: 13px;\n' +
+'      line-height: 1.5;\n' +
 '    }\n' +
 '    table {\n' +
 '      border-collapse: collapse;\n' +
 '      width: 100%;\n' +
 '      margin: 16px 0;\n' +
+'      display: table !important;\n' +
 '    }\n' +
 '    th, td {\n' +
-'      border: 1px solid #3f4147;\n' +
-'      padding: 8px 12px;\n' +
+'      border: 1px solid #3f4147 !important;\n' +
+'      padding: 8px 12px !important;\n' +
 '    }\n' +
 '    th {\n' +
-'      background-color: #2b2d31;\n' +
+'      background-color: #2b2d31 !important;\n' +
+'      color: #f2f3f5 !important;\n' +
+'      font-weight: 600;\n' +
+'    }\n' +
+'    tr:nth-child(2n) {\n' +
+'      background-color: rgba(255, 255, 255, 0.02);\n' +
 '    }\n' +
 '    .markdown-alert {\n' +
 '      padding: 12px 16px;\n' +

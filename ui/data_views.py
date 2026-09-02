@@ -90,7 +90,7 @@ class DatabaseDashboardView(LayoutView):
 
         is_admin = is_user_bot_admin(self.user, self.client)
 
-        container.add_item(TextDisplay(f"# Database\n{DATABASE_INFO_TEXT}"))
+        container.add_item(TextDisplay(f"# {OCTICONS_MAP['oct_repo']} Database\n{DATABASE_INFO_TEXT}"))
         container.add_item(Separator(visible=True))
 
         browse_options = [
@@ -104,7 +104,7 @@ class DatabaseDashboardView(LayoutView):
                 label="Server Lore",
                 value="browse_server_lore",
                 description="View and manage shared lore for this server",
-                emoji=OCTICONS_MAP["oct_repo"]
+                emoji=OCTICONS_MAP["oct_server"]
             ),
             discord.SelectOption(
                 label="Configs",
@@ -131,7 +131,6 @@ class DatabaseDashboardView(LayoutView):
         )
         browse_select.callback = self._on_browse_selected
         container.add_item(ActionRow(browse_select))
-
         container.add_item(Separator(visible=True))
 
         close_btn = Button(
@@ -144,7 +143,7 @@ class DatabaseDashboardView(LayoutView):
         export_btn = Button(
             label="Export Data",
             style=discord.ButtonStyle.secondary,
-            emoji="📥",
+            emoji=OCTICONS_MAP["oct_rocket"],
             custom_id="btn_db_export"
         )
         export_btn.callback = self._on_export_clicked
@@ -152,6 +151,7 @@ class DatabaseDashboardView(LayoutView):
         search_btn = Button(
             label="Search",
             style=discord.ButtonStyle.primary,
+            emoji=OCTICONS_MAP["oct_search"],
             custom_id="btn_db_search"
         )
         search_btn.callback = self._on_search_clicked
@@ -159,6 +159,7 @@ class DatabaseDashboardView(LayoutView):
         delete_btn = Button(
             label="Delete...",
             style=discord.ButtonStyle.danger,
+            emoji=OCTICONS_MAP["oct_trash"],
             custom_id="btn_db_delete_nav"
         )
         delete_btn.callback = self._on_delete_nav_clicked
@@ -206,7 +207,7 @@ class DatabaseDashboardView(LayoutView):
             filename=f"priestyai_data_export_{self.user.id}.json"
         )
         await interaction.response.send_message(
-            content="📥 **Your Data Export is Ready:** Attached is a full, decrypted JSON file of all personal facts, user persona settings, and chat sessions stored for your account.",
+            content=f"{OCTICONS_MAP['oct_rocket']} **Your Data Export is Ready:** Attached is a full, decrypted JSON file of all personal facts, scheduled tasks, user persona settings, and chat sessions stored for your account.",
             file=file_obj,
             ephemeral=True
         )
@@ -294,10 +295,9 @@ class AdminDashboardView(LayoutView):
         )
         admin_select.callback = self._on_nav_selected
         container.add_item(ActionRow(admin_select))
-
         container.add_item(Separator(visible=True))
 
-        back_btn = Button(label="◀ Back to Dashboard", style=discord.ButtonStyle.primary, custom_id="btn_admin_back_dash")
+        back_btn = Button(label="Back to Dashboard", style=discord.ButtonStyle.primary, custom_id="btn_admin_back_dash")
         back_btn.callback = self._on_back_clicked
         container.add_item(ActionRow(back_btn))
 
@@ -401,7 +401,7 @@ class AdminFeedbackBrowserView(LayoutView):
             next_btn.callback = on_next
             row_items.extend([prev_btn, ind_btn, next_btn])
 
-        back_btn = Button(label="◀ Admin Panel", style=discord.ButtonStyle.primary, custom_id="btn_fb_back_admin")
+        back_btn = Button(label="Admin Panel", style=discord.ButtonStyle.primary, custom_id="btn_fb_back_admin")
         back_btn.callback = self._on_back_clicked
         row_items.append(back_btn)
 
@@ -494,12 +494,12 @@ class AdminFeedbackDetailView(LayoutView):
         note_btn = Button(label="Edit Note", style=discord.ButtonStyle.secondary, custom_id="btn_stat_note")
         note_btn.callback = self._on_edit_note_clicked
 
-        del_btn = Button(label="Delete", style=discord.ButtonStyle.danger, custom_id="btn_stat_delete")
+        del_btn = Button(label="Delete", style=discord.ButtonStyle.danger, emoji=OCTICONS_MAP["oct_trash"], custom_id="btn_stat_delete")
         del_btn.callback = self._on_delete_clicked
 
         container.add_item(ActionRow(in_review_btn, resolve_btn, note_btn, del_btn))
 
-        back_btn = Button(label="◀ Back to Tickets", style=discord.ButtonStyle.primary, custom_id="btn_ticket_back")
+        back_btn = Button(label="Back to Tickets", style=discord.ButtonStyle.primary, custom_id="btn_ticket_back")
         back_btn.callback = self._on_back_clicked
         container.add_item(ActionRow(back_btn))
 
@@ -668,7 +668,7 @@ class AdminTableExplorerView(LayoutView):
         next_btn.callback = on_next
         row_items.extend([prev_btn, ind_btn, next_btn])
 
-        back_btn = Button(label="◀ Admin Panel", style=discord.ButtonStyle.primary, custom_id="btn_tbl_back_admin")
+        back_btn = Button(label="Admin Panel", style=discord.ButtonStyle.primary, custom_id="btn_tbl_back_admin")
         back_btn.callback = self._on_back_clicked
         row_items.append(back_btn)
 
@@ -788,7 +788,7 @@ class AdminRecordEditorView(LayoutView):
         row_data = feedback_manager.get_table_row_by_pk(self.selected_table, self.pk_col, self.pk_val)
         if not row_data:
             container.add_item(TextDisplay(f"# Record Not Found\nRecord #{self.pk_val} in `{self.selected_table}` no longer exists."))
-            back_btn = Button(label=f"◀ Back to `{self.selected_table}`", style=discord.ButtonStyle.primary, custom_id="btn_rec_not_found_back")
+            back_btn = Button(label=f"Back to `{self.selected_table}`", style=discord.ButtonStyle.primary, custom_id="btn_rec_not_found_back")
             back_btn.callback = self._on_back_clicked
             container.add_item(ActionRow(back_btn))
             self.add_item(container)
@@ -861,13 +861,13 @@ class AdminRecordEditorView(LayoutView):
             next_btn.callback = on_next
             row_items.extend([prev_btn, ind_btn, next_btn])
 
-        del_rec_btn = Button(label="Delete Record", style=discord.ButtonStyle.danger, custom_id=f"btn_del_rec_{self.pk_val}")
+        del_rec_btn = Button(label="Delete Record", style=discord.ButtonStyle.danger, emoji=OCTICONS_MAP["oct_trash"], custom_id=f"btn_del_rec_{self.pk_val}")
         del_rec_btn.callback = self._on_delete_record_clicked
         row_items.append(del_rec_btn)
 
         container.add_item(ActionRow(*row_items))
 
-        back_btn = Button(label=f"◀ Back to `{self.selected_table}`", style=discord.ButtonStyle.primary, custom_id="btn_rec_back_table")
+        back_btn = Button(label=f"Back to `{self.selected_table}`", style=discord.ButtonStyle.primary, custom_id="btn_rec_back_table")
         back_btn.callback = self._on_back_clicked
         container.add_item(ActionRow(back_btn))
 
@@ -969,7 +969,6 @@ class AdminRecordEditorView(LayoutView):
         await interaction.response.edit_message(view=self.parent_explorer_view)
 
 
-
 class MemoriesBrowserView(LayoutView):
     def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, channel: discord.abc.Messageable | None = None, client: discord.Client | None = None, page: int = 0):
         super().__init__(timeout=600)
@@ -1044,7 +1043,7 @@ class MemoriesBrowserView(LayoutView):
             next_btn.callback = on_next
             row_items.extend([prev_btn, ind_btn, next_btn])
 
-        back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_mem_back_dash")
+        back_btn = Button(label="Back", style=discord.ButtonStyle.primary, custom_id="btn_mem_back_dash")
         back_btn.callback = self._on_back_clicked
         row_items.append(back_btn)
 
@@ -1112,8 +1111,8 @@ class ServerLoreBrowserView(LayoutView):
         container = Container()
 
         if not self.guild:
-            container.add_item(TextDisplay(f"# {OCTICONS_MAP['oct_repo']} Server Lore\n*Server Lore is only available inside Discord servers.*"))
-            back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_lore_back_dm")
+            container.add_item(TextDisplay(f"# {OCTICONS_MAP['oct_server']} Server Lore\n*Server Lore is only available inside Discord servers.*"))
+            back_btn = Button(label="Back", style=discord.ButtonStyle.primary, custom_id="btn_lore_back_dm")
             back_btn.callback = self._on_back_clicked
             container.add_item(ActionRow(back_btn))
             self.add_item(container)
@@ -1130,7 +1129,7 @@ class ServerLoreBrowserView(LayoutView):
         self.current_page = max(0, min(self.current_page, total_pages - 1))
 
         header_text = (
-            f"# {OCTICONS_MAP['oct_repo']} Server Lore: {self.guild.name}\n"
+            f"# {OCTICONS_MAP['oct_server']} Server Lore: {self.guild.name}\n"
             "Shared lore and facts recorded for this server.\n"
             + ("Click **Edit** to modify or clear text to delete." if is_admin else "*Viewing mode (requires Manage Server permission to edit).*")
         )
@@ -1181,7 +1180,7 @@ class ServerLoreBrowserView(LayoutView):
             next_btn.callback = on_next
             row_items.extend([prev_btn, ind_btn, next_btn])
 
-        back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_lore_back_dash")
+        back_btn = Button(label="Back", style=discord.ButtonStyle.primary, custom_id="btn_lore_back_dash")
         back_btn.callback = self._on_back_clicked
         row_items.append(back_btn)
 
@@ -1255,7 +1254,7 @@ class ConfigsBrowserView(LayoutView):
         mem_pol = u_cfg.get("user_memory_policy", "read_write")
 
         user_block = (
-            f"### {OCTICONS_MAP['oct_checklist']} User Persona\n"
+            f"### {OCTICONS_MAP['oct_person']} User Persona\n"
             f"• **Preferred Name:** `{p_name}`\n"
             f"• **Personal Context:** {habits}\n"
             f"• **Reasoning Preference:** `{r_level}`\n"
@@ -1271,7 +1270,7 @@ class ConfigsBrowserView(LayoutView):
             s_access = s_cfg.get("access_behavior", "blacklist").capitalize()
 
             server_block = (
-                f"\n\n### {OCTICONS_MAP['oct_repo']} Server Configs ({self.guild.name})\n"
+                f"\n\n### {OCTICONS_MAP['oct_server']} Server Configs ({self.guild.name})\n"
                 f"• **Server Bio:** {s_bio}\n"
                 f"• **Server Prompt:** {s_prompt}\n"
                 f"• **AI Channels:** {s_ai_str}\n"
@@ -1290,7 +1289,7 @@ class ConfigsBrowserView(LayoutView):
         container.add_item(TextDisplay(full_config_str))
         container.add_item(Separator(visible=True))
 
-        back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_cfg_back_dash")
+        back_btn = Button(label="Back", style=discord.ButtonStyle.primary, custom_id="btn_cfg_back_dash")
         back_btn.callback = self._on_back_clicked
         container.add_item(ActionRow(back_btn))
 
@@ -1355,13 +1354,13 @@ class SearchResultsView(LayoutView):
                 snippet = truncate_str(lore_text, max_chars=180)
 
                 section = Section(
-                    TextDisplay(f"{OCTICONS_MAP['oct_repo']} **Server Lore #{lore_id}:**\n> {snippet}")
+                    TextDisplay(f"{OCTICONS_MAP['oct_server']} **Server Lore #{lore_id}:**\n> {snippet}")
                 )
                 container.add_item(section)
 
         container.add_item(Separator(visible=True))
 
-        back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_s_back_dash")
+        back_btn = Button(label="Back", style=discord.ButtonStyle.primary, custom_id="btn_s_back_dash")
         back_btn.callback = self._on_back_clicked
         container.add_item(ActionRow(back_btn))
 
@@ -1426,7 +1425,7 @@ class DataDeletionView(LayoutView):
             is_admin = self.user.guild_permissions.administrator or (self.guild.owner_id == self.user.id)
 
         header_text = (
-            f"# {DFM_EMOJI_MAP['gfm_warning']} Delete Data\n"
+            f"# {OCTICONS_MAP['oct_trash']} Delete Data\n"
             "Choose what you want to remove. A confirmation prompt will appear before deleting."
         )
         container.add_item(TextDisplay(header_text))
@@ -1440,6 +1439,12 @@ class DataDeletionView(LayoutView):
                 emoji=OCTICONS_MAP["oct_checklist"]
             ),
             discord.SelectOption(
+                label="Delete Scheduled Tasks",
+                value="del_scheduled_tasks",
+                description="Deletes all your personal scheduled AI workflows",
+                emoji=OCTICONS_MAP["oct_calendar"]
+            ),
+            discord.SelectOption(
                 label="Delete Configs",
                 value="del_configs",
                 description="Resets preferred name, custom instructions, and persona",
@@ -1448,8 +1453,8 @@ class DataDeletionView(LayoutView):
             discord.SelectOption(
                 label="Delete Everything",
                 value="del_everything",
-                description="Deletes all your memories, configs, and chat history",
-                emoji=DFM_EMOJI_MAP["gfm_caution"]
+                description="Deletes all memories, schedules, configs, and chat history",
+                emoji=OCTICONS_MAP["oct_alert"]
             )
         ]
 
@@ -1459,7 +1464,7 @@ class DataDeletionView(LayoutView):
                     label="Delete Server Lore",
                     value="del_server_lore",
                     description="Deletes all server lore recorded for this guild",
-                    emoji=OCTICONS_MAP["oct_repo"]
+                    emoji=OCTICONS_MAP["oct_server"]
                 )
             )
 
@@ -1470,10 +1475,9 @@ class DataDeletionView(LayoutView):
         )
         del_select.callback = self._on_delete_option_selected
         container.add_item(ActionRow(del_select))
-
         container.add_item(Separator(visible=True))
 
-        back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_del_back_dash")
+        back_btn = Button(label="Back", style=discord.ButtonStyle.primary, custom_id="btn_del_back_dash")
         back_btn.callback = self._on_back_clicked
         container.add_item(ActionRow(back_btn))
 
@@ -1492,6 +1496,12 @@ class DataDeletionView(LayoutView):
                 "This will permanently delete all personal memories, facts, and conversation preferences saved for your account.\n\n"
                 "To proceed, type **CONFIRM** below."
             ),
+            "del_scheduled_tasks": (
+                "Delete Scheduled Tasks",
+                f"{DFM_EMOJI_MAP['gfm_warning']} **WARNING: Irreversible Action**\n\n"
+                "This will permanently delete all scheduled AI workflows created under your account.\n\n"
+                "To proceed, type **CONFIRM** below."
+            ),
             "del_configs": (
                 "Reset Configs",
                 f"{DFM_EMOJI_MAP['gfm_warning']} **WARNING: Irreversible Action**\n\n"
@@ -1503,6 +1513,7 @@ class DataDeletionView(LayoutView):
                 f"{DFM_EMOJI_MAP['gfm_caution']} **CRITICAL WARNING: Irreversible Action**\n\n"
                 "This will permanently delete ALL data associated with your account:\n"
                 "• All personal memories and preferences\n"
+                "• All scheduled AI workflows\n"
                 "• All user persona configurations and Git credentials\n"
                 "• All multi-turn chat session logs\n"
                 "• All message generation histories\n\n"
@@ -1548,6 +1559,10 @@ class DataDeletionView(LayoutView):
                 count = memory_manager.delete_all_user_memories(self.user.id)
                 msg = f"Deleted `{count}` personal memory record(s)."
 
+            elif choice == "del_scheduled_tasks":
+                count = memory_manager.delete_all_user_schedules(self.user.id)
+                msg = f"Deleted `{count}` scheduled task(s)."
+
             elif choice == "del_configs":
                 config_manager.reset_config("user", self.user.id)
                 msg = "Your preferred name and custom persona settings have been reset."
@@ -1557,6 +1572,7 @@ class DataDeletionView(LayoutView):
                 msg = (
                     f"All your data has been deleted:\n"
                     f"• Memories deleted: `{res.get('memories', 0)}`\n"
+                    f"• Schedules deleted: `{res.get('scheduled_tasks', 0)}`\n"
                     f"• Configs reset: `{res.get('user_configs', 0)}`\n"
                     f"• Chat sessions cleared: `{res.get('chat_sessions', 0)}`\n"
                     f"• Generation history cleared: `{res.get('message_generations', 0)}`"
@@ -1573,7 +1589,7 @@ class DataDeletionView(LayoutView):
             container.add_item(TextDisplay(f"# {OCTICONS_MAP['oct_check']} Deleted\n{msg}"))
             container.add_item(Separator(visible=True))
 
-            back_btn = Button(label="◀ Back", style=discord.ButtonStyle.primary, custom_id="btn_del_done_back")
+            back_btn = Button(label="Back", style=discord.ButtonStyle.primary, custom_id="btn_del_done_back")
             back_btn.callback = self._on_back_clicked
             container.add_item(ActionRow(back_btn))
 

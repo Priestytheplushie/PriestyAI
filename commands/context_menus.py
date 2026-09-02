@@ -44,6 +44,8 @@ from parsers.markdown_parser import apply_dfm
 from tools.registry import ToolExecutionContext
 from ui.modals import DynamicModalV2
 from ui.onboarding_views import build_welcome_terms_modal, BannedUserNoticeView
+from ui.schedule_views import is_user_server_admin
+from agent.constants import OCTICONS_MAP
 from core.moderation import (
     check_moderation,
     log_moderation_violation,
@@ -504,6 +506,12 @@ async def _execute_view_prompt(interaction: discord.Interaction, message: discor
         await interaction.followup.send(content=card_text, ephemeral=True)
 
 async def _execute_retry(interaction: discord.Interaction, message: discord.Message):
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+
     gen_record = branch_manager.get_generation(message.id)
     if not gen_record:
         ref_msg = None
@@ -561,10 +569,7 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
             gen_record = branch_manager.get_generation(message.id)
 
     if not gen_record:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(content="No prompt history or reference found for this message.", ephemeral=True)
-        else:
-            await interaction.followup.send(content="No prompt history or reference found for this message.", ephemeral=True)
+        await interaction.followup.send(content="No prompt history or reference found for this message.", ephemeral=True)
         return
 
     root_msg_id = gen_record["message_id"]
@@ -817,10 +822,7 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
         if placeholder_task and not placeholder_task.done():
             placeholder_task.cancel()
         logger.exception(f"Retry error: {e}")
-        if not interaction.response.is_done():
-            await interaction.response.send_message(content=f"Retry generation failed: `{e}`", ephemeral=True)
-        else:
-            await interaction.followup.send(content=f"Retry generation failed: `{e}`", ephemeral=True)
+        await interaction.followup.send(content=f"Retry generation failed: `{e}`", ephemeral=True)
 
 def setup_context_menus(tree: app_commands.CommandTree):
 
@@ -906,6 +908,7 @@ def setup_context_menus(tree: app_commands.CommandTree):
                 message_id=message.id,
                 is_live_stream=False
             )
+            
             await message.edit(view=v2_view)
             await sub_inter.response.send_message(content="Response edited in-place successfully.", ephemeral=True)
 
@@ -1041,6 +1044,7 @@ def setup_context_menus(tree: app_commands.CommandTree):
             and interaction.guild is not None
             and isinstance(interaction.channel, discord.TextChannel)
         )
+        is_bot_message = (message.author.id == interaction.client.user.id)
 
         select_options = [
             {
@@ -1071,6 +1075,13 @@ def setup_context_menus(tree: app_commands.CommandTree):
                 "label": "Branch",
                 "value": "branch",
                 "description": "Fork discussion into an isolated thread"
+            })
+
+        if is_bot_message:
+            select_options.append({
+                "label": "Delete Bot Message",
+                "value": "delete_message",
+                "description": "Delete this response sent by PriestyAI"
             })
 
         if is_foreign:
@@ -1105,7 +1116,39 @@ def setup_context_menus(tree: app_commands.CommandTree):
             if isinstance(selected, list) and selected:
                 selected = selected[0]
 
-            if selected == "add_to_context":
+            if selected == "delete_message":
+                if message.author.id != interaction.client.user.id:
+                    await sub_inter.response.send_message(content="❌ You can only delete messages sent by PriestyAI.", ephemeral=True)
+                    return
+
+                is_dm = not interaction.guild
+                is_admin = is_user_server_admin(interaction.user, interaction.guild) if interaction.guild else False
+                
+                gen_record = branch_manager.get_generation(message.id)
+                is_author = gen_record and str(gen_record.get("author_id")) == str(interaction.user.id)
+
+                if not (is_dm or is_admin or is_author):
+                    await sub_inter.response.send_message(
+                        content="❌ You lack permission to delete this message. Only the prompt author or server moderators can delete it.",
+                        ephemeral=True
+                    )
+                    return
+
+                if gen_record and interaction.channel:
+                    versions = gen_record.get("versions", [])
+                    curr_v = gen_record.get("active_version", len(versions))
+                    if 1 <= curr_v <= len(versions):
+                        sibling_ids = [m for m in versions[curr_v - 1].get("message_ids", []) if str(m) != str(message.id)]
+                        if sibling_ids:
+                            asyncio.create_task(cleanup_sibling_messages(interaction.channel, sibling_ids))
+
+                try:
+                    await message.delete()
+                    await sub_inter.response.send_message(content=f"{OCTICONS_MAP['oct_trash']} **Message deleted.**", ephemeral=True)
+                except Exception as del_err:
+                    await sub_inter.response.send_message(content=f"❌ Failed to delete message: `{del_err}`", ephemeral=True)
+
+            elif selected == "add_to_context":
                 chan_id = str(message.channel.id if message.channel else "dm")
                 uid = str(sub_inter.user.id)
                 extracted_content = extract_text_from_v2_message(message)

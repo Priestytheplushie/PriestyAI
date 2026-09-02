@@ -37,10 +37,8 @@ WHAT TO SAVE:
 - Tech Stack / Languages / Preferences (e.g. "I use Arch Linux", "I write Rust and TypeScript", "I prefer concise code without comments")
 - Persistent Project Lore (e.g. "We are developing a 2D RPG called Aether", "Our server bot uses SQLite")
 
-WHAT TO IGNORE (DO NOT SAVE):
-- Fleeting questions ("what's the weather in Tokyo", "explain Dijkstra's algorithm")
-- One-off debugging requests ("why is this while-loop crashing")
-- Casual banter, greetings, or temporary hypothetical roleplay
+WHAT TO IGNORE:
+- Fleeting questions, one-off debugging requests, casual banter, greetings, or temporary roleplay.
 
 Output a strict JSON adhering to the schema.
 """
@@ -103,8 +101,21 @@ class MemoryManager:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_channel ON chat_sessions(channel_id)")
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS staged_chat_context (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    author_name TEXT NOT NULL,
+                    author_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_staged_ctx ON staged_chat_context(channel_id, user_id)")
+
             conn.commit()
-        logger.info(f"Initialized SQLite Memory & Session Database at '{self.db_path}'.")
 
     async def generate_embedding(self, text: str) -> list[float] | None:
         clean_text = text.strip()[:1000]
@@ -112,7 +123,7 @@ class MemoryManager:
             return None
 
         for model_name in EMBEDDING_MODELS:
-            for attempt in range(client_manager.key_count):
+            for _ in range(client_manager.key_count):
                 client, key_idx, _ = client_manager.get_client_for_model("gemini-3.5-flash-lite")
                 try:
                     config = types.EmbedContentConfig(output_dimensionality=OUTPUT_DIMENSIONALITY)
@@ -127,9 +138,7 @@ class MemoryManager:
                         return response.embedding.values
                 except Exception as e:
                     client_manager.report_error(key_idx, model_name, e)
-                    logger.warning(f"Embedding attempt failed on '{model_name}' (Key #{key_idx}): {e}")
 
-        logger.error("All API keys failed to generate embedding vector.")
         return None
 
     async def remember(
@@ -169,12 +178,11 @@ class MemoryManager:
                         WHERE id = ?
                     """, (encrypted_text, packed_vec, importance, mem_id))
                     conn.commit()
-                    logger.info(f"[Memory Updated] Refined memory ID #{mem_id} (similarity: {sim:.2f}) [Encrypted at Rest]")
                     return {
                         "status": "updated",
                         "memory_id": mem_id,
                         "category": cat_clean,
-                        "message": f"Updated and refined existing memory #{mem_id}."
+                        "message": f"Updated existing memory #{mem_id}."
                     }
 
             cursor.execute("""
@@ -184,7 +192,6 @@ class MemoryManager:
             conn.commit()
             new_id = cursor.lastrowid
 
-        logger.info(f"[Memory Stored] Saved new {cat_clean} memory #{new_id} [Encrypted at Rest]")
         return {
             "status": "saved",
             "memory_id": new_id,
@@ -303,7 +310,6 @@ class MemoryManager:
             cursor.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             conn.commit()
 
-        logger.info(f"[Memory Forgotten] Deleted memory #{memory_id} (Reason: {reason})")
         return {
             "status": "forgotten",
             "memory_id": memory_id,
@@ -325,6 +331,13 @@ class MemoryManager:
             conn.commit()
             return cursor.rowcount
 
+    def delete_all_user_schedules(self, user_id: str | int) -> int:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM scheduled_tasks WHERE user_id = ?", (str(user_id),))
+            conn.commit()
+            return cursor.rowcount
+
     def export_user_data_bundle(self, user_id: str | int) -> dict[str, Any]:
         from core.config_manager import config_manager
         uid_str = str(user_id)
@@ -332,9 +345,15 @@ class MemoryManager:
         mems = self.get_all_memories_for_entity("user", uid_str)
 
         sessions = []
+        schedules = []
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT session_id, channel_id, guild_id, history_json, created_at, last_active_at FROM chat_sessions WHERE creator_user_id = ?", (uid_str,))
+            cursor.execute("""
+                SELECT session_id, channel_id, guild_id, history_json, created_at, last_active_at
+                FROM chat_sessions
+                WHERE creator_user_id = ?
+            """, (uid_str,))
             for row in cursor.fetchall():
                 try:
                     decrypted = encryption_manager.decrypt_text(row["history_json"])
@@ -348,6 +367,16 @@ class MemoryManager:
                     })
                 except Exception:
                     pass
+
+            cursor.execute("""
+                SELECT task_id, guild_id, channel_id, scope, prompt_text,
+                       time_expression, summary_schedule, next_run_timestamp,
+                       interval_type, interval_seconds, dm_delivery, is_active, created_at
+                FROM scheduled_tasks
+                WHERE user_id = ?
+            """, (uid_str,))
+            for s_row in cursor.fetchall():
+                schedules.append(dict(s_row))
 
         return {
             "user_id": uid_str,
@@ -363,6 +392,7 @@ class MemoryManager:
                 }
                 for m in mems
             ],
+            "scheduled_tasks": schedules,
             "chat_sessions": sessions
         }
 
@@ -378,6 +408,12 @@ class MemoryManager:
             cursor.execute("DELETE FROM chat_sessions WHERE creator_user_id = ?", (uid_str,))
             counts["chat_sessions"] = cursor.rowcount
 
+            cursor.execute("DELETE FROM staged_chat_context WHERE user_id = ?", (uid_str,))
+            counts["staged_chat_context"] = cursor.rowcount
+
+            cursor.execute("DELETE FROM scheduled_tasks WHERE user_id = ?", (uid_str,))
+            counts["scheduled_tasks"] = cursor.rowcount
+
             cursor.execute("DELETE FROM user_configs WHERE user_id = ?", (uid_str,))
             counts["user_configs"] = cursor.rowcount
 
@@ -385,7 +421,8 @@ class MemoryManager:
             counts["message_generations"] = cursor.rowcount
 
             conn.commit()
-        logger.info(f"[Complete User Data Purge] User ID {user_id}: {counts}")
+
+        logger.info(f"[UserDataPurge] Purged data for user {user_id}: {counts}")
         return counts
 
     async def recall_relevant_memories(
@@ -490,5 +527,65 @@ class MemoryManager:
             cursor.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
             conn.commit()
             return cursor.rowcount > 0
+
+    def add_staged_chat_context(self, channel_id: str | int, user_id: str | int, entry: dict[str, Any]) -> int:
+        chan_str = str(channel_id)
+        uid_str = str(user_id)
+        msg_id_str = str(entry.get("id", "0"))
+        author_name = str(entry.get("author", "User"))[:100]
+        author_id = str(entry.get("author_id", "0"))
+        raw_content = str(entry.get("content", ""))[:4000]
+        enc_content = encryption_manager.encrypt_text(raw_content)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO staged_chat_context (channel_id, user_id, message_id, author_name, author_id, content)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (chan_str, uid_str, msg_id_str, author_name, author_id, enc_content))
+            conn.commit()
+            cursor.execute("SELECT COUNT(*) as cnt FROM staged_chat_context WHERE channel_id = ? AND user_id = ?", (chan_str, uid_str))
+            row = cursor.fetchone()
+            return row["cnt"] if row else 1
+
+    def get_staged_chat_context(self, channel_id: str | int, user_id: str | int) -> list[dict[str, Any]]:
+        chan_str = str(channel_id)
+        uid_str = str(user_id)
+        results = []
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, message_id, author_name, author_id, content, created_at
+                FROM staged_chat_context
+                WHERE channel_id = ? AND user_id = ?
+                ORDER BY id ASC
+            """, (chan_str, uid_str))
+            for r in cursor.fetchall():
+                dec_content = encryption_manager.decrypt_text(r["content"])
+                results.append({
+                    "id": r["message_id"],
+                    "author": r["author_name"],
+                    "author_id": r["author_id"],
+                    "content": dec_content,
+                    "created_at": r["created_at"]
+                })
+        return results
+
+    def clear_staged_chat_context(self, channel_id: str | int, user_id: str | int) -> bool:
+        chan_str = str(channel_id)
+        uid_str = str(user_id)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM staged_chat_context WHERE channel_id = ? AND user_id = ?", (chan_str, uid_str))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def pop_staged_chat_context(self, channel_id: str | int, user_id: str | int) -> list[dict[str, Any]]:
+        chan_str = str(channel_id)
+        uid_str = str(user_id)
+        items = self.get_staged_chat_context(chan_str, uid_str)
+        if items:
+            self.clear_staged_chat_context(chan_str, uid_str)
+        return items
 
 memory_manager = MemoryManager()

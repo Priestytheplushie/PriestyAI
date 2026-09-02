@@ -2,11 +2,12 @@ import logging
 from typing import Any, Callable
 import discord
 from ui.modals import DynamicModalV2
+from agent.constants import BETA_EMOJI
 
 logger = logging.getLogger("PriestyAI.FeedbackUI")
 
 FEEDBACK_GUIDELINES_TEXT = """# Community Feedback Guidelines
-Submit a bug report, feature request, prompt quality evaluation, or general feedback.
+Submit a bug report, beta feedback, feature request, prompt evaluation, or general feedback.
 
 Submission Rules:
 - Be specific and descriptive. Include steps to reproduce bugs or exact prompt examples.
@@ -23,13 +24,39 @@ def build_feedback_modal(on_submit: Callable[[discord.Interaction, dict[str, Any
             "custom_id": "feedback_type",
             "label": "Feedback Category",
             "description": "Select the topic that best matches your submission",
-            "value": "bug_report",
+            "value": "Bug Report",
             "options": [
-                {"label": "Bug Report", "value": "Bug Report", "description": "Report broken tools, crashes, or rendering errors", "default": True},
-                {"label": "Feature Request", "value": "Feature Request", "description": "Suggest a new tool, capability, or improvement"},
-                {"label": "Prompt Quality / Hallucination", "value": "Prompt Quality", "description": "Report an inaccurate or unhelpful AI response"},
-                {"label": "General Feedback", "value": "General Feedback", "description": "Share overall thoughts or UX feedback"},
-                {"label": "Complaint / Policy Report", "value": "Report", "description": "File a report regarding moderation or policy"}
+                {
+                    "label": "Bug Report",
+                    "value": "Bug Report",
+                    "description": "Report broken tools, crashes, or rendering errors",
+                    "default": True
+                },
+                {
+                    "label": "Beta Feature Feedback",
+                    "value": "Beta Feedback",
+                    "description": "Report issues or thoughts on /agent, /schedule, or /generate"
+                },
+                {
+                    "label": "Feature Request",
+                    "value": "Feature Request",
+                    "description": "Suggest a new tool, capability, or improvement"
+                },
+                {
+                    "label": "Prompt Quality / Hallucination",
+                    "value": "Prompt Quality",
+                    "description": "Report an inaccurate or unhelpful AI response"
+                },
+                {
+                    "label": "General Feedback",
+                    "value": "General Feedback",
+                    "description": "Share overall thoughts or UX feedback"
+                },
+                {
+                    "label": "Complaint / Policy Report",
+                    "value": "Report",
+                    "description": "File a report regarding moderation or policy"
+                }
             ],
             "required": True
         },
@@ -52,19 +79,11 @@ def build_feedback_modal(on_submit: Callable[[discord.Interaction, dict[str, Any
             "max_values": 3
         },
         {
-            "type": "checkbox_group",
+            "type": "checkbox",
             "custom_id": "good_faith_checkbox",
             "label": "Good Faith Acknowledgment",
-            "description": "Required to submit feedback",
-            "required": True,
-            "options": [
-                {
-                    "label": "I confirm this submission is in good faith and adheres to the Terms of Service",
-                    "value": "confirmed",
-                    "description": "Spam or abusive submissions are subject to account suspension.",
-                    "default": False
-                }
-            ]
+            "description": "Confirm this submission adheres to the Terms of Service and Safety Guidelines",
+            "default": False
         }
     ]
 

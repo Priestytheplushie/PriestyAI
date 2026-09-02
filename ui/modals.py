@@ -56,6 +56,13 @@ class DynamicModalV2(ui.Modal):
                 payload["min_length"] = int(field["min_length"])
             return payload
 
+        elif field_type in ["checkbox", "check_box", "bool", "boolean", "single_checkbox"]:
+            return {
+                "type": 23,
+                "custom_id": field_id,
+                "default": bool(default_val)
+            }
+
         elif field_type in ["select", "stringselect", "string_select"]:
             raw_options = field.get("options", [])
             if isinstance(raw_options, str):

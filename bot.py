@@ -15,6 +15,7 @@ from core.branch_manager import branch_manager
 from core.config_manager import config_manager
 from core.memory_manager import memory_manager, get_user_chat_session_id
 from core.poll_manager import poll_manager
+from core.schedule_manager import schedule_manager
 from core.searxng_client import searxng_client
 from core.playground_server import playground_server
 from core.screenshot_service import screenshot_service
@@ -76,6 +77,7 @@ class PriestyBot(discord.Client):
         self.current_status = discord.Status.online
         self.presence_task: asyncio.Task | None = None
         self.poll_watchdog_task: asyncio.Task | None = None
+        self.schedule_watchdog_task: asyncio.Task | None = None
 
     async def setup_hook(self):
         asyncio.create_task(searxng_client.ensure_running())
@@ -231,6 +233,9 @@ class PriestyBot(discord.Client):
         if not self.poll_watchdog_task or self.poll_watchdog_task.done():
             self.poll_watchdog_task = asyncio.create_task(self.poll_watchdog_loop())
 
+        if not self.schedule_watchdog_task or self.schedule_watchdog_task.done():
+            self.schedule_watchdog_task = asyncio.create_task(self.schedule_watchdog_loop())
+
     async def set_bot_presence(self, status: discord.Status):
         self.current_status = status
         activity = discord.CustomActivity(name="Listening for @mentions")
@@ -254,6 +259,16 @@ class PriestyBot(discord.Client):
                 break
             except Exception as e:
                 logger.warning(f"Poll watchdog loop error: {e}")
+
+    async def schedule_watchdog_loop(self):
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(30)
+                await schedule_manager.schedule_watchdog_tick(self)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Schedule watchdog loop error: {e}")
 
     async def presence_watchdog_loop(self):
         while not self.is_closed():

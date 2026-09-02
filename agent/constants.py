@@ -11,7 +11,25 @@ OCTICONS_MAP = {
     "oct_check": "<:oct_check:1542280626017800272>",
     "oct_pencil": "<:oct_pencil:1542280627263639743>",
     "oct_info": "<:oct_info:1542320388934082650>",
-    "oct_book": "<:oct_link:1542280620657483859>"
+    "oct_book": "<:oct_book:1544500553264926840>",
+    "oct_calendar": "<:oct_calendar:1544500556587081849>",
+    "oct_clock": "<:oct_clock:1544500561271857203>",
+    "oct_history": "<:oct_history:1544500564400935013>",
+    "oct_person": "<:oct_person:1544500568523931649>",
+    "oct_people": "<:oct_people:1544500576643973182>",
+    "oct_server": "<:oct_server:1544500580221722674>",
+    "oct_sync": "<:oct_sync:1544500583917166643>",
+    "oct_trash": "<:oct_trash:1544500587327127602>",
+    "oct_lock": "<:oct_lock:1544500590560935976>",
+    "oct_key": "<:oct_key:1544500593815457852>",
+    "oct_zap": "<:oct_zap:1544500596852269098>",
+    "oct_copilot": "<:oct_copilot:1544500600878669835>",
+    "oct_sparkle": "<:oct_sparkle:1544500604674641954>",
+    "oct_stop": "<:oct_stop:1544500608264962128>",
+    "oct_alert": "<:oct_alert:1544500611590914178>",
+    "oct_x": "<:oct_x:1544500616624218163>",
+    "oct_rocket": "<:oct_rocket:1544500620508135547>",
+    "oct_play": "<:oct_play:1544500624220094485>",
 }
 
 BETA_EMOJI = "<:BETA:1542286539113889832>"

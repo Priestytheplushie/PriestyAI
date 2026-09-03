@@ -8,6 +8,7 @@ import logging
 import asyncio
 from typing import Any
 from datetime import datetime, timezone
+from contextlib import asynccontextmanager
 import discord
 from discord import app_commands
 from discord.ui import (
@@ -71,6 +72,17 @@ DEFAULT_SUMMARIZE_STATUSES = [
     "Condensing points of interest",
     "Polishing summary structure"
 ]
+
+@asynccontextmanager
+async def safe_typing(channel: Any):
+    if channel and hasattr(channel, "typing"):
+        try:
+            async with channel.typing():
+                yield
+                return
+        except Exception:
+            pass
+    yield
 
 def is_foreign_context(interaction: discord.Interaction) -> bool:
     if not interaction.guild_id:
@@ -305,7 +317,7 @@ async def _execute_run_as_prompt(interaction: discord.Interaction, message: disc
     start_time = time.time()
 
     try:
-        async with message.channel.typing():
+        async with safe_typing(message.channel):
             async for event_type, payload in ChatEngine.stream_chat(
                 prompt=multimodal_prompt,
                 context_xml="<context></context>",

@@ -64,11 +64,31 @@ class BranchManager:
                     title TEXT NOT NULL,
                     root_message_id TEXT NOT NULL,
                     messages_json TEXT NOT NULL,
+                    parent_branch_id TEXT DEFAULT '',
+                    parent_thread_id TEXT DEFAULT '',
+                    origin_channel_id TEXT DEFAULT '',
+                    collaborators_json TEXT DEFAULT '[]',
+                    auto_reply INTEGER DEFAULT 1,
                     is_active INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            cursor.execute("PRAGMA table_info(branches)")
+            b_cols = [row["name"] for row in cursor.fetchall()]
+            if "parent_branch_id" not in b_cols and "branch_id" in b_cols:
+                cursor.execute("ALTER TABLE branches ADD COLUMN parent_branch_id TEXT DEFAULT ''")
+            if "parent_thread_id" not in b_cols and "branch_id" in b_cols:
+                cursor.execute("ALTER TABLE branches ADD COLUMN parent_thread_id TEXT DEFAULT ''")
+            if "origin_channel_id" not in b_cols and "branch_id" in b_cols:
+                cursor.execute("ALTER TABLE branches ADD COLUMN origin_channel_id TEXT DEFAULT ''")
+            if "collaborators_json" not in b_cols and "branch_id" in b_cols:
+                cursor.execute("ALTER TABLE branches ADD COLUMN collaborators_json TEXT DEFAULT '[]'")
+            if "auto_reply" not in b_cols and "branch_id" in b_cols:
+                cursor.execute("ALTER TABLE branches ADD COLUMN auto_reply INTEGER DEFAULT 1")
+
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_branches_thread ON branches(thread_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_branches_parent ON branches(parent_branch_id)")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS message_generations (
@@ -148,6 +168,248 @@ class BranchManager:
             """)
 
             conn.commit()
+
+    def create_branch(
+        self,
+        branch_id: str,
+        thread_id: str | int,
+        channel_id: str | int,
+        guild_id: str | int | None,
+        creator_id: str | int,
+        title: str,
+        root_message_id: str | int,
+        messages: list[dict[str, Any]],
+        parent_branch_id: str = "",
+        parent_thread_id: str | int = "",
+        collaborators: list[str | int] | None = None,
+        auto_reply: int = 1
+    ) -> dict[str, Any]:
+        clean_collabs = [str(c) for c in (collaborators or [creator_id])]
+        if str(creator_id) not in clean_collabs:
+            clean_collabs.append(str(creator_id))
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO branches (
+                    branch_id, thread_id, channel_id, guild_id,
+                    creator_id, title, root_message_id, messages_json,
+                    parent_branch_id, parent_thread_id, origin_channel_id,
+                    collaborators_json, auto_reply, is_active
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(branch_id) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    messages_json = excluded.messages_json,
+                    parent_branch_id = excluded.parent_branch_id,
+                    parent_thread_id = excluded.parent_thread_id,
+                    collaborators_json = excluded.collaborators_json,
+                    auto_reply = excluded.auto_reply,
+                    is_active = 1
+            """, (
+                str(branch_id),
+                str(thread_id),
+                str(channel_id),
+                str(guild_id) if guild_id else None,
+                str(creator_id),
+                title.strip() or "Branch Discussion",
+                str(root_message_id),
+                json.dumps(messages, default=safe_json_default),
+                str(parent_branch_id or ""),
+                str(parent_thread_id or ""),
+                str(channel_id),
+                json.dumps(clean_collabs),
+                int(auto_reply)
+            ))
+            conn.commit()
+
+        logger.info(f"[BranchManager] Created branch '{title}' (#{branch_id}) on thread {thread_id}")
+        return self.get_branch_by_id(branch_id)
+
+    def get_branch_by_thread_id(self, thread_id: str | int) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM branches WHERE thread_id = ? AND is_active = 1", (str(thread_id),))
+            row = cursor.fetchone()
+            if row:
+                d = dict(row)
+                d["messages"] = json.loads(d.get("messages_json") or "[]")
+                d["collaborators"] = json.loads(d.get("collaborators_json") or "[]")
+                return d
+        return None
+
+    def get_branch_by_id(self, branch_id: str) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM branches WHERE branch_id = ?", (str(branch_id),))
+            row = cursor.fetchone()
+            if row:
+                d = dict(row)
+                d["messages"] = json.loads(d.get("messages_json") or "[]")
+                d["collaborators"] = json.loads(d.get("collaborators_json") or "[]")
+                return d
+        return None
+
+    def get_child_forks(self, branch_id: str) -> list[dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM branches WHERE parent_branch_id = ? AND is_active = 1", (str(branch_id),))
+            results = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                d["messages"] = json.loads(d.get("messages_json") or "[]")
+                d["collaborators"] = json.loads(d.get("collaborators_json") or "[]")
+                results.append(d)
+            return results
+
+    def update_branch_settings(
+        self,
+        branch_id: str,
+        title: str | None = None,
+        collaborators: list[str | int] | None = None,
+        auto_reply: int | None = None
+    ) -> dict[str, Any] | None:
+        branch = self.get_branch_by_id(branch_id)
+        if not branch:
+            return None
+
+        new_title = title.strip() if title is not None else branch.get("title", "Branch Discussion")
+        new_collabs = [str(c) for c in collaborators] if collaborators is not None else branch.get("collaborators", [])
+        if str(branch.get("creator_id")) not in new_collabs:
+            new_collabs.append(str(branch.get("creator_id")))
+        new_auto_reply = int(auto_reply) if auto_reply is not None else branch.get("auto_reply", 1)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE branches
+                SET title = ?, collaborators_json = ?, auto_reply = ?
+                WHERE branch_id = ?
+            """, (new_title, json.dumps(new_collabs), new_auto_reply, str(branch_id)))
+            conn.commit()
+
+        return self.get_branch_by_id(branch_id)
+
+    def add_branch_message(
+        self,
+        thread_id: str | int,
+        role: str,
+        author_name: str,
+        author_id: str | int,
+        content: str,
+        attachments: list[Any] | None = None
+    ):
+        branch = self.get_branch_by_thread_id(thread_id)
+        if not branch:
+            return
+
+        msgs = branch.get("messages", [])
+        msgs.append({
+            "id": str(int(time.time() * 1000)),
+            "role": role,
+            "author": author_name,
+            "author_id": str(author_id),
+            "content": content,
+            "attachments": attachments or [],
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        })
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE branches SET messages_json = ? WHERE thread_id = ?", (json.dumps(msgs, default=safe_json_default), str(thread_id)))
+            conn.commit()
+
+    def edit_branch_message(
+        self,
+        branch_id: str,
+        message_index: int,
+        new_author_id: str | int | None = None,
+        new_author_name: str | None = None,
+        new_content: str | None = None,
+        new_attachments: list[Any] | None = None
+    ) -> bool:
+        branch = self.get_branch_by_id(branch_id)
+        if not branch:
+            return False
+
+        msgs = branch.get("messages", [])
+        if not (0 <= message_index < len(msgs)):
+            return False
+
+        msg_entry = msgs[message_index]
+        if new_content is not None:
+            msg_entry["content"] = new_content
+        if new_author_id is not None:
+            msg_entry["author_id"] = str(new_author_id)
+        if new_author_name is not None:
+            msg_entry["author"] = new_author_name
+        if new_attachments is not None:
+            msg_entry["attachments"] = new_attachments
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE branches SET messages_json = ? WHERE branch_id = ?", (json.dumps(msgs, default=safe_json_default), str(branch_id)))
+            conn.commit()
+        return True
+
+    def prune_branch_message(self, branch_id: str, message_index: int) -> bool:
+        branch = self.get_branch_by_id(branch_id)
+        if not branch:
+            return False
+
+        msgs = branch.get("messages", [])
+        if 0 <= message_index < len(msgs):
+            msgs.pop(message_index)
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE branches SET messages_json = ? WHERE branch_id = ?", (json.dumps(msgs, default=safe_json_default), str(branch_id)))
+                conn.commit()
+            return True
+        return False
+
+    def bulk_prune_branch_messages(self, branch_id: str, message_indices: list[int]) -> bool:
+        branch = self.get_branch_by_id(branch_id)
+        if not branch:
+            return False
+
+        msgs = branch.get("messages", [])
+        indices_set = set(message_indices)
+        pruned_msgs = [m for idx, m in enumerate(msgs) if idx not in indices_set]
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE branches SET messages_json = ? WHERE branch_id = ?", (json.dumps(pruned_msgs, default=safe_json_default), str(branch_id)))
+            conn.commit()
+        return True
+
+    def delete_branch(self, branch_id: str):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE branches SET is_active = 0 WHERE branch_id = ?", (str(branch_id),))
+            conn.commit()
+
+    def purge_user_from_branches(self, user_id: str | int) -> int:
+        uid_str = str(user_id)
+        scrubbed_count = 0
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT branch_id, messages_json FROM branches")
+            rows = cursor.fetchall()
+            for row in rows:
+                b_id = row["branch_id"]
+                msgs = json.loads(row["messages_json"] or "[]")
+                modified = False
+                for m in msgs:
+                    if str(m.get("author_id")) == uid_str:
+                        m["author"] = "[Deleted User]"
+                        m["author_id"] = "0"
+                        m["content"] = "*Message erased per user request.*"
+                        m["attachments"] = []
+                        modified = True
+                        scrubbed_count += 1
+                if modified:
+                    cursor.execute("UPDATE branches SET messages_json = ? WHERE branch_id = ?", (json.dumps(msgs, default=safe_json_default), b_id))
+            conn.commit()
+        return scrubbed_count
 
     def save_quiz(
         self,
@@ -526,103 +788,6 @@ class BranchManager:
             pass
 
         return result_payload
-
-    def create_branch(
-        self,
-        branch_id: str,
-        thread_id: str | int,
-        channel_id: str | int,
-        guild_id: str | int | None,
-        creator_id: str | int,
-        title: str,
-        root_message_id: str | int,
-        messages: list[dict[str, Any]]
-    ):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO branches (
-                    branch_id, thread_id, channel_id, guild_id,
-                    creator_id, title, root_message_id, messages_json, is_active
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-                ON CONFLICT(branch_id) DO UPDATE SET
-                    thread_id = excluded.thread_id,
-                    messages_json = excluded.messages_json,
-                    is_active = 1
-            """, (
-                str(branch_id),
-                str(thread_id),
-                str(channel_id),
-                str(guild_id) if guild_id else None,
-                str(creator_id),
-                title,
-                str(root_message_id),
-                json.dumps(messages, default=safe_json_default)
-            ))
-            conn.commit()
-
-    def get_branch_by_thread_id(self, thread_id: str | int) -> dict[str, Any] | None:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM branches WHERE thread_id = ? AND is_active = 1", (str(thread_id),))
-            row = cursor.fetchone()
-            if row:
-                d = dict(row)
-                d["messages"] = json.loads(d.get("messages_json") or "[]")
-                return d
-        return None
-
-    def get_branch_by_id(self, branch_id: str) -> dict[str, Any] | None:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM branches WHERE branch_id = ?", (str(branch_id),))
-            row = cursor.fetchone()
-            if row:
-                d = dict(row)
-                d["messages"] = json.loads(d.get("messages_json") or "[]")
-                return d
-        return None
-
-    def add_branch_message(self, thread_id: str | int, role: str, author_name: str, author_id: str | int, content: str):
-        branch = self.get_branch_by_thread_id(thread_id)
-        if not branch:
-            return
-
-        msgs = branch.get("messages", [])
-        msgs.append({
-            "id": str(int(time.time() * 1000)),
-            "role": role,
-            "author": author_name,
-            "author_id": str(author_id),
-            "content": content,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        })
-
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE branches SET messages_json = ? WHERE thread_id = ?", (json.dumps(msgs, default=safe_json_default), str(thread_id)))
-            conn.commit()
-
-    def prune_branch_message(self, branch_id: str, message_index: int) -> bool:
-        branch = self.get_branch_by_id(branch_id)
-        if not branch:
-            return False
-
-        msgs = branch.get("messages", [])
-        if 0 <= message_index < len(msgs):
-            msgs.pop(message_index)
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("UPDATE branches SET messages_json = ? WHERE branch_id = ?", (json.dumps(msgs, default=safe_json_default), str(branch_id)))
-                conn.commit()
-            return True
-        return False
-
-    def delete_branch(self, branch_id: str):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE branches SET is_active = 0 WHERE branch_id = ?", (str(branch_id),))
-            conn.commit()
 
     def save_generation(
         self,

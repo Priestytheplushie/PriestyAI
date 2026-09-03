@@ -1,5 +1,6 @@
 import io
 import re
+import json
 import base64
 import logging
 from typing import Any, Callable
@@ -13,9 +14,13 @@ from discord.ui import (
     Separator,
     ActionRow,
     Button,
+    Select,
     View
 )
 from core.branch_manager import branch_manager
+from agent.constants import OCTICONS_MAP
+from config.settings import THINKING_EMOJI
+from ui.modals import DynamicModalV2
 
 logger = logging.getLogger("PriestyAI.ContextViews")
 
@@ -41,112 +46,254 @@ def format_transcript_message(content: str, max_chars: int = 380) -> str:
     return chunk + " *(continued...)*"
 
 
-def build_version_switcher_view(
+def build_branch_settings_modal(branch: dict[str, Any], on_submit: Any, guild: discord.Guild | None = None) -> DynamicModalV2:
+    branch_id = branch.get("branch_id", "")
+    current_title = branch.get("title", "Branch Discussion")
+    collabs = branch.get("collaborators", [])
+    auto_reply = branch.get("auto_reply", 1)
+
+    defaults = []
+    for c_id in collabs:
+        defaults.append({"id": str(c_id), "type": "user"})
+
+    fields = [
+        {
+            "type": "text_display",
+            "content": f"# Branch Settings ({current_title})\nCustomize branch title, auto-reply policy, and authorized collaborators."
+        },
+        {
+            "type": "text_input",
+            "custom_id": "branch_title",
+            "label": "Branch & Thread Name",
+            "placeholder": "Enter branch name...",
+            "value": current_title,
+            "style": "short",
+            "required": True,
+            "max_length": 60
+        },
+        {
+            "type": "radio_group",
+            "custom_id": "auto_reply",
+            "label": "Auto-Reply Mode",
+            "description": "Control whether PriestyAI responds to all messages in this thread",
+            "value": str(auto_reply),
+            "options": [
+                {
+                    "label": "Auto-Reply to all messages",
+                    "value": "1",
+                    "description": "PriestyAI responds automatically without needing an @mention",
+                    "default": (int(auto_reply) == 1)
+                },
+                {
+                    "label": "Only when @mentioned",
+                    "value": "0",
+                    "description": "PriestyAI only responds when explicitly tagged or replied to",
+                    "default": (int(auto_reply) == 0)
+                }
+            ],
+            "required": True
+        },
+        {
+            "type": "user_select",
+            "custom_id": "collaborators",
+            "label": "Branch Collaborators",
+            "description": "Users authorized to manage settings, edit history, and chat in this branch",
+            "placeholder": "Select collaborators...",
+            "required": False,
+            "min_values": 0,
+            "max_values": 25,
+            "default_values": defaults
+        }
+    ]
+
+    return DynamicModalV2(
+        title="Branch Settings",
+        custom_id=f"modal_branch_settings_{branch_id}",
+        fields_schema=fields,
+        on_submit_callback=on_submit
+    )
+
+
+def build_branch_message_edit_modal(
+    branch_id: str,
+    msg_idx: int,
+    msg_data: dict[str, Any],
+    on_submit: Any,
+    guild: discord.Guild | None = None
+) -> DynamicModalV2:
+    role = msg_data.get("role", "user")
+    is_user_role = (role != "assistant")
+    current_author_id = msg_data.get("author_id", "")
+    current_content = msg_data.get("content", "")
+
+    fields = [
+        {
+            "type": "text_display",
+            "content": f"# Edit Captured Message #{msg_idx + 1}\nModify message text, author attribution, or upload attachments."
+        }
+    ]
+
+    if is_user_role:
+        default_author = [{"id": str(current_author_id), "type": "user"}] if (current_author_id and str(current_author_id) != "0") else None
+        fields.append({
+            "type": "user_select",
+            "custom_id": "author_id",
+            "label": "Author Attribution",
+            "description": "Select the member this message is attributed to",
+            "placeholder": "Select author...",
+            "required": False,
+            "min_values": 0,
+            "max_values": 1,
+            "default_values": default_author
+        })
+    else:
+        fields.append({
+            "type": "text_display",
+            "content": "• **Author:** `PriestyAI` *(AI responses cannot be attributed to users)*"
+        })
+
+    fields.append({
+        "type": "text_input",
+        "custom_id": "content",
+        "label": "Message Content",
+        "placeholder": "Enter message text...",
+        "value": current_content,
+        "style": "paragraph",
+        "required": True,
+        "max_length": 3500
+    })
+
+    fields.append({
+        "type": "file_upload",
+        "custom_id": "attachments",
+        "label": "Attachments (Cap of 10)",
+        "description": "Upload files or leave blank to clear attachments",
+        "required": False,
+        "max_values": 10
+    })
+
+    return DynamicModalV2(
+        title=f"Edit Message #{msg_idx + 1}",
+        custom_id=f"modal_branch_edit_msg_{branch_id}_{msg_idx}",
+        fields_schema=fields,
+        on_submit_callback=on_submit
+    )
+
+
+def build_branch_version_picker_modal(
     message_id: str | int,
-    active_idx: int,
-    total_versions: int,
-    thought_duration: int = 0,
-    has_thoughts: bool = False,
-    extra_action_view: ui.View | None = None
-) -> ui.View | None:
-    view = View(timeout=None)
+    versions: list[dict[str, Any]],
+    on_submit: Any
+) -> DynamicModalV2:
+    options = []
+    total_v = len(versions)
+    for v_idx, v_data in enumerate(versions):
+        v_num = v_idx + 1
+        dur = max(1, v_data.get("duration_seconds", 1))
+        content_preview = v_data.get("content", "")[:60].replace("\n", " ").strip() or "Snapshot"
+        is_active = (v_num == total_v)
+        active_label = " (Latest)" if is_active else ""
+        options.append({
+            "label": f"Version {v_num}{active_label}",
+            "value": str(v_num),
+            "description": f"{content_preview} ({dur}s)",
+            "default": is_active
+        })
 
-    if has_thoughts:
-        time_str = f"{thought_duration}s" if thought_duration > 0 else "<1s"
-        t_btn = Button(
-            label=f"🧠 Thought for {time_str}",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"gen_thought_{message_id}_{active_idx}",
-            row=0
-        )
-        view.add_item(t_btn)
-
-    if extra_action_view and extra_action_view.children:
-        start_row = 1 if has_thoughts else 0
-        max_row = 3 if total_versions >= 2 else 4
-        current_row = start_row
-        buttons_in_current_row = 0
-
-        for item in extra_action_view.children:
-            is_select = isinstance(
-                item,
-                (ui.Select, ui.UserSelect, ui.RoleSelect, ui.ChannelSelect, ui.MentionableSelect)
+    fields = [
+        {
+            "type": "text_display",
+            "content": (
+                "# Branch from Version Snapshot\n"
+                "This response has multiple versions. Select which version snapshot to fork into your new branch:"
             )
+        },
+        {
+            "type": "string_select",
+            "custom_id": "chosen_version",
+            "label": "Snapshot Version",
+            "description": "Choose the version to branch from",
+            "options": options[:25],
+            "required": True
+        }
+    ]
 
-            if is_select:
-                if buttons_in_current_row > 0:
-                    current_row += 1
-                    buttons_in_current_row = 0
-
-                if current_row > max_row:
-                    logger.warning(f"Component {item} exceeded available view rows (max {max_row}). Skipping.")
-                    continue
-
-                item.row = current_row
-                view.add_item(item)
-                current_row += 1
-            else:
-                if buttons_in_current_row >= 5:
-                    current_row += 1
-                    buttons_in_current_row = 0
-
-                if current_row > max_row:
-                    logger.warning(f"Component {item} exceeded available view rows (max {max_row}). Skipping.")
-                    continue
-
-                item.row = current_row
-                view.add_item(item)
-                buttons_in_current_row += 1
-
-    if total_versions >= 2:
-        prev_btn = Button(
-            label="◀",
-            style=discord.ButtonStyle.secondary,
-            disabled=(active_idx <= 1),
-            custom_id=f"gen_prev_{message_id}",
-            row=4
-        )
-        indicator_btn = Button(
-            label=f"{active_idx} / {total_versions}",
-            style=discord.ButtonStyle.secondary,
-            disabled=True,
-            custom_id=f"gen_ind_{message_id}",
-            row=4
-        )
-        next_btn = Button(
-            label="▶",
-            style=discord.ButtonStyle.secondary,
-            disabled=(active_idx >= total_versions),
-            custom_id=f"gen_next_{message_id}",
-            row=4
-        )
-        view.add_item(prev_btn)
-        view.add_item(indicator_btn)
-        view.add_item(next_btn)
-
-    if len(view.children) == 0:
-        return None
-
-    return view
+    return DynamicModalV2(
+        title="Select Version to Branch",
+        custom_id=f"modal_branch_vpick_{message_id}",
+        fields_schema=fields,
+        on_submit_callback=on_submit
+    )
 
 
-class BranchHeaderView(View):
+class BranchHeaderView(LayoutView):
     def __init__(self, branch_id: str):
         super().__init__(timeout=None)
         self.branch_id = branch_id
+        self._build_layout()
 
-        view_msgs_btn = Button(
-            label="View Stored Messages",
+    def _build_layout(self):
+        self.clear_items()
+        container = Container()
+
+        branch = branch_manager.get_branch_by_id(self.branch_id)
+        if not branch:
+            container.add_item(TextDisplay(f"# {OCTICONS_MAP['oct_branch']} Branch Inactive\nThis branch has been archived or removed."))
+            self.add_item(container)
+            return
+
+        title = branch.get("title", "Branch Discussion")
+        creator_id = branch.get("creator_id", "0")
+        parent_thread_id = branch.get("parent_thread_id", "")
+        origin_channel_id = branch.get("origin_channel_id", "")
+        collabs = branch.get("collaborators", [])
+        auto_reply = branch.get("auto_reply", 1)
+        total_msgs = len(branch.get("messages", []))
+
+        auto_reply_str = "Auto-Reply: Enabled" if int(auto_reply) == 1 else "Auto-Reply: Mention-Only"
+        collab_mentions = ", ".join([f"<@{c}>" for c in collabs[:6]]) or f"<@{creator_id}>"
+        if len(collabs) > 6:
+            collab_mentions += f" and {len(collabs) - 6} more"
+
+        header_lines = [f"# {OCTICONS_MAP['oct_branch']} {title}"]
+        if parent_thread_id:
+            header_lines.append(f"Forked from <#{parent_thread_id}>")
+        elif origin_channel_id:
+            header_lines.append(f"Captured from <#{origin_channel_id}>")
+
+        header_lines.append(f"• **Collaborators:** {collab_mentions}")
+        header_lines.append(f"• **Settings:** `{auto_reply_str}` • `{total_msgs}` messages in history")
+
+        container.add_item(TextDisplay("\n".join(header_lines)))
+        container.add_item(Separator(visible=True))
+
+        history_btn = Button(
+            label="Message History ↗",
             style=discord.ButtonStyle.secondary,
-            custom_id=f"branch_view_{branch_id}"
+            emoji=OCTICONS_MAP["oct_history"],
+            custom_id=f"branch_view_{self.branch_id}"
+        )
+        settings_btn = Button(
+            label="Branch Settings",
+            style=discord.ButtonStyle.secondary,
+            emoji=OCTICONS_MAP["oct_pencil"],
+            custom_id=f"branch_settings_{self.branch_id}"
+        )
+        export_btn = Button(
+            label="Export",
+            style=discord.ButtonStyle.secondary,
+            emoji=OCTICONS_MAP["oct_rocket"],
+            custom_id=f"branch_export_{self.branch_id}"
         )
         del_branch_btn = Button(
             label="Delete Branch",
             style=discord.ButtonStyle.danger,
-            custom_id=f"branch_del_{branch_id}"
+            emoji=OCTICONS_MAP["oct_trash"],
+            custom_id=f"branch_del_{self.branch_id}"
         )
-        self.add_item(view_msgs_btn)
-        self.add_item(del_branch_btn)
+
+        container.add_item(ActionRow(history_btn, settings_btn, export_btn, del_branch_btn))
+        self.add_item(container)
 
 
 class BranchTranscriptView(LayoutView):
@@ -166,17 +313,23 @@ class BranchTranscriptView(LayoutView):
 
         for idx, msg in enumerate(messages):
             author = msg.get("author", "User")
+            author_id = msg.get("author_id", "0")
+            role = msg.get("role", "user")
             content = msg.get("content", "").strip() or "*No text content*"
             formatted_content = format_transcript_message(content, max_chars=380)
+            attachments = msg.get("attachments", [])
 
             entry = {
                 "global_idx": idx,
                 "author": author,
+                "author_id": author_id,
+                "role": role,
                 "content": formatted_content,
+                "attachments": attachments,
                 "timestamp": msg.get("timestamp", "")
             }
 
-            entry_len = len(formatted_content) + len(author) + 50
+            entry_len = len(formatted_content) + len(author) + 60
 
             if (current_char_count + entry_len > 1300 or len(current_page) >= 4) and current_page:
                 pages.append(current_page)
@@ -197,7 +350,7 @@ class BranchTranscriptView(LayoutView):
 
         branch = branch_manager.get_branch_by_id(self.branch_id)
         if not branch:
-            container.add_item(TextDisplay("# Branch Inactive\nThis branch has been deleted or is not found in database."))
+            container.add_item(TextDisplay(f"# {OCTICONS_MAP['oct_branch']} Branch Inactive\nThis branch record was not found in the database."))
             self.add_item(container)
             return
 
@@ -207,34 +360,76 @@ class BranchTranscriptView(LayoutView):
         total_pages = max(1, len(pages))
         self.current_page = max(0, min(self.current_page, total_pages - 1))
 
-        header_text = (
-            f"# Branch Transcript: {branch.get('title', 'Discussion')}\n"
-            f"Stored Messages: `{total_msgs}` • Preserved through channel deletions.\n"
-            f"Click **Delete** next to any message to prune it from the AI's branch context."
-        )
-        container.add_item(TextDisplay(header_text))
+        header_lines = [
+            f"# {OCTICONS_MAP['oct_history']} Message History: {branch.get('title', 'Branch')}",
+            f"Stored Messages: `{total_msgs}` • Preserved across channel deletions.\n",
+            "Click **Edit** to modify text/attribution or select messages below to bulk-prune."
+        ]
+        container.add_item(TextDisplay("\n".join(header_lines)))
         container.add_item(Separator(visible=True))
 
         if not pages:
-            container.add_item(TextDisplay("*No stored messages in this branch yet.*"))
+            container.add_item(TextDisplay("*No stored messages in this branch history yet.*"))
         else:
             current_page_entries = pages[self.current_page]
 
             for entry in current_page_entries:
                 global_idx = entry["global_idx"]
                 author = entry["author"]
+                author_id = entry["author_id"]
+                role = entry["role"]
                 content = entry["content"]
+                attachments = entry.get("attachments", [])
+
+                icon = THINKING_EMOJI if role == "assistant" else OCTICONS_MAP["oct_person"]
+                author_tag = f"<@{author_id}>" if (author_id and str(author_id) != "0" and role == "user") else author
 
                 formatted_lines = "\n".join([f"> {line}" for line in content.split("\n")])
-                display_text = f"**{author}:**\n{formatted_lines}"
+                att_note = f"\n> -# 📎 `{len(attachments)} attachment(s)`" if attachments else ""
+                display_text = f"{icon} **{author_tag}** (Msg #{global_idx + 1}):\n{formatted_lines}{att_note}"
 
-                del_btn = Button(
-                    label="Delete",
+                edit_btn = Button(
+                    label="Edit",
                     style=discord.ButtonStyle.secondary,
-                    custom_id=f"branch_prune_{self.branch_id}_{global_idx}"
+                    custom_id=f"branch_edit_msg_{self.branch_id}_{global_idx}"
                 )
-                section = Section(TextDisplay(display_text), accessory=del_btn)
+                section = Section(TextDisplay(display_text), accessory=edit_btn)
                 container.add_item(section)
+
+            if len(messages) > 1:
+                container.add_item(Separator(visible=True))
+                prune_options = []
+                for entry in current_page_entries:
+                    g_idx = entry["global_idx"]
+                    auth_name = entry["author"]
+                    snip = entry["content"][:40].replace("\n", " ").strip()
+                    prune_options.append(
+                        discord.SelectOption(
+                            label=f"Delete Msg #{g_idx + 1} ({auth_name})",
+                            value=str(g_idx),
+                            description=snip,
+                            emoji=OCTICONS_MAP["oct_trash"]
+                        )
+                    )
+
+                bulk_select = Select(
+                    custom_id=f"branch_bulk_prune_{self.branch_id}",
+                    placeholder="Select messages to delete from history...",
+                    options=prune_options[:25],
+                    min_values=1,
+                    max_values=len(prune_options)
+                )
+                container.add_item(ActionRow(bulk_select))
+
+        child_forks = branch_manager.get_child_forks(self.branch_id)
+        if child_forks:
+            container.add_item(Separator(visible=True))
+            fork_lines = ["**Active Downstream Forks:**"]
+            for f in child_forks[:5]:
+                f_th = f.get("thread_id")
+                f_title = f.get("title", "Fork")
+                fork_lines.append(f"• {OCTICONS_MAP['oct_branch']} <#{f_th}> — `{f_title}`")
+            container.add_item(TextDisplay("\n".join(fork_lines)))
 
         if total_pages > 1:
             container.add_item(Separator(visible=True))

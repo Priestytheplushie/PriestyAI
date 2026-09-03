@@ -47,6 +47,10 @@ from ui.modals import DynamicModalV2
 from ui.onboarding_views import build_welcome_terms_modal, BannedUserNoticeView
 from ui.schedule_views import is_user_server_admin
 from agent.constants import OCTICONS_MAP
+from ui.context_views import (
+    BranchHeaderView,
+    build_branch_version_picker_modal
+)
 from core.moderation import (
     check_moderation,
     log_moderation_violation,
@@ -538,16 +542,38 @@ async def _execute_run_as_prompt(interaction: discord.Interaction, message: disc
             placeholder_task.cancel()
         logger.exception(f"Run as Prompt error: {e}")
 
-async def _execute_branch(interaction: discord.Interaction, message: discord.Message):
-    if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+async def _execute_branch_creation(
+    interaction: discord.Interaction,
+    message: discord.Message,
+    target_version_idx: int | None = None
+):
+    if not interaction.guild:
         if not interaction.response.is_done():
-            await interaction.response.send_message(content="Branches can only be created inside standard server text channels.", ephemeral=True)
+            await interaction.response.send_message(content="Branches can only be created inside Discord servers.", ephemeral=True)
         else:
-            await interaction.followup.send(content="Branches can only be created inside standard server text channels.", ephemeral=True)
+            await interaction.followup.send(content="Branches can only be created inside Discord servers.", ephemeral=True)
+        return
+
+    is_inside_thread = isinstance(interaction.channel, discord.Thread)
+    parent_channel = interaction.channel.parent if is_inside_thread else interaction.channel
+
+    if not isinstance(parent_channel, discord.TextChannel):
+        if not interaction.response.is_done():
+            await interaction.response.send_message(content="Branches must be anchored to a server text channel.", ephemeral=True)
+        else:
+            await interaction.followup.send(content="Branches must be anchored to a server text channel.", ephemeral=True)
         return
 
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True)
+
+    parent_branch_id = ""
+    parent_thread_id = ""
+    if is_inside_thread:
+        existing_parent_branch = branch_manager.get_branch_by_thread_id(interaction.channel.id)
+        if existing_parent_branch:
+            parent_branch_id = existing_parent_branch.get("branch_id", "")
+            parent_thread_id = str(interaction.channel.id)
 
     history_msgs = []
     try:
@@ -557,18 +583,33 @@ async def _execute_branch(interaction: discord.Interaction, message: discord.Mes
 
         for m in raw_history:
             extracted_content = extract_text_from_v2_message(m)
+            att_records = []
+            if m.attachments:
+                for a in m.attachments:
+                    att_records.append({"filename": a.filename, "url": a.url})
+
             history_msgs.append({
                 "id": str(m.id),
                 "role": "assistant" if m.author.id == interaction.client.user.id else "user",
                 "author": m.author.display_name,
                 "author_id": str(m.author.id),
                 "content": extracted_content,
+                "attachments": att_records,
                 "timestamp": m.created_at.isoformat()
             })
     except Exception as ex:
         logger.warning(f"Branch history fetch exception: {ex}")
 
-    title = "Exploration Branch"
+    if target_version_idx and target_version_idx > 0:
+        gen = branch_manager.get_generation(message.id)
+        if gen:
+            versions = gen.get("versions", [])
+            if 1 <= target_version_idx <= len(versions):
+                v_entry = versions[target_version_idx - 1]
+                if history_msgs and history_msgs[-1]["role"] == "assistant":
+                    history_msgs[-1]["content"] = v_entry.get("content", history_msgs[-1]["content"])
+
+    base_title = "Exploration Branch"
     try:
         sample_text = extract_text_from_v2_message(message)[:300]
         title_prompt = f"Generate a clean 3 to 5 word topic title for this discussion. Output ONLY the title:\n{sample_text}"
@@ -576,14 +617,23 @@ async def _execute_branch(interaction: discord.Interaction, message: discord.Mes
         if client:
             res = await client.aio.models.generate_content(model=active_model, contents=title_prompt)
             if res.text:
-                title = res.text.strip().replace('"', '').replace("'", "")[:60]
+                base_title = res.text.strip().replace('"', '').replace("'", "")[:50]
     except Exception:
         pass
 
+    clean_title = f"Fork: {base_title}" if is_inside_thread else base_title
+
     try:
-        thread = await message.create_thread(name=title)
-    except Exception:
-        thread = await interaction.channel.create_thread(name=title, type=discord.ChannelType.public_thread)
+        if is_inside_thread:
+            thread = await parent_channel.create_thread(name=clean_title, type=discord.ChannelType.public_thread)
+        else:
+            try:
+                thread = await message.create_thread(name=clean_title)
+            except Exception:
+                thread = await parent_channel.create_thread(name=clean_title, type=discord.ChannelType.public_thread)
+    except Exception as e:
+        await interaction.followup.send(content=f"❌ Failed to create branch thread: {e}", ephemeral=True)
+        return
 
     try:
         await thread.add_user(interaction.user)
@@ -591,7 +641,7 @@ async def _execute_branch(interaction: discord.Interaction, message: discord.Mes
         logger.debug(f"Failed to add user to thread: {ex}")
 
     try:
-        async for sys_m in interaction.channel.history(limit=5):
+        async for sys_m in parent_channel.history(limit=5):
             if sys_m.type == discord.MessageType.thread_created:
                 await sys_m.delete()
                 break
@@ -602,15 +652,45 @@ async def _execute_branch(interaction: discord.Interaction, message: discord.Mes
     branch_manager.create_branch(
         branch_id=branch_id,
         thread_id=thread.id,
-        channel_id=interaction.channel_id,
+        channel_id=parent_channel.id,
         guild_id=interaction.guild_id,
         creator_id=interaction.user.id,
-        title=title,
+        title=clean_title,
         root_message_id=message.id,
-        messages=history_msgs
+        messages=history_msgs,
+        parent_branch_id=parent_branch_id,
+        parent_thread_id=parent_thread_id,
+        collaborators=[interaction.user.id],
+        auto_reply=1
     )
 
-    await interaction.followup.send(content=f"Branch Created: Joined thread <#{thread.id}>.", ephemeral=True)
+    starter_view = BranchHeaderView(branch_id=branch_id)
+    await thread.send(view=starter_view)
+
+    fork_note = f" (Forked from <#{parent_thread_id}>)" if parent_thread_id else ""
+    await interaction.followup.send(content=f"{OCTICONS_MAP['oct_branch']} **Branch Created:** Joined thread <#{thread.id}>{fork_note}.", ephemeral=True)
+
+async def _execute_branch(interaction: discord.Interaction, message: discord.Message):
+    if not interaction.guild:
+        await interaction.response.send_message(content="Branches can only be created inside Discord servers.", ephemeral=True)
+        return
+
+    gen_record = branch_manager.get_generation(message.id)
+    if gen_record:
+        versions = gen_record.get("versions", [])
+        if len(versions) >= 2:
+            async def on_vpick_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+                chosen_val = data.get("chosen_version", "1")
+                if isinstance(chosen_val, list) and chosen_val:
+                    chosen_val = chosen_val[0]
+                target_v = int(chosen_val) if str(chosen_val).isdigit() else 1
+                await _execute_branch_creation(sub_inter, message, target_version_idx=target_v)
+
+            v_modal = build_branch_version_picker_modal(message.id, versions, on_vpick_submit)
+            await interaction.response.send_modal(v_modal)
+            return
+
+    await _execute_branch_creation(interaction, message, target_version_idx=None)
 
 async def _execute_view_prompt(interaction: discord.Interaction, message: discord.Message):
     if message.author.id != interaction.client.user.id:
@@ -1214,7 +1294,7 @@ def setup_context_menus(tree: app_commands.CommandTree):
         is_guild_text = (
             not is_foreign
             and interaction.guild is not None
-            and isinstance(interaction.channel, discord.TextChannel)
+            and (isinstance(interaction.channel, discord.TextChannel) or isinstance(interaction.channel, discord.Thread))
         )
         is_bot_message = (message.author.id == interaction.client.user.id)
 

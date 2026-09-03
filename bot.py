@@ -51,7 +51,12 @@ from handlers.stream_handler import (
     should_show_reply_button
 )
 from ui.thought_container import ThoughtContainerView
-from ui.context_views import BranchTranscriptView
+from ui.context_views import (
+    BranchTranscriptView,
+    BranchHeaderView,
+    build_branch_settings_modal,
+    build_branch_message_edit_modal
+)
 from ui.artifact_views import build_code_preview_modal, build_artifact_open_modal, prepare_artifact_download_payload
 from ui.quiz_views import (
     QuizActiveStepperView,
@@ -765,6 +770,193 @@ class PriestyBot(discord.Client):
             branch_id = custom_id.replace("branch_view_", "")
             transcript_view = BranchTranscriptView(branch_id=branch_id, page=0)
             await interaction.response.send_message(view=transcript_view, ephemeral=True)
+            return
+
+        if custom_id.startswith("branch_settings_"):
+            branch_id = custom_id.replace("branch_settings_", "")
+            branch = branch_manager.get_branch_by_id(branch_id)
+            if not branch:
+                await interaction.response.send_message(content="❌ Branch record not found.", ephemeral=True)
+                return
+
+            is_creator = str(interaction.user.id) == branch.get("creator_id")
+            is_collab = str(interaction.user.id) in branch.get("collaborators", [])
+            is_mod = interaction.guild and interaction.user.guild_permissions.manage_threads
+
+            if not (is_creator or is_collab or is_mod or not interaction.guild):
+                await interaction.response.send_message(content="❌ You lack permission to manage branch settings.", ephemeral=True)
+                return
+
+            async def on_settings_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+                new_title = data.get("branch_title", "").strip() or branch.get("title", "Branch Discussion")
+                new_auto_reply_str = data.get("auto_reply", "1")
+                if isinstance(new_auto_reply_str, list) and new_auto_reply_str:
+                    new_auto_reply_str = new_auto_reply_str[0]
+                new_auto_reply = int(new_auto_reply_str) if str(new_auto_reply_str).isdigit() else 1
+
+                raw_collabs = data.get("collaborators", [])
+                if isinstance(raw_collabs, str):
+                    raw_collabs = [raw_collabs] if raw_collabs else []
+                elif not isinstance(raw_collabs, list):
+                    raw_collabs = []
+
+                new_collabs = [str(c) for c in raw_collabs if str(c).strip()]
+                if str(branch.get("creator_id")) not in new_collabs:
+                    new_collabs.append(str(branch.get("creator_id")))
+
+                branch_manager.update_branch_settings(
+                    branch_id=branch_id,
+                    title=new_title,
+                    collaborators=new_collabs,
+                    auto_reply=new_auto_reply
+                )
+
+                thread_obj = None
+                if interaction.guild and branch.get("thread_id"):
+                    try:
+                        thread_obj = interaction.guild.get_thread(int(branch["thread_id"])) or await interaction.guild.fetch_channel(int(branch["thread_id"]))
+                    except Exception:
+                        thread_obj = None
+
+                if thread_obj:
+                    try:
+                        await thread_obj.edit(name=new_title[:60])
+                    except Exception as ex:
+                        logger.debug(f"Failed to edit thread title: {ex}")
+
+                    for c_id in new_collabs:
+                        try:
+                            m_obj = interaction.guild.get_member(int(c_id)) or await interaction.guild.fetch_member(int(c_id))
+                            if m_obj:
+                                await thread_obj.add_user(m_obj)
+                        except Exception:
+                            pass
+
+                await sub_inter.response.send_message(content="✅ **Branch settings updated successfully.**", ephemeral=True)
+
+            modal = build_branch_settings_modal(branch, on_settings_submit, guild=interaction.guild)
+            await interaction.response.send_modal(modal)
+            return
+
+        if custom_id.startswith("branch_edit_msg_"):
+            parts = custom_id.replace("branch_edit_msg_", "").split("_")
+            if len(parts) >= 2:
+                branch_id = parts[0]
+                msg_idx = int(parts[1])
+
+                branch = branch_manager.get_branch_by_id(branch_id)
+                if not branch:
+                    await interaction.response.send_message(content="❌ Branch record not found.", ephemeral=True)
+                    return
+
+                is_creator = str(interaction.user.id) == branch.get("creator_id")
+                is_collab = str(interaction.user.id) in branch.get("collaborators", [])
+                is_mod = interaction.guild and interaction.user.guild_permissions.manage_threads
+
+                if not (is_creator or is_collab or is_mod or not interaction.guild):
+                    await interaction.response.send_message(content="❌ You lack permission to edit messages in this branch.", ephemeral=True)
+                    return
+
+                messages = branch.get("messages", [])
+                if not (0 <= msg_idx < len(messages)):
+                    await interaction.response.send_message(content="❌ Message record not found.", ephemeral=True)
+                    return
+
+                target_msg_data = messages[msg_idx]
+
+                async def on_edit_msg_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+                    new_content = data.get("content", "").strip()
+                    raw_author = data.get("author_id", target_msg_data.get("author_id", "0"))
+                    if isinstance(raw_author, list) and raw_author:
+                        raw_author = raw_author[0]
+
+                    new_author_id = str(raw_author) if raw_author else "0"
+                    new_author_name = target_msg_data.get("author", "User")
+                    if sub_inter.guild and new_author_id and new_author_id != "0":
+                        try:
+                            m_user = sub_inter.guild.get_member(int(new_author_id)) or await sub_inter.guild.fetch_member(int(new_author_id))
+                            if m_user:
+                                new_author_name = m_user.display_name
+                        except Exception:
+                            pass
+
+                    raw_data = getattr(sub_inter, "data", {})
+                    resolved_attachments = raw_data.get("resolved", {}).get("attachments", {})
+                    attachment_records = []
+                    if resolved_attachments:
+                        for att_id, att_obj in resolved_attachments.items():
+                            att_url = att_obj.get("url")
+                            att_fname = att_obj.get("filename", f"file_{att_id}")
+                            if att_url:
+                                attachment_records.append({"filename": att_fname, "url": att_url})
+
+                    branch_manager.edit_branch_message(
+                        branch_id=branch_id,
+                        message_index=msg_idx,
+                        new_author_id=new_author_id,
+                        new_author_name=new_author_name,
+                        new_content=new_content,
+                        new_attachments=attachment_records if resolved_attachments else None
+                    )
+
+                    updated_transcript = BranchTranscriptView(branch_id=branch_id, page=0)
+                    await sub_inter.response.edit_message(view=updated_transcript)
+
+                modal = build_branch_message_edit_modal(
+                    branch_id=branch_id,
+                    msg_idx=msg_idx,
+                    msg_data=target_msg_data,
+                    on_submit=on_edit_msg_submit,
+                    guild=interaction.guild
+                )
+                await interaction.response.send_modal(modal)
+                return
+
+        if custom_id.startswith("branch_bulk_prune_"):
+            branch_id = custom_id.replace("branch_bulk_prune_", "")
+            selected_indices = [int(v) for v in interaction.data.get("values", []) if str(v).isdigit()]
+
+            if selected_indices:
+                branch = branch_manager.get_branch_by_id(branch_id)
+                if branch:
+                    is_creator = str(interaction.user.id) == branch.get("creator_id")
+                    is_collab = str(interaction.user.id) in branch.get("collaborators", [])
+                    is_mod = interaction.guild and interaction.user.guild_permissions.manage_threads
+
+                    if is_creator or is_collab or is_mod or not interaction.guild:
+                        branch_manager.bulk_prune_branch_messages(branch_id, selected_indices)
+                        updated_transcript = BranchTranscriptView(branch_id=branch_id, page=0)
+                        await interaction.response.edit_message(view=updated_transcript)
+                        return
+
+            await interaction.response.send_message(content="❌ Failed to prune selected messages.", ephemeral=True)
+            return
+
+        if custom_id.startswith("branch_export_"):
+            branch_id = custom_id.replace("branch_export_", "")
+            branch = branch_manager.get_branch_by_id(branch_id)
+            if not branch:
+                await interaction.response.send_message(content="❌ Branch record not found.", ephemeral=True)
+                return
+
+            messages = branch.get("messages", [])
+            lines = [f"# Branch Export: {branch.get('title', 'Discussion')}\n"]
+            lines.append(f"Exported at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n")
+            lines.append(f"Total Messages: {len(messages)}\n\n---\n")
+
+            for m in messages:
+                author = m.get("author", "User")
+                content = m.get("content", "")
+                ts = m.get("timestamp", "")
+                lines.append(f"### {author} ({ts})\n{content}\n")
+
+            export_bytes = "\n".join(lines).encode("utf-8")
+            file_obj = discord.File(io.BytesIO(export_bytes), filename=f"branch_{branch_id}_export.md")
+            await interaction.response.send_message(
+                content=f"{OCTICONS_MAP['oct_rocket']} **Branch Export Ready:** Attached is the complete Markdown record.",
+                file=file_obj,
+                ephemeral=True
+            )
             return
 
         if custom_id.startswith("branch_del_"):

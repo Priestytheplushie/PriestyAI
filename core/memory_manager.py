@@ -405,6 +405,7 @@ class MemoryManager:
 
     def purge_entire_user_data(self, user_id: str | int) -> dict[str, int]:
         from core.config_manager import config_manager
+        from core.branch_manager import branch_manager
         uid_str = str(user_id)
         counts = {}
         with self._get_connection() as conn:
@@ -432,6 +433,7 @@ class MemoryManager:
 
             conn.commit()
 
+        counts["branch_messages"] = branch_manager.purge_user_from_branches(uid_str)
         logger.info(f"[UserDataPurge] Purged data for user {user_id}: {counts}")
         return counts
 

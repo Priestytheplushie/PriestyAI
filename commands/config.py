@@ -18,27 +18,19 @@ from ui.config_views import (
 )
 
 SETTINGS_SCOPE_MAP = {
-    "Help": ["User", "Channel", "Server", "Bot DM", "User App"],
-    "Custom Tools": ["Server", "User", "Bot DM", "User App"],
-    "GitHub": ["User", "Bot DM", "User App"],
+    "Help": ["User", "Channel", "Server"],
+    "Custom Tools": ["Server", "User"],
+    "GitHub": ["User"],
     "Server Identity": ["Server"],
-    "System Prompt": ["Channel", "Server", "User", "Bot DM", "User App"],
+    "System Prompt": ["Channel", "Server"],
     "AI Channels": ["Channel", "Server"],
-    "Memory": ["User", "Server", "Channel", "Bot DM", "User App"],
+    "Memory": ["User", "Server", "Channel"],
     "Permissions": ["Server"],
-    "User Persona": ["User", "Bot DM", "User App"],
-    "Reasoning": ["Server", "Channel", "User", "Bot DM", "User App"],
+    "User Persona": ["User"],
+    "Reasoning": ["Server", "Channel", "User"],
     "Tool Permissions": ["Server", "Channel"],
-    "Reset": ["User", "Channel", "Server", "Bot DM", "User App"]
+    "Reset": ["User", "Channel", "Server"]
 }
-
-def is_user_app_available(interaction: discord.Interaction) -> bool:
-    owners = getattr(interaction, "authorizing_integration_owners", {})
-    if hasattr(discord, "IntegrationType") and hasattr(discord.IntegrationType, "user_install"):
-        return discord.IntegrationType.user_install in owners
-    if hasattr(discord, "enums") and hasattr(discord.enums, "ApplicationIntegrationType"):
-        return discord.enums.ApplicationIntegrationType.user_install in owners
-    return False
 
 async def setting_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     is_in_guild = interaction.guild is not None
@@ -58,14 +50,11 @@ async def setting_autocomplete(interaction: discord.Interaction, current: str) -
 
 async def scope_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     chosen_setting = interaction.namespace.setting or ""
-    valid_scopes = SETTINGS_SCOPE_MAP.get(chosen_setting, ["User", "Channel", "Server", "Bot DM", "User App"])
-    has_user_app = is_user_app_available(interaction)
+    valid_scopes = SETTINGS_SCOPE_MAP.get(chosen_setting, ["User", "Channel", "Server"])
     is_in_guild = interaction.guild is not None
 
     filtered_scopes = []
     for s in valid_scopes:
-        if s == "User App" and not has_user_app:
-            continue
         if s in ["Server", "Channel"] and not is_in_guild:
             continue
         if current.lower() in s.lower():
@@ -221,7 +210,7 @@ def setup_config_commands(tree: app_commands.CommandTree):
 
         if setting_clean == "user_persona":
             if scope_clean in ["server", "channel"]:
-                await interaction.response.send_message(content="❌ **User Persona** is a personal setting and is only available in User, Bot DM, or User App scopes.", ephemeral=True)
+                await interaction.response.send_message(content="❌ **User Persona** is a personal setting and is only available in User scope.", ephemeral=True)
                 return
 
             u_cfg = config_manager.get_user_config(interaction.user.id)

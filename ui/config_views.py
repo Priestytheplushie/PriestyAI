@@ -43,9 +43,7 @@ DEFAULT_SERVER_BIO = (
 SCOPE_DISPLAY_NAMES = {
     "server": "Server",
     "channel": "Channel",
-    "user": "User",
-    "bot_dm": "Bot DM",
-    "user_app": "User App"
+    "user": "User"
 }
 
 def format_scope_title(scope: str) -> str:
@@ -79,7 +77,7 @@ def build_custom_tool_modal(scope: str, on_submit: Any) -> DynamicModalV2:
             "content": (
                 f"# Register Custom Tool {BETA_EMOJI}\n"
                 "Connect a public API or webhook endpoint for PriestyAI to query during chat.\n\n"
-                "• **Dynamic Inputs:** Place `{param}` in the URL (e.g. `https://api.example.com/user/{username}`). PriestyAI automatically extracts and populates parameters.\n"
+                "• **Dynamic Inputs:** Place `{param}` in the URL (e.g. `https://api.example.com/user/{username}`). PriestyAI automatically extracts parameters without coding.\n"
                 "• **Requirements:** Endpoints must strictly use HTTPS and be publicly reachable."
             )
         },
@@ -198,7 +196,7 @@ class CustomToolsDashboardView(LayoutView):
         super().__init__(timeout=600)
         self.user = user
         self.guild = guild
-        self.scope = "user" if scope in ["user", "bot_dm", "user_app"] or not guild else "server"
+        self.scope = "user" if scope == "user" or not guild else "server"
         self._build_dashboard()
 
     def _build_dashboard(self):
@@ -656,17 +654,7 @@ SCOPE_EXPLANATIONS = {
     "user": (
         "### User Scope Context\n"
         "Configurations set at the User Scope define your personal identity (preferred name, Git credentials, coding habits) "
-        "and control personal facts memory banks. These settings follow you across all servers."
-    ),
-    "bot_dm": (
-        "### Bot DM Scope Context\n"
-        "Configurations set at the Bot DM Scope govern private direct messages between you and PriestyAI. "
-        "Server lore and server permission rules are ignored in private DMs."
-    ),
-    "user_app": (
-        "### User App Scope Context\n"
-        "Configurations set at the User App Scope apply whenever you invoke PriestyAI anywhere across Discord "
-        "via your personal user application installation."
+        "and control personal facts memory banks. These settings follow you across all servers and DMs."
     )
 }
 
@@ -697,7 +685,7 @@ SETTING_HELP_TEXTS = {
     ),
     "system_prompt": (
         "### System Prompt\n"
-        "Direct the behavior, tone, constraints, and personality of PriestyAI.\n\n"
+        "Direct the behavior, tone, constraints, and personality of PriestyAI for a server or channel.\n\n"
         "• **System Instructions:** Custom guidelines injected into the reasoning engine.\n"
         "• **Target Channel:** Allows selecting a specific channel when configuring in Channel Scope.\n"
         "• **Override User Persona:** When enabled, forces the AI to prioritize server/channel rules over individual user personas."
@@ -734,7 +722,7 @@ SETTING_HELP_TEXTS = {
         "Tailor how PriestyAI addresses you and remembers your personal background across all servers.\n\n"
         "• **Preferred Name:** The name PriestyAI uses to address you, overriding Discord display names.\n"
         "• **Personal Context & Habits:** Your technical background, preferred languages, and response tone preferences.\n"
-        "• **Scope:** Strictly available under User, Bot DM, and User App scopes."
+        "• **Scope:** Strictly available under User scope."
     ),
     "reasoning": (
         "### Reasoning\n"
@@ -758,7 +746,7 @@ SETTING_HELP_TEXTS = {
         "Restores custom configurations back to defaults for a specific scope.\n\n"
         "• **Server Scope:** Clears server lore, permissions, and server prompts (Admins only).\n"
         "• **Channel Scope:** Clears channel prompt overrides and tool locks.\n"
-        "• **User / User App Scope:** Wipes personal preferred name, Git identity, and custom persona."
+        "• **User Scope:** Wipes personal preferred name, Git identity, and custom persona."
     )
 }
 
@@ -915,7 +903,7 @@ def build_memory_modal(scope: str, user_policy: str, lore_policy: str, on_submit
         }
     ]
 
-    if scope in ["user", "bot_dm", "user_app"]:
+    if scope == "user":
         fields.append({
             "type": "radio_group",
             "custom_id": "user_memory_policy",

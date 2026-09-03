@@ -360,7 +360,7 @@ class ConfigManager:
                 cursor.execute("DELETE FROM server_configs WHERE guild_id = ?", (str(entity_id),))
             elif scope_clean == "channel":
                 cursor.execute("DELETE FROM channel_configs WHERE channel_id = ?", (str(entity_id),))
-            elif scope_clean in ["user", "dm", "bot_dm", "user_app", "global_dm"]:
+            elif scope_clean == "user":
                 cursor.execute("DELETE FROM user_configs WHERE user_id = ?", (str(entity_id),))
             conn.commit()
             return cursor.rowcount > 0
@@ -370,11 +370,11 @@ class ConfigManager:
         scope_clean = scope.lower().replace(" ", "_")
 
         if setting_clean in ["user_persona", "github"]:
-            if scope_clean not in ["user", "bot_dm", "user_app", "global_dm"]:
-                return False, f"{setting.title()} is a personal setting and is only available in User, Bot DM, or User App scopes."
+            if scope_clean != "user":
+                return False, f"{setting.title()} is a personal setting and is only available in User scope."
             return True, ""
 
-        if scope_clean in ["user", "bot_dm", "user_app", "global_dm"]:
+        if scope_clean == "user":
             return True, ""
 
         if not interaction.guild:

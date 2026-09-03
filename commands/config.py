@@ -2,10 +2,12 @@ import discord
 from discord import app_commands
 from typing import Any
 from core.config_manager import config_manager
+from core.custom_tool_manager import custom_tool_manager
 from ui.config_views import (
     ServerIdentityDashboardView,
     GitHubConfigDashboardView,
     ConfigHelpView,
+    CustomToolsDashboardView,
     build_ai_channels_modal,
     build_system_prompt_modal,
     build_memory_modal,
@@ -17,6 +19,7 @@ from ui.config_views import (
 
 SETTINGS_SCOPE_MAP = {
     "Help": ["User", "Channel", "Server", "Bot DM", "User App"],
+    "Custom Tools": ["Server", "User", "Bot DM", "User App"],
     "GitHub": ["User", "Bot DM", "User App"],
     "Server Identity": ["Server"],
     "System Prompt": ["Channel", "Server", "User", "Bot DM", "User App"],
@@ -89,6 +92,15 @@ def setup_config_commands(tree: app_commands.CommandTree):
         allowed, reason = config_manager.check_permission(interaction, setting, scope)
         if not allowed:
             await interaction.response.send_message(content=f"❌ **Access Denied:** {reason}", ephemeral=True)
+            return
+
+        if setting_clean == "custom_tools":
+            dash = CustomToolsDashboardView(
+                user=interaction.user,
+                guild=interaction.guild,
+                scope=scope_clean
+            )
+            await interaction.response.send_message(view=dash, ephemeral=True)
             return
 
         if setting_clean == "github":
@@ -247,6 +259,9 @@ def setup_config_commands(tree: app_commands.CommandTree):
             c_cfg = config_manager.get_channel_config(interaction.channel_id) if scope_clean == "channel" else {}
             disabled = c_cfg.get("disabled_tools", []) if scope_clean == "channel" else s_cfg.get("disabled_tools", [])
 
+            server_custom_tools = custom_tool_manager.get_tools_for_entity("server", interaction.guild.id) if interaction.guild else []
+            allow_user_tools = s_cfg.get("allow_user_custom_tools", True)
+
             async def handle_tool_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
                 allowed_bundles = data.get("allowed_tools", [])
                 all_tools = {
@@ -262,7 +277,18 @@ def setup_config_commands(tree: app_commands.CommandTree):
                     for t in bundle.split(","):
                         allowed_individual.add(t.strip())
 
-                disabled_tools_list = list(all_tools - allowed_individual)
+                disabled_native = list(all_tools - allowed_individual)
+
+                allowed_custom = data.get("allowed_custom_tools", [])
+                if isinstance(allowed_custom, str):
+                    allowed_custom = [allowed_custom] if allowed_custom else []
+                elif not isinstance(allowed_custom, list):
+                    allowed_custom = []
+
+                all_server_ct_names = {t["name"] for t in server_custom_tools}
+                disabled_custom = list(all_server_ct_names - set(allowed_custom))
+
+                total_disabled = disabled_native + disabled_custom
 
                 raw_targets = data.get("target_entities", [])
                 if isinstance(raw_targets, str):
@@ -272,31 +298,44 @@ def setup_config_commands(tree: app_commands.CommandTree):
 
                 target_ids = [str(x).strip() for x in raw_targets if str(x).strip()]
 
+                raw_policy = data.get("allow_user_custom_tools", [])
+                if isinstance(raw_policy, list):
+                    allow_user_flag = "allow" in raw_policy
+                elif isinstance(raw_policy, str):
+                    allow_user_flag = (raw_policy == "allow")
+                else:
+                    allow_user_flag = bool(raw_policy)
+
                 if scope_clean == "channel":
                     if target_ids:
                         config_manager.set_channel_entity_disabled_tools(
                             channel_id=interaction.channel_id,
                             entity_ids=target_ids,
-                            disabled_tools=disabled_tools_list,
+                            disabled_tools=total_disabled,
                             guild_id=interaction.guild_id
                         )
                         target_mentions = ", ".join([f"<@{tid}>" for tid in target_ids])
-                        msg = f"✅ **Channel Tool Restrictions Applied:** Disabled {len(disabled_tools_list)} tool(s) specifically for {target_mentions}."
+                        msg = f"✅ **Channel Tool Restrictions Applied:** Disabled {len(total_disabled)} tool(s) specifically for {target_mentions}."
                     else:
-                        config_manager.set_channel_config(interaction.channel_id, disabled_tools=disabled_tools_list)
-                        msg = f"✅ **Channel Tool Permissions Updated:** Default permissions for `@everyone` updated."
+                        config_manager.set_channel_config(interaction.channel_id, disabled_tools=total_disabled)
+                        msg = "✅ **Channel Tool Permissions Updated:** Default permissions for `@everyone` updated."
                 else:
                     if target_ids:
                         config_manager.set_server_entity_disabled_tools(
                             guild_id=interaction.guild.id,
                             entity_ids=target_ids,
-                            disabled_tools=disabled_tools_list
+                            disabled_tools=total_disabled
                         )
+                        config_manager.set_server_config(interaction.guild.id, allow_user_custom_tools=allow_user_flag)
                         target_mentions = ", ".join([f"<@{tid}>" for tid in target_ids])
-                        msg = f"✅ **Server Tool Restrictions Applied:** Disabled {len(disabled_tools_list)} tool(s) specifically for {target_mentions}."
+                        msg = f"✅ **Server Tool Restrictions Applied:** Disabled {len(total_disabled)} tool(s) specifically for {target_mentions}."
                     else:
-                        config_manager.set_server_config(interaction.guild.id, disabled_tools=disabled_tools_list)
-                        msg = f"✅ **Server Tool Permissions Updated:** Default permissions for `@everyone` updated."
+                        config_manager.set_server_config(
+                            interaction.guild.id,
+                            disabled_tools=total_disabled,
+                            allow_user_custom_tools=allow_user_flag
+                        )
+                        msg = "✅ **Server Tool Permissions Updated:** Default permissions for `@everyone` updated."
 
                 await sub_inter.response.send_message(content=msg, ephemeral=True)
 
@@ -304,7 +343,9 @@ def setup_config_commands(tree: app_commands.CommandTree):
                 scope=scope_clean,
                 disabled_tools=disabled,
                 on_submit=handle_tool_submit,
-                guild=interaction.guild
+                guild=interaction.guild,
+                custom_tools=server_custom_tools,
+                allow_user_custom_tools=allow_user_tools
             )
             await interaction.response.send_modal(modal)
             return

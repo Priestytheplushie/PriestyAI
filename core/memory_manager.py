@@ -344,9 +344,11 @@ class MemoryManager:
 
     def export_user_data_bundle(self, user_id: str | int) -> dict[str, Any]:
         from core.config_manager import config_manager
+        from core.custom_tool_manager import custom_tool_manager
         uid_str = str(user_id)
         u_cfg = config_manager.get_user_config(uid_str)
         mems = self.get_all_memories_for_entity("user", uid_str)
+        user_tools = custom_tool_manager.get_tools_for_entity("user", uid_str)
 
         sessions = []
         schedules = []
@@ -386,6 +388,7 @@ class MemoryManager:
             "user_id": uid_str,
             "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "user_config": u_cfg,
+            "custom_tools": user_tools,
             "memories": [
                 {
                     "id": m["id"],
@@ -420,6 +423,9 @@ class MemoryManager:
 
             cursor.execute("DELETE FROM user_configs WHERE user_id = ?", (uid_str,))
             counts["user_configs"] = cursor.rowcount
+
+            cursor.execute("DELETE FROM custom_tools WHERE scope = 'user' AND entity_id = ?", (uid_str,))
+            counts["custom_tools"] = cursor.rowcount
 
             cursor.execute("DELETE FROM message_generations WHERE author_id = ?", (uid_str,))
             counts["message_generations"] = cursor.rowcount

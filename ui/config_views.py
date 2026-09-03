@@ -16,9 +16,17 @@ from discord.ui import (
     Button,
     Select
 )
+from config.settings import BOT_OWNER_ID
 from core.config_manager import config_manager
 from core.github_app_client import github_app_client
-from agent.constants import OCTICONS_MAP, GITHUB_APP_INSTALL_URL
+from core.custom_tool_manager import (
+    custom_tool_manager,
+    OWNER_TOOL_CAP,
+    SERVER_TOOL_CAP,
+    USER_TOOL_CAP,
+    is_owner_user
+)
+from agent.constants import OCTICONS_MAP, BETA_EMOJI, GITHUB_APP_INSTALL_URL
 from ui.modals import DynamicModalV2
 
 logger = logging.getLogger("PriestyAI.ConfigViews")
@@ -43,7 +51,6 @@ SCOPE_DISPLAY_NAMES = {
 def format_scope_title(scope: str) -> str:
     return SCOPE_DISPLAY_NAMES.get(scope.lower().strip(), scope.capitalize())
 
-
 def format_mentionable_defaults(entities: list[Any], guild: discord.Guild | None) -> list[dict[str, str]]:
     defaults = []
     for ent in entities:
@@ -63,6 +70,267 @@ def format_mentionable_defaults(entities: list[Any], guild: discord.Guild | None
         defaults.append({"id": ent_id_str, "type": ent_type})
     return defaults
 
+def build_custom_tool_modal(scope: str, on_submit: Any) -> DynamicModalV2:
+    scope_title = format_scope_title(scope)
+
+    fields = [
+        {
+            "type": "text_display",
+            "content": (
+                f"# Register Custom Tool {BETA_EMOJI}\n"
+                "Connect a public API or webhook endpoint for PriestyAI to query during chat.\n\n"
+                "• **Dynamic Inputs:** Place `{param}` in the URL (e.g. `https://api.example.com/user/{username}`). PriestyAI automatically extracts and populates parameters.\n"
+                "• **Requirements:** Endpoints must strictly use HTTPS and be publicly reachable."
+            )
+        },
+        {
+            "type": "text_input",
+            "custom_id": "tool_name",
+            "label": "Tool Name",
+            "description": "Unique identifier using letters and underscores only",
+            "placeholder": "e.g. mc_status, clan_leaderboard, crypto_price",
+            "style": "short",
+            "required": True,
+            "max_length": 30
+        },
+        {
+            "type": "text_input",
+            "custom_id": "tool_description",
+            "label": "Tool Description (When to use it)",
+            "description": "Explain when PriestyAI should invoke this tool",
+            "placeholder": "e.g. Check online status, player count, and MOTD for our Minecraft server",
+            "style": "paragraph",
+            "required": True,
+            "max_length": 250
+        },
+        {
+            "type": "text_input",
+            "custom_id": "endpoint_url",
+            "label": "Endpoint URL",
+            "description": "Must strictly use HTTPS and be publicly reachable",
+            "placeholder": "e.g. https://api.mcsrvstat.us/3/{server_ip}",
+            "style": "short",
+            "required": True,
+            "max_length": 500
+        },
+        {
+            "type": "text_input",
+            "custom_id": "extra_headers",
+            "label": "Extra Headers / Content-Type (Optional)",
+            "description": "Non-sensitive headers like Accept: application/json",
+            "placeholder": "Accept: application/json",
+            "style": "paragraph",
+            "required": False,
+            "max_length": 200
+        }
+    ]
+
+    return DynamicModalV2(
+        title=f"New Custom Tool ({scope_title})",
+        custom_id=f"modal_custom_tool_{scope}",
+        fields_schema=fields,
+        on_submit_callback=on_submit
+    )
+
+def build_edit_custom_tool_modal(tool_data: dict[str, Any], scope: str, on_submit: Any) -> DynamicModalV2:
+    scope_title = format_scope_title(scope)
+    tool_name = tool_data.get("name", "tool")
+    headers = tool_data.get("headers", {})
+    headers_str = "\n".join(f"{k}: {v}" for k, v in headers.items()) if isinstance(headers, dict) else ""
+
+    fields = [
+        {
+            "type": "text_display",
+            "content": (
+                f"# Edit Custom Tool: `{tool_name}` {BETA_EMOJI}\n"
+                "Modify description, endpoint URL, or extra headers.\n"
+                "To remove this tool completely, check the box at the bottom."
+            )
+        },
+        {
+            "type": "text_input",
+            "custom_id": "tool_description",
+            "label": "Tool Description (When to use it)",
+            "description": "Explain when PriestyAI should invoke this tool",
+            "value": tool_data.get("description", ""),
+            "style": "paragraph",
+            "required": True,
+            "max_length": 250
+        },
+        {
+            "type": "text_input",
+            "custom_id": "endpoint_url",
+            "label": "Endpoint URL",
+            "description": "Must strictly use HTTPS and be publicly reachable",
+            "value": tool_data.get("url_template", ""),
+            "style": "short",
+            "required": True,
+            "max_length": 500
+        },
+        {
+            "type": "text_input",
+            "custom_id": "extra_headers",
+            "label": "Extra Headers / Content-Type (Optional)",
+            "description": "Non-sensitive headers like Accept: application/json",
+            "value": headers_str,
+            "style": "paragraph",
+            "required": False,
+            "max_length": 200
+        },
+        {
+            "type": "checkbox",
+            "custom_id": "delete_tool",
+            "label": "Delete Tool Permanently",
+            "description": "Check this box to remove this custom tool completely",
+            "default": False
+        }
+    ]
+
+    return DynamicModalV2(
+        title=f"Edit Tool: {tool_name}"[:45],
+        custom_id=f"modal_edit_custom_tool_{tool_name[:20]}",
+        fields_schema=fields,
+        on_submit_callback=on_submit
+    )
+
+class CustomToolsDashboardView(LayoutView):
+    def __init__(self, user: discord.User | discord.Member, guild: discord.Guild | None, scope: str = "server"):
+        super().__init__(timeout=600)
+        self.user = user
+        self.guild = guild
+        self.scope = "user" if scope in ["user", "bot_dm", "user_app"] or not guild else "server"
+        self._build_dashboard()
+
+    def _build_dashboard(self):
+        self.clear_items()
+        container = Container()
+
+        is_server = (self.scope == "server" and self.guild)
+        entity_id = self.guild.id if is_server else self.user.id
+        
+        is_owner = is_owner_user(self.user.id)
+        if is_owner:
+            cap = OWNER_TOOL_CAP
+        elif is_server:
+            cap = SERVER_TOOL_CAP
+        else:
+            cap = USER_TOOL_CAP
+
+        tools = custom_tool_manager.get_tools_for_entity(self.scope, entity_id)
+
+        header_text = (
+            f"# {OCTICONS_MAP['oct_link']} Custom Tools {BETA_EMOJI}\n"
+            f"Extend PriestyAI with custom public webhooks and REST endpoints.\n"
+            f"Active tools: `{len(tools)}/{cap}` • Endpoints are called dynamically during chat turns."
+        )
+        container.add_item(TextDisplay(header_text))
+        container.add_item(discord.ui.Separator(visible=True))
+
+        if not tools:
+            container.add_item(TextDisplay("*No custom tools registered yet. Click '+ Add Custom Tool' below.*"))
+        else:
+            for t in tools[:10]:
+                t_id = t["tool_id"]
+                t_name = t["name"]
+                t_desc = t["description"][:120]
+                t_url = t["url_template"][:70]
+                params = t.get("parameters", [])
+                param_str = f" • Params: `{', '.join(params)}`" if params else " • Static Endpoint"
+
+                snippet = (
+                    f"**`{t_name}`**{param_str}\n"
+                    f"> {t_desc}\n"
+                    f"-# `{t_url}`"
+                )
+
+                edit_btn = Button(
+                    label="Edit",
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=f"btn_edit_ct_{t_id}"
+                )
+                edit_btn.callback = self._create_edit_callback(t)
+                container.add_item(Section(TextDisplay(snippet), accessory=edit_btn))
+
+        container.add_item(discord.ui.Separator(visible=True))
+
+        add_btn = Button(
+            label="+ Add Custom Tool",
+            style=discord.ButtonStyle.primary,
+            disabled=(len(tools) >= cap),
+            custom_id="btn_add_custom_tool"
+        )
+        add_btn.callback = self._on_add_tool_clicked
+
+        container.add_item(ActionRow(add_btn))
+        self.add_item(container)
+
+    def _create_edit_callback(self, tool_data: dict[str, Any]):
+        async def callback(interaction: discord.Interaction):
+            async def on_edit_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+                await sub_inter.response.defer(ephemeral=True)
+
+                is_delete = bool(data.get("delete_tool", False))
+                if is_delete:
+                    custom_tool_manager.delete_tool(tool_data["tool_id"])
+                    self._build_dashboard()
+                    await sub_inter.edit_original_response(view=self)
+                    return
+
+                t_desc = data.get("tool_description", tool_data["description"]).strip()
+                t_url = data.get("endpoint_url", tool_data["url_template"]).strip()
+                t_headers = data.get("extra_headers", "").strip()
+
+                entity_id = self.guild.id if (self.scope == "server" and self.guild) else self.user.id
+                success, msg, _ = await custom_tool_manager.register_tool(
+                    scope=self.scope,
+                    entity_id=entity_id,
+                    name=tool_data["name"],
+                    description=t_desc,
+                    url_template=t_url,
+                    headers_str=t_headers,
+                    created_by=interaction.user.id
+                )
+
+                if not success:
+                    await sub_inter.followup.send(content=f"❌ **Update Rejected:** {msg}", ephemeral=True)
+                    return
+
+                self._build_dashboard()
+                await sub_inter.edit_original_response(view=self)
+
+            modal = build_edit_custom_tool_modal(tool_data, self.scope, on_edit_submit)
+            await interaction.response.send_modal(modal)
+        return callback
+
+    async def _on_add_tool_clicked(self, interaction: discord.Interaction):
+        async def on_submit(sub_inter: discord.Interaction, data: dict[str, Any]):
+            await sub_inter.response.defer(ephemeral=True)
+
+            t_name = data.get("tool_name", "")
+            t_desc = data.get("tool_description", "")
+            t_url = data.get("endpoint_url", "")
+            t_headers = data.get("extra_headers", "")
+
+            entity_id = self.guild.id if (self.scope == "server" and self.guild) else self.user.id
+            success, msg, _ = await custom_tool_manager.register_tool(
+                scope=self.scope,
+                entity_id=entity_id,
+                name=t_name,
+                description=t_desc,
+                url_template=t_url,
+                headers_str=t_headers,
+                created_by=interaction.user.id
+            )
+
+            if not success:
+                await sub_inter.followup.send(content=f"❌ **Registration Rejected:** {msg}", ephemeral=True)
+                return
+
+            self._build_dashboard()
+            await sub_inter.edit_original_response(view=self)
+
+        modal = build_custom_tool_modal(self.scope, on_submit)
+        await interaction.response.send_modal(modal)
 
 class GitHubConfigDashboardView(LayoutView):
     def __init__(self, user: discord.User | discord.Member):
@@ -178,7 +446,6 @@ class GitHubConfigDashboardView(LayoutView):
             on_submit_callback=on_submit
         )
         await interaction.response.send_modal(modal)
-
 
 class ServerIdentityDashboardView(LayoutView):
     def __init__(self, guild: discord.Guild):
@@ -375,8 +642,6 @@ class ServerIdentityDashboardView(LayoutView):
         self._build_dashboard()
         await interaction.response.edit_message(view=self)
 
-
-
 SCOPE_EXPLANATIONS = {
     "server": (
         "### Server Scope Context\n"
@@ -406,6 +671,14 @@ SCOPE_EXPLANATIONS = {
 }
 
 SETTING_HELP_TEXTS = {
+    "custom_tools": (
+        "### Custom Tools\n"
+        "Extend PriestyAI with custom web endpoints, REST APIs, or public webhooks.\n\n"
+        "• **Server Scope:** Custom tools configured here are available to all members in this server (max 10).\n"
+        "• **User Scope:** Personal custom tools that follow you into DMs and enabled servers (max 5).\n"
+        "• **Parameter Placeholders:** Use `{param}` in the endpoint URL for dynamic inputs.\n"
+        "• **Member Tool Policy:** Server administrators can toggle whether member-defined personal tools are allowed under Tool Permissions."
+    ),
     "github": (
         "### GitHub Configuration\n"
         "Manage your Git author identity and view repositories authorized with the PriestyAI GitHub App.\n\n"
@@ -476,14 +749,9 @@ SETTING_HELP_TEXTS = {
         "### Tool Permissions\n"
         "Enable or disable specific tool capabilities per server or channel.\n\n"
         "• **Target Roles & Members:** Select specific roles or users to restrict tools for. Leave empty to apply default tool rules to `@everyone`.\n"
-        "• **Code Artifacts:** Standalone script cards and zip project bundling (May not work as expected on mobile).\n"
-        "• **Docker Code Execution:** Runs code in an isolated sandbox container.\n"
-        "• **Web Search & Article Reader:** Real-time web querying and article reading.\n"
-        "• **Image Generation & Search:** AI artwork generation and web image search.\n"
-        "• **Message Reactions:** Proactive emoji reactions on chat messages.\n"
-        "• **Interactive Components:** Staging interactive buttons and Modals v2 forms.\n"
-        "• **Long-Term Memory:** Storing and forgetting persistent facts.\n"
-        "• **Chat & Channel History:** Reading channel history and context."
+        "• **Native Capabilities:** Toggle code execution, web search, reactions, artifacts, etc.\n"
+        "• **Custom Tools:** Enable or disable registered custom tools for selected roles or members.\n"
+        "• **Member Tool Policy:** Control whether personal user-scoped tools are permitted in this server."
     ),
     "reset": (
         "### Reset\n"
@@ -517,6 +785,7 @@ class ConfigHelpView(LayoutView):
 
         select_options = [
             discord.SelectOption(label="System Prompt", value="system_prompt", description="Custom instructions, behavior rules, and persona overrides"),
+            discord.SelectOption(label="Custom Tools", value="custom_tools", description="Configure custom public REST API endpoints and webhooks"),
             discord.SelectOption(label="GitHub", value="github", description="Git author attribution and authorized repositories"),
             discord.SelectOption(label="AI Channels", value="ai_channels", description="Designate channels for automatic AI conversation without mentions"),
             discord.SelectOption(label="Server Identity", value="server_identity", description="Server nickname, bio, avatar, and server banner"),
@@ -551,8 +820,6 @@ class ConfigHelpView(LayoutView):
         self._build_help_card()
         await interaction.response.edit_message(view=self)
 
-
-
 def build_ai_channels_modal(scope: str, current_channels: list[str | int], on_submit: Any) -> DynamicModalV2:
     scope_title = format_scope_title(scope)
     default_vals = [{"id": str(cid), "type": "channel"} for cid in current_channels] if current_channels else []
@@ -584,7 +851,6 @@ def build_ai_channels_modal(scope: str, current_channels: list[str | int], on_su
         fields_schema=fields,
         on_submit_callback=on_submit
     )
-
 
 def build_system_prompt_modal(scope: str, current_val: str, override_user: bool, target_channel_id: int | None, on_submit: Any) -> DynamicModalV2:
     scope_title = format_scope_title(scope)
@@ -640,7 +906,6 @@ def build_system_prompt_modal(scope: str, current_val: str, override_user: bool,
         on_submit_callback=on_submit
     )
 
-
 def build_memory_modal(scope: str, user_policy: str, lore_policy: str, on_submit: Any) -> DynamicModalV2:
     scope_title = format_scope_title(scope)
     fields = [
@@ -686,7 +951,6 @@ def build_memory_modal(scope: str, user_policy: str, lore_policy: str, on_submit
         fields_schema=fields,
         on_submit_callback=on_submit
     )
-
 
 def build_permissions_modal(scope: str, s_cfg: dict[str, Any], on_submit: Any, guild: discord.Guild | None = None) -> DynamicModalV2:
     re_defaults = format_mentionable_defaults(s_cfg.get("restricted_entities", []), guild)
@@ -759,7 +1023,6 @@ def build_permissions_modal(scope: str, s_cfg: dict[str, Any], on_submit: Any, g
         on_submit_callback=on_submit
     )
 
-
 def build_user_persona_modal(u_cfg: dict[str, Any], on_submit: Any) -> DynamicModalV2:
     fields = [
         {
@@ -796,7 +1059,6 @@ def build_user_persona_modal(u_cfg: dict[str, Any], on_submit: Any) -> DynamicMo
         on_submit_callback=on_submit
     )
 
-
 def build_reasoning_modal(scope: str, current_level: str, on_submit: Any) -> DynamicModalV2:
     scope_title = format_scope_title(scope)
     fields = [
@@ -828,22 +1090,23 @@ def build_reasoning_modal(scope: str, current_level: str, on_submit: Any) -> Dyn
         on_submit_callback=on_submit
     )
 
-
 def build_tool_permissions_modal(
     scope: str,
     disabled_tools: list[str],
     on_submit: Any,
     target_entities: list[Any] | None = None,
-    guild: discord.Guild | None = None
+    guild: discord.Guild | None = None,
+    custom_tools: list[dict[str, Any]] | None = None,
+    allow_user_custom_tools: bool = True
 ) -> DynamicModalV2:
     scope_title = format_scope_title(scope)
     disabled_set = set(disabled_tools or [])
     target_defaults = format_mentionable_defaults(target_entities or [], guild)
 
-    tool_options = [
-        {"label": "Code Artifacts", "value": "create_artifact", "description": "Standalone script cards & zip project packaging (May not work as expected on mobile)", "default": "create_artifact" not in disabled_set},
+    native_tool_options = [
+        {"label": "Code Artifacts", "value": "create_artifact", "description": "Standalone script cards & zip project packaging", "default": "create_artifact" not in disabled_set},
         {"label": "Docker Code Execution", "value": "execute_code", "description": "Isolated sandbox execution for Python, JS, C++, Rust, Go", "default": "execute_code" not in disabled_set},
-        {"label": "Web Search & Article Reader", "value": "search_web,read_link", "description": "Real-time web search and full webpage content extraction", "default": "search_web" not in disabled_set},
+        {"label": "Web Search & Reader", "value": "search_web,read_link", "description": "Real-time web search and full webpage content extraction", "default": "search_web" not in disabled_set},
         {"label": "Image Generation & Search", "value": "generate_image,search_image,search_gif,edit_image", "description": "AI image rendering, web image search, GIFs, and image editing", "default": "generate_image" not in disabled_set},
         {"label": "Message Reactions", "value": "react", "description": "Proactive and contextual emoji reactions to messages", "default": "react" not in disabled_set},
         {"label": "Interactive Components", "value": "add_component,add_modal", "description": "Interactive buttons, selects, and Modals v2 forms", "default": "add_component" not in disabled_set},
@@ -857,9 +1120,8 @@ def build_tool_permissions_modal(
         {
             "type": "text_display",
             "content": (
-                f"Configure tool capabilities for the **{scope_title} Scope**.\n\n"
-                "• **Target Roles & Members:** Leave empty to set default permissions for `@everyone`. "
-                "Or select specific roles/members to restrict naughty users without affecting others."
+                "Configure capability restrictions for members or roles.\n"
+                "Leave Target Roles & Members empty to set server-wide defaults for `@everyone`."
             )
         },
         {
@@ -876,12 +1138,52 @@ def build_tool_permissions_modal(
         {
             "type": "checkbox_group",
             "custom_id": "allowed_tools",
-            "label": "Enabled Tool Capabilities",
-            "description": "Select capabilities that PriestyAI is authorized to invoke",
-            "options": tool_options,
+            "label": "Enabled Native Capabilities",
+            "description": "Select built-in capabilities PriestyAI is authorized to invoke",
+            "options": native_tool_options,
             "required": False
         }
     ]
+
+    c_tools = custom_tools or []
+    if c_tools:
+        custom_tool_options = []
+        for t in c_tools[:10]:
+            t_name = t.get("name", "custom_tool")
+            t_desc = t.get("description", "Custom API Tool")[:100]
+            is_enabled = t_name not in disabled_set
+            custom_tool_options.append({
+                "label": t_name,
+                "value": t_name,
+                "description": t_desc,
+                "default": is_enabled
+            })
+
+        fields.append({
+            "type": "checkbox_group",
+            "custom_id": "allowed_custom_tools",
+            "label": "Enabled Custom Tools",
+            "description": "Select server custom tools authorized for these targets",
+            "options": custom_tool_options,
+            "required": False
+        })
+
+    if scope == "server":
+        fields.append({
+            "type": "checkbox_group",
+            "custom_id": "allow_user_custom_tools",
+            "label": "Member Tool Policy",
+            "description": "Control personal user-scoped tools within this server",
+            "options": [
+                {
+                    "label": "Allow Personal User Tools",
+                    "value": "allow",
+                    "description": "Permit members to invoke personal user tools in this server",
+                    "default": allow_user_custom_tools
+                }
+            ],
+            "required": False
+        })
 
     return DynamicModalV2(
         title=f"Tool Permissions ({scope_title})",

@@ -2,6 +2,7 @@ import re
 import time
 import asyncio
 import logging
+import json
 from typing import Any, Callable
 import discord
 from discord.ui import (
@@ -80,7 +81,7 @@ def format_truncated_block(code: str, lang: str, max_chars: int = 3000, label: s
     )
 
 def format_tool_display_text(tool_name: str, args: dict[str, Any], result: dict[str, Any], duration_ms: int, tool_call: dict[str, Any] | None = None) -> str:
-    icon, name_clean = TOOL_META_MAP.get(tool_name, ("⚙️", tool_name.replace("_", " ").title()))
+    icon, name_clean = TOOL_META_MAP.get(tool_name, (OCTICONS_MAP["oct_link"], tool_name.replace("_", " ").title()))
     time_tag = f"`{duration_ms}ms`" if duration_ms > 0 else ""
 
     if tool_name == "agent_terminal":
@@ -169,7 +170,7 @@ def format_tool_display_text(tool_name: str, args: dict[str, Any], result: dict[
         return f"{icon} Searched **Web** (`{q}`) {time_tag}".strip()
     elif tool_name == "read_link":
         u = args.get("url", "")[:35]
-        return f"{icon} Read **Link** (`{u}`) {time_tag}".strip()
+        return f"{icon} Read **Link** (`{u}` {time_tag})".strip()
     elif tool_name == "ask_expert":
         q = args.get("question", "")[:30]
         return f"{icon} Consulted **Expert** (`{q}`) {time_tag}".strip()
@@ -210,7 +211,7 @@ class ToolInspectorView(LayoutView):
         result = self.tool_call.get("result", {})
         duration = self.tool_call.get("duration_ms", 0)
 
-        icon, name_clean = TOOL_META_MAP.get(name, ("⚙️", name.replace("_", " ").title()))
+        icon, name_clean = TOOL_META_MAP.get(name, (OCTICONS_MAP["oct_link"], name.replace("_", " ").title()))
         container = Container()
 
         if name in ["github_repo", "fetch_github"]:
@@ -585,8 +586,19 @@ class ToolInspectorView(LayoutView):
             container.add_item(TextDisplay(f"**Question:** *{question}*\n\n**Expert Solution:**\n{solution[:2500]}"))
 
         else:
-            arg_lines = "\n".join([f"- **{k}:** `{v}`" for k, v in args.items()]) or "- *(No parameters)*"
+            arg_lines = "\n".join([f"• **{k}:** `{v}`" for k, v in args.items()]) or "*None*"
             container.add_item(TextDisplay(f"**Inputs:**\n{arg_lines}"))
+
+            if isinstance(result, dict):
+                if "data" in result:
+                    raw_data = result["data"]
+                    container.add_item(TextDisplay(f"\n**Response Data:**\n```json\n{str(raw_data)[:2500]}\n```"))
+                elif "error" in result:
+                    container.add_item(TextDisplay(f"\n**Error:** `{result['error']}`"))
+                else:
+                    container.add_item(TextDisplay(f"\n**Output:**\n```json\n{json.dumps(result, indent=2)[:2500]}\n```"))
+            elif result:
+                container.add_item(TextDisplay(f"\n**Output:**\n```text\n{str(result)[:2500]}\n```"))
 
         container.add_item(Separator(visible=True))
 

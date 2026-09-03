@@ -44,6 +44,7 @@ class ConfigManager:
                     server_lore_policy TEXT DEFAULT 'read_write',
                     preferred_reasoning_level TEXT DEFAULT 'AUTO',
                     ai_channels_json TEXT DEFAULT '[]',
+                    allow_user_custom_tools INTEGER DEFAULT 1,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -91,6 +92,8 @@ class ConfigManager:
                 cursor.execute("ALTER TABLE server_configs ADD COLUMN ai_channels_json TEXT DEFAULT '[]'")
             if "entity_disabled_tools_json" not in columns and "guild_id" in columns:
                 cursor.execute("ALTER TABLE server_configs ADD COLUMN entity_disabled_tools_json TEXT DEFAULT '{}'")
+            if "allow_user_custom_tools" not in columns and "guild_id" in columns:
+                cursor.execute("ALTER TABLE server_configs ADD COLUMN allow_user_custom_tools INTEGER DEFAULT 1")
 
             cursor.execute("PRAGMA table_info(channel_configs)")
             ch_columns = [row["name"] for row in cursor.fetchall()]
@@ -106,7 +109,6 @@ class ConfigManager:
 
             conn.commit()
         logger.info(f"Initialized configuration tables at absolute path: '{self.db_path}'")
-
 
     def has_user_agreed(self, user_id: str | int) -> bool:
         with self._get_connection() as conn:
@@ -126,7 +128,6 @@ class ConfigManager:
             """, (str(user_id), policy_version))
             conn.commit()
 
-
     def get_server_config(self, guild_id: str | int) -> dict[str, Any]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -139,6 +140,7 @@ class ConfigManager:
                 d["disabled_tools"] = json.loads(d.get("disabled_tools_json") or "[]")
                 d["entity_disabled_tools"] = json.loads(d.get("entity_disabled_tools_json") or "{}")
                 d["ai_channels"] = json.loads(d.get("ai_channels_json") or "[]")
+                d["allow_user_custom_tools"] = bool(d.get("allow_user_custom_tools", 1))
                 return d
         return {
             "guild_id": str(guild_id),
@@ -153,7 +155,8 @@ class ConfigManager:
             "entity_disabled_tools": {},
             "server_lore_policy": "read_write",
             "preferred_reasoning_level": "AUTO",
-            "ai_channels": []
+            "ai_channels": [],
+            "allow_user_custom_tools": True
         }
 
     def set_server_config(self, guild_id: str | int, **kwargs):
@@ -165,6 +168,7 @@ class ConfigManager:
         dt_json = json.dumps(current.get("disabled_tools", []))
         edt_json = json.dumps(current.get("entity_disabled_tools", {}))
         ac_json = json.dumps([str(cid) for cid in current.get("ai_channels", [])])
+        allow_user_tools_int = int(bool(current.get("allow_user_custom_tools", True)))
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -173,8 +177,8 @@ class ConfigManager:
                     guild_id, server_bio, system_prompt, override_user_instructions, access_behavior,
                     restricted_entities_json, permission_bypass_json, config_manager_role,
                     disabled_tools_json, entity_disabled_tools_json, server_lore_policy,
-                    preferred_reasoning_level, ai_channels_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    preferred_reasoning_level, ai_channels_json, allow_user_custom_tools, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     server_bio = excluded.server_bio,
                     system_prompt = excluded.system_prompt,
@@ -188,6 +192,7 @@ class ConfigManager:
                     server_lore_policy = excluded.server_lore_policy,
                     preferred_reasoning_level = excluded.preferred_reasoning_level,
                     ai_channels_json = excluded.ai_channels_json,
+                    allow_user_custom_tools = excluded.allow_user_custom_tools,
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 str(guild_id),
@@ -202,7 +207,8 @@ class ConfigManager:
                 edt_json,
                 current.get("server_lore_policy", "read_write"),
                 current.get("preferred_reasoning_level", "AUTO"),
-                ac_json
+                ac_json,
+                allow_user_tools_int
             ))
             conn.commit()
 
@@ -359,7 +365,6 @@ class ConfigManager:
             conn.commit()
             return cursor.rowcount > 0
 
-
     def check_permission(self, interaction: discord.Interaction, setting: str, scope: str) -> tuple[bool, str]:
         setting_clean = setting.lower().replace(" ", "_")
         scope_clean = scope.lower().replace(" ", "_")
@@ -391,7 +396,7 @@ class ConfigManager:
         if is_owner or is_admin or has_bypass:
             return True, ""
 
-        if setting_clean in ["permissions", "server_identity"] or (setting_clean == "reset" and scope_clean == "server"):
+        if setting_clean in ["permissions", "server_identity", "custom_tools"] or (setting_clean == "reset" and scope_clean == "server"):
             return False, "This setting is restricted to Server Administrators and the Server Owner."
 
         manager_policy = s_cfg.get("config_manager_role", "administrators").lower()
@@ -458,7 +463,8 @@ class ConfigManager:
             "disabled_tools": list(disabled_tools),
             "user_memory_policy": u_cfg.get("user_memory_policy", "read_write"),
             "server_lore_policy": s_cfg.get("server_lore_policy", "read_write"),
-            "channel_memory_policy": c_cfg.get("memory_policy", "read_write")
+            "channel_memory_policy": c_cfg.get("memory_policy", "read_write"),
+            "allow_user_custom_tools": s_cfg.get("allow_user_custom_tools", True)
         }
 
 config_manager = ConfigManager()

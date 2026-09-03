@@ -15,6 +15,7 @@ from core.client_manager import client_manager
 from core.router import Router, RouteDecision
 from core.memory_manager import memory_manager
 from core.config_manager import config_manager
+from core.custom_tool_manager import custom_tool_manager
 from tools.registry import tool_registry, ToolExecutionContext
 
 import tools.search_tools    # noqa: F401
@@ -131,12 +132,10 @@ def normalize_thinking_level(model_name: str, requested_level: str) -> str:
 
     return level if level in ["MINIMAL", "LOW", "MEDIUM", "HIGH"] else "MEDIUM"
 
-
 class SyntheticFunctionCall:
     def __init__(self, name: str, args: dict[str, Any]):
         self.name = name
         self.args = args
-
 
 def extract_and_strip_leaked_calls(text: str) -> tuple[str, list[SyntheticFunctionCall]]:
     call_pattern = r'<call:(?:default_api:)?([a-zA-Z0-9_]+)\s*\{([^}]*)\}\s*(?:\/>|>)'
@@ -163,7 +162,6 @@ def extract_and_strip_leaked_calls(text: str) -> tuple[str, list[SyntheticFuncti
 
     cleaned_text = re.sub(call_pattern, '', text).strip()
     return cleaned_text, synthetic_calls
-
 
 class ChatEngine:
     @staticmethod
@@ -202,8 +200,10 @@ class ChatEngine:
         conversation_contents: list[types.Content],
         formatted_system_prompt: str,
         tool_declarations: list[types.Tool],
-        tool_context: ToolExecutionContext
+        tool_context: ToolExecutionContext,
+        custom_tools_map: dict[str, dict[str, Any]] | None = None
     ) -> AsyncGenerator[tuple[str, Any], None]:
+        c_map = custom_tools_map or {}
         fast_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL]
         for model_name in fast_models:
             attempted_keys: set[int] = set()
@@ -267,7 +267,12 @@ class ChatEngine:
                             call_name = call.name
                             call_args = dict(call.args) if call.args else {}
                             yield ("TOOL_START", {"name": call_name, "args": call_args})
-                            tool_result = await tool_registry.execute(call_name, call_args, tool_context)
+
+                            if call_name in c_map:
+                                tool_result = await custom_tool_manager.execute_custom_tool(c_map[call_name], call_args)
+                            else:
+                                tool_result = await tool_registry.execute(call_name, call_args, tool_context)
+
                             yield ("TOOL_END", {"name": call_name, "args": call_args, "result": tool_result})
                             function_response_parts.append(
                                 types.Part(
@@ -405,7 +410,28 @@ class ChatEngine:
                 seen_cands.add(m)
                 clean_candidate_models.append(m)
 
-        tool_declarations = tool_registry.get_tool_declarations(disabled_tools=resolved_cfg.get("disabled_tools", []))
+        disabled_set = set(resolved_cfg.get("disabled_tools", []))
+        standard_declarations = [
+            d for d in tool_registry._declarations
+            if d.name not in disabled_set
+        ]
+
+        allow_user_tools = bool(resolved_cfg.get("allow_user_custom_tools", True))
+        active_custom_tools = custom_tool_manager.get_active_custom_tools(
+            guild_id=guild_id,
+            user_id=author_id,
+            allow_user_tools=allow_user_tools
+        )
+        custom_tools_map = {t["name"]: t for t in active_custom_tools}
+
+        custom_declarations = [
+            custom_tool_manager.build_tool_declaration(t)
+            for t in active_custom_tools
+            if t["name"] not in disabled_set
+        ]
+
+        all_function_declarations = standard_declarations + custom_declarations
+        tool_declarations = [types.Tool(function_declarations=all_function_declarations)] if all_function_declarations else []
 
         for model_cand in clean_candidate_models:
             conversation_contents: list[types.Content] = [
@@ -425,7 +451,8 @@ class ChatEngine:
                         conversation_contents=conversation_contents,
                         formatted_system_prompt=formatted_system_prompt,
                         tool_declarations=tool_declarations,
-                        tool_context=tool_context
+                        tool_context=tool_context,
+                        custom_tools_map=custom_tools_map
                     ):
                         yield event
                     return
@@ -452,7 +479,8 @@ class ChatEngine:
                                 conversation_contents=conversation_contents,
                                 formatted_system_prompt=formatted_system_prompt,
                                 tool_declarations=tool_declarations,
-                                tool_context=tool_context
+                                tool_context=tool_context,
+                                custom_tools_map=custom_tools_map
                             ):
                                 yield event
                             return
@@ -511,7 +539,8 @@ class ChatEngine:
                                     conversation_contents=conversation_contents,
                                     formatted_system_prompt=formatted_system_prompt,
                                     tool_declarations=tool_declarations,
-                                    tool_context=tool_context
+                                    tool_context=tool_context,
+                                    custom_tools_map=custom_tools_map
                                 ):
                                     yield event
                                 return
@@ -555,6 +584,9 @@ class ChatEngine:
 
                             if call_name in resolved_cfg["disabled_tools"]:
                                 tool_result = {"error": f"The tool '{call_name}' has been disabled by server/channel configuration."}
+                            elif call_name in custom_tools_map:
+                                tool_result = await custom_tool_manager.execute_custom_tool(custom_tools_map[call_name], call_args)
+                                yield ("TOOL_END", {"name": call_name, "args": call_args, "result": tool_result})
                             else:
                                 tool_result = await tool_registry.execute(call_name, call_args, tool_context)
                                 yield ("TOOL_END", {"name": call_name, "args": call_args, "result": tool_result})

@@ -22,6 +22,8 @@ class ToolExecutionContext:
     staged_image_filename: str = "generated_image.png"
     active_thread: Any | None = None
     clear_history_requested: bool = False
+    agent_session_id: str | None = None
+    message: discord.Message | None = None
 
 def python_type_to_schema(py_type: Any, description: str = "") -> types.Schema:
     origin = typing.get_origin(py_type)
@@ -108,6 +110,14 @@ class ToolRegistry:
 
     async def execute(self, tool_name: str, args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
         if tool_name not in self._tools:
+            from core.custom_tool_manager import custom_tool_manager
+            guild_id = context.guild.id if context.guild else None
+            author_id = context.author.id if context.author else None
+            active_custom_tools = custom_tool_manager.get_active_custom_tools(guild_id, author_id)
+            for ct in active_custom_tools:
+                if ct["name"] == tool_name:
+                    return await custom_tool_manager.execute_custom_tool(ct, args)
+
             logger.error(f"Tool '{tool_name}' not found in registry.")
             return {"error": f"Tool '{tool_name}' is not recognized."}
 

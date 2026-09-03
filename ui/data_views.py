@@ -17,6 +17,7 @@ from discord.ui import (
 from core.memory_manager import memory_manager
 from core.config_manager import config_manager
 from core.feedback_manager import feedback_manager
+from core.custom_tool_manager import custom_tool_manager
 from config.settings import BOT_OWNER_ID
 from ui.modals import DynamicModalV2
 from agent.constants import OCTICONS_MAP
@@ -207,7 +208,7 @@ class DatabaseDashboardView(LayoutView):
             filename=f"priestyai_data_export_{self.user.id}.json"
         )
         await interaction.response.send_message(
-            content=f"{OCTICONS_MAP['oct_rocket']} **Your Data Export is Ready:** Attached is a full, decrypted JSON file of all personal facts, scheduled tasks, user persona settings, and chat sessions stored for your account.",
+            content=f"{OCTICONS_MAP['oct_rocket']} **Your Data Export is Ready:** Attached is a full, decrypted JSON file of all personal facts, scheduled tasks, custom tools, user persona settings, and chat sessions stored for your account.",
             file=file_obj,
             ephemeral=True
         )
@@ -1248,17 +1249,22 @@ class ConfigsBrowserView(LayoutView):
         s_cfg = config_manager.get_server_config(self.guild.id) if self.guild else None
         c_cfg = config_manager.get_channel_config(getattr(self.channel, "id", 0)) if self.channel else None
 
+        user_tools = custom_tool_manager.get_tools_for_entity("user", self.user.id)
+        server_tools = custom_tool_manager.get_tools_for_entity("server", self.guild.id) if self.guild else []
+
         p_name = u_cfg.get("preferred_name") or "*None (Using Discord display name)*"
         habits = truncate_str(u_cfg.get("special_instructions") or "*None set*", max_chars=120)
         r_level = u_cfg.get("preferred_reasoning_level", "AUTO")
         mem_pol = u_cfg.get("user_memory_policy", "read_write")
+        u_tools_str = f"`{len(user_tools)} registered`" if user_tools else "*None registered*"
 
         user_block = (
             f"### {OCTICONS_MAP['oct_person']} User Persona\n"
             f"• **Preferred Name:** `{p_name}`\n"
             f"• **Personal Context:** {habits}\n"
             f"• **Reasoning Preference:** `{r_level}`\n"
-            f"• **Memory Policy:** `{mem_pol}`"
+            f"• **Memory Policy:** `{mem_pol}`\n"
+            f"• **Custom Tools:** {u_tools_str}"
         )
 
         server_block = ""
@@ -1268,13 +1274,15 @@ class ConfigsBrowserView(LayoutView):
             s_ai_chans = s_cfg.get("ai_channels", [])
             s_ai_str = ", ".join([f"<#{cid}>" for cid in s_ai_chans]) if s_ai_chans else "*None designated*"
             s_access = s_cfg.get("access_behavior", "blacklist").capitalize()
+            s_tools_str = f"`{len(server_tools)} registered`" if server_tools else "*None registered*"
 
             server_block = (
                 f"\n\n### {OCTICONS_MAP['oct_server']} Server Configs ({self.guild.name})\n"
                 f"• **Server Bio:** {s_bio}\n"
                 f"• **Server Prompt:** {s_prompt}\n"
                 f"• **AI Channels:** {s_ai_str}\n"
-                f"• **Access Policy:** `{s_access}`"
+                f"• **Access Policy:** `{s_access}`\n"
+                f"• **Custom Tools:** {s_tools_str}"
             )
 
         channel_block = ""
@@ -1451,9 +1459,15 @@ class DataDeletionView(LayoutView):
                 emoji=OCTICONS_MAP["oct_terminal"]
             ),
             discord.SelectOption(
+                label="Delete Custom Tools",
+                value="del_custom_tools",
+                description="Deletes all personal custom webhooks and tools",
+                emoji=OCTICONS_MAP["oct_link"]
+            ),
+            discord.SelectOption(
                 label="Delete Everything",
                 value="del_everything",
-                description="Deletes all memories, schedules, configs, and chat history",
+                description="Deletes all memories, schedules, tools, configs, and chat history",
                 emoji=OCTICONS_MAP["oct_alert"]
             )
         ]
@@ -1508,12 +1522,19 @@ class DataDeletionView(LayoutView):
                 "This will reset your custom persona, preferred name, Git credentials, and reasoning settings back to defaults.\n\n"
                 "To proceed, type **CONFIRM** below."
             ),
+            "del_custom_tools": (
+                "Delete Custom Tools",
+                f"{DFM_EMOJI_MAP['gfm_warning']} **WARNING: Irreversible Action**\n\n"
+                "This will permanently delete all personal custom API tools and webhooks registered under your account.\n\n"
+                "To proceed, type **CONFIRM** below."
+            ),
             "del_everything": (
                 "Full Account Data Purge",
                 f"{DFM_EMOJI_MAP['gfm_caution']} **CRITICAL WARNING: Irreversible Action**\n\n"
                 "This will permanently delete ALL data associated with your account:\n"
                 "• All personal memories and preferences\n"
                 "• All scheduled AI workflows\n"
+                "• All personal custom tools\n"
                 "• All user persona configurations and Git credentials\n"
                 "• All multi-turn chat session logs\n"
                 "• All message generation histories\n\n"
@@ -1567,12 +1588,19 @@ class DataDeletionView(LayoutView):
                 config_manager.reset_config("user", self.user.id)
                 msg = "Your preferred name and custom persona settings have been reset."
 
+            elif choice == "del_custom_tools":
+                user_tools = custom_tool_manager.get_tools_for_entity("user", self.user.id)
+                for t in user_tools:
+                    custom_tool_manager.delete_tool(t["tool_id"])
+                msg = f"Deleted `{len(user_tools)}` personal custom tool(s)."
+
             elif choice == "del_everything":
                 res = memory_manager.purge_entire_user_data(self.user.id)
                 msg = (
                     f"All your data has been deleted:\n"
                     f"• Memories deleted: `{res.get('memories', 0)}`\n"
                     f"• Schedules deleted: `{res.get('scheduled_tasks', 0)}`\n"
+                    f"• Custom tools deleted: `{res.get('custom_tools', 0)}`\n"
                     f"• Configs reset: `{res.get('user_configs', 0)}`\n"
                     f"• Chat sessions cleared: `{res.get('chat_sessions', 0)}`\n"
                     f"• Generation history cleared: `{res.get('message_generations', 0)}`"

@@ -1,3 +1,6 @@
+import os
+import json
+
 OCTICONS_MAP = {
     "oct_repo": "<:oct_repo:1542280617515950221>",
     "oct_search": "<:oct_search:1542280619323695255>",
@@ -33,6 +36,20 @@ OCTICONS_MAP = {
 }
 
 BETA_EMOJI = "<:BETA:1542286539113889832>"
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EMOJI_JSON_PATH = os.path.join(BASE_DIR, "config", "emojis.json")
+if os.path.exists(EMOJI_JSON_PATH):
+    try:
+        with open(EMOJI_JSON_PATH, "r", encoding="utf-8") as f:
+            _loaded_emojis = json.load(f)
+        for k, v in _loaded_emojis.items():
+            if k in OCTICONS_MAP:
+                OCTICONS_MAP[k] = v
+        if "BETA" in _loaded_emojis:
+            BETA_EMOJI = _loaded_emojis["BETA"]
+    except Exception:
+        pass
 
 GITHUB_APP_INSTALL_URL = "https://github.com/apps/priestyai/installations/new/"
 GITHUB_BOT_NAME = "PriestyAI[bot]"

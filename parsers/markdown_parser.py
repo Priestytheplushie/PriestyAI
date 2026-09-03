@@ -1,4 +1,6 @@
+import os
 import re
+import json
 from typing import Any
 
 DFM_EMOJI_MAP = {
@@ -10,6 +12,18 @@ DFM_EMOJI_MAP = {
     "gfm_checked": "<:gfm_checked:1541928209338339390>",
     "gfm_unchecked": "<:gfm_unchecked:1541928210697035917>",
 }
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EMOJI_JSON_PATH = os.path.join(BASE_DIR, "config", "emojis.json")
+if os.path.exists(EMOJI_JSON_PATH):
+    try:
+        with open(EMOJI_JSON_PATH, "r", encoding="utf-8") as f:
+            _loaded_emojis = json.load(f)
+        for k, v in _loaded_emojis.items():
+            if k in DFM_EMOJI_MAP:
+                DFM_EMOJI_MAP[k] = v
+    except Exception:
+        pass
 
 ALERT_METADATA = {
     "NOTE": {"emoji": DFM_EMOJI_MAP["gfm_note"], "title": "Note", "color": 0x1f6feb},

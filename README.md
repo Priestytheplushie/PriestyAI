@@ -6,7 +6,7 @@
 
 PriestyAI is an autonomous AI companion, code reasoning engine, and workspace agent for Discord built on Python, `discord.py`, and the Google GenAI SDK.
 
-Unlike standard conversational bots, PriestyAI features multi-turn workspace threads with Docker sandbox execution, Discord Components V2 interactive streaming, local SearXNG metasearch, and direct GitHub App integration with verified commit signing.
+Unlike standard conversational bots, PriestyAI features multi-turn workspace threads with Docker sandbox execution, Discord Components V2 interactive streaming, local SearXNG metasearch, custom REST webhook extensibility, and direct GitHub App integration with verified commit signing.
 
 ---
 
@@ -15,7 +15,7 @@ Unlike standard conversational bots, PriestyAI features multi-turn workspace thr
 ### Prerequisites
 * **Discord Bot Token** (with `Message Content Intent` enabled in the [Discord Developer Portal](https://discord.com/developers/applications))
 * **Google Gemini API Key** (from [Google AI Studio](https://aistudio.google.com/))
-* **Docker & Docker Compose** (for Docker Container) or **Python 3.11+** (for local setup)
+* **Docker & Docker Compose** (for Container setup) or **Python 3.11+** (for Local setup)
 
 ---
 
@@ -35,12 +35,18 @@ Spins up both **PriestyAI** and the local **SearXNG** metasearch service in isol
    ```
    *Edit `.env` and paste your `DISCORD_TOKEN` and `GEMINI_API_KEY`.*
 
-3. **Start the services:**
+3. **(Optional) Setup Application Emojis:**
+   Upload all bundled custom icons directly to your Discord Bot Application:
+   ```bash
+   docker compose run --rm priestyai python scripts/setup_emojis.py
+   ```
+
+4. **Start the services:**
    ```bash
    docker compose up -d --build
    ```
 
-4. **View live logs:**
+5. **View live logs:**
    ```bash
    docker compose logs -f priestyai
    ```
@@ -76,12 +82,18 @@ If you prefer running the Python process directly on your host machine:
    ```
    *Fill in your `DISCORD_TOKEN` and `GEMINI_API_KEY`.*
 
-4. **Start local SearXNG search (Docker):**
+4. **(Optional) Setup Application Emojis:**
+   Upload all bundled custom icons and badges directly to your Discord Bot Application:
+   ```bash
+   python scripts/setup_emojis.py
+   ```
+
+5. **Start local SearXNG search (Docker):**
    ```bash
    docker compose up -d searxng
    ```
 
-5. **Start the bot:**
+6. **Start the bot:**
    ```bash
    python bot.py
    ```
@@ -96,17 +108,24 @@ If you prefer running the Python process directly on your host machine:
 * **Human-in-the-Loop Planning**: Two-phase execution loop with plan review, clarification questions, and interactive approval cards.
 * **Verified GitHub Commits**: Stages code changes, applies co-author attribution, and publishes branches/PRs via GitHub's Git Data API with verified commit badges.
 
-### 2. Intelligent Routing & Resilience
+### 2. Custom Tools & Webhook Extensibility
+* **Zero-Code REST Integrations**: Server admins and users can register public APIs (e.g. game server status, clan stats, crypto feeds) via `/config setting:Custom Tools`.
+* **Dynamic Parameter Auto-Extraction**: Endpoints using `{param}` placeholders automatically generate dynamic schema inputs for Gemini.
+* **Built-in Security & SSRF Protection**: Hardware-level private IP blocklists and pre-flight moderation guardrails reject adversarial injections and internal network exploits.
+* **Role-Based Permission Controls**: Restrict custom tools to specific roles or toggle user-scoped tool execution server-wide under `/config setting:Tool Permissions`.
+
+### 3. Intelligent Routing & Resilience
 * **Complexity-Based Routing**: Dynamically classifies query complexity, routing lightweight requests to high-speed utility models and complex engineering tasks to deep reasoning models.
 * **Automated Fallback Cascades**: Gracefully recovers from provider rate limits, network timeouts, and upstream outages via automated model fallback chains.
 * **Instant Fast-Answer Interrupt**: Users can click `Answer Now` to abort reasoning scratchpads and receive immediate streaming responses.
+* **SQLite WAL Mode**: Concurrent non-blocking reads and writes across background watchdogs, live web terminal auto-saves, and chat threads.
 
-### 3. Rich Discord Components V2 UI
+### 4. Rich Discord Components V2 UI
 * **Live Code Canvas & Playground**: Generates single-file scripts and multi-file `.zip` archives with interactive preview modals, unified diff calculation, and live web previews.
 * **Interactive Knowledge Quizzes**: 1-by-1 stepper views with anti-spoiler thought process gates, instant scoring diagnostics, and dynamic study guide generation.
-* **Thought Process Inspection**: Inspectable scratchpads, tool execution traces, and timings.
+* **Thought Process Inspection**: Inspectable scratchpads, tool execution traces, execution timings, and raw JSON payload viewers.
 
-### 4. Privacy, Security & Local Tooling
+### 5. Privacy, Security & Local Tooling
 * **SearXNG Metasearch**: Privacy-preserving web search and high-resolution image discovery without third-party tracking.
 * **Field-Level Encryption at Rest**: Sensitive user facts, configuration credentials, and conversation sessions are encrypted using AES-256 (Fernet with PBKDF2 key derivation).
 * **Automated Safety Guardrails**: Pre-flight moderation filtering with zero-tolerance policy enforcement and GDPR self-service data erasure via `/data`.
@@ -118,19 +137,25 @@ If you prefer running the Python process directly on your host machine:
 | Command | Scope | Description |
 | :--- | :--- | :--- |
 | `/ask` | Global / Guild | Ask a quick question with optional ephemeral visibility. |
-| `/chat` | Global / Guild | Start or continue a multi-turn conversation with persistent channel memory. |
+| `/chat` | Global / Guild | Start or continue a multi-turn conversation with persistent channel memory and session controls. |
 | `/agent` | Server Text | Launch an autonomous research or engineering agent in a private thread. |
-| `/config` | Multi-Scope | Configure system prompts, persona, reasoning depth, AI channels, and permissions. |
+| `/config` | Server / Channel / User | Configure prompts, custom tools, permissions, reasoning depth, and personas. |
 | `/data` | Global / Guild | Self-service database browser to inspect, edit, or permanently delete stored facts. |
 | `/generate` | Global / Guild | Direct generation across text, local image diffusion, or native voice messages. |
+| `/scribe` | Global / Guild | Translate, localize, and adapt text with custom creative tone and dialect instructions. |
+| `/schedule` | Server / User | Automate recurring AI research, daily briefs, or personal DM tasks on a timeline. |
 | `/feedback` | Global / Guild | Submit bug reports, feature suggestions, or tickets to the developer. |
-| `/terms` & `/privacy` | Global / Guild | Review safety policies, data retention terms, and third-party sub-processors. |
+| `/terms` | Global / Guild | Review safety policies, service guidelines, and moderation terms. |
+| `/privacy` | Global / Guild | Review data retention policies, at-rest encryption, and third-party sub-processors. |
 
 ### Message Context Menus
 * **`Run as Prompt`**: Re-evaluates any selected message or attachment as a fresh prompt.
 * **`Branch`**: Creates an exploratory branch thread preserving prior conversation context.
 * **`Retry`**: Generates a new alternative version of any response with version swapper controls (`◀ 1/3 ▶`).
-* **`View Prompt`** & **`Edit`**: Inspect the prompt that generated a response or edit bot messages in-place.
+* **`Translate`**: Directly translates message content into any selected language with visibility controls.
+* **`Edit`**: Modifies bot responses in-place and updates stored generation history.
+* **`View Prompt`**: Inspects the input prompt, author metadata, and reasoning telemetry for a bot response.
+* **`All Commands`**: Comprehensive action menu providing access to Summarize, Run as Prompt, View Prompt, Retry, Branch, Delete Bot Message, and Add to Chat Context.
 
 ---
 
@@ -139,11 +164,13 @@ If you prefer running the Python process directly on your host machine:
 ```
 PriestyAI/
 ├── agent/                  # Autonomous agent engine, session manager, git automation
+├── assets/                 # Custom emoji assets, application icons, and badges
 ├── commands/               # Application slash commands and context menus
 ├── config/                 # Settings and environment configuration
 ├── core/                   # Engine, client manager, encryption, router, memory manager
 ├── handlers/               # Chat handler, Components V2 streaming dispatcher
 ├── parsers/                # Discord markdown (DFM), math, emoji, mention, timestamp parsers
+├── scripts/                # Asset export and application emoji auto-setup utilities
 ├── tools/                  # Registry and native tools (Docker sandbox, search, GitHub, math)
 ├── ui/                     # Components V2 layout views, modals, thought container, quizzes
 ├── searxng/                # Local SearXNG configuration

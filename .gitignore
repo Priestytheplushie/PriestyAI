@@ -67,3 +67,6 @@ Thumbs.db
 *.bak
 *.db-shm
 *.db-wal
+
+# Dev Scripts
+scripts/export_emoji.py

@@ -1,5 +1,7 @@
+import os
 import io
 import time
+import json
 import zipfile
 import logging
 from typing import Any
@@ -78,6 +80,21 @@ FILE_ICON_MAP = {
 }
 
 DEFAULT_FILE_ICON = "<:ext_txt:1541304855593881670>"
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EMOJI_JSON_PATH = os.path.join(BASE_DIR, "config", "emojis.json")
+if os.path.exists(EMOJI_JSON_PATH):
+    try:
+        with open(EMOJI_JSON_PATH, "r", encoding="utf-8") as f:
+            _loaded_emojis = json.load(f)
+        for k, v in _loaded_emojis.items():
+            if k.startswith("ext_"):
+                ext_name = k.replace("ext_", "")
+                FILE_ICON_MAP[ext_name] = v
+        if "ext_txt" in _loaded_emojis:
+            DEFAULT_FILE_ICON = _loaded_emojis["ext_txt"]
+    except Exception:
+        pass
 
 def get_file_icon(filename: str) -> str:
     if not filename:

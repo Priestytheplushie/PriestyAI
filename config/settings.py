@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import logging
 from dotenv import load_dotenv
@@ -96,6 +97,19 @@ os.makedirs(AGENT_WORKSPACES_ROOT, exist_ok=True)
 
 LOADING_EMOJI = "<a:loading:1540750535093919906>"
 THINKING_EMOJI = "<:thinking:1540750574851723385>"
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EMOJI_JSON_PATH = os.path.join(BASE_DIR, "config", "emojis.json")
+if os.path.exists(EMOJI_JSON_PATH):
+    try:
+        with open(EMOJI_JSON_PATH, "r", encoding="utf-8") as f:
+            _loaded_emojis = json.load(f)
+        if "loading" in _loaded_emojis:
+            LOADING_EMOJI = _loaded_emojis["loading"]
+        if "thinking" in _loaded_emojis:
+            THINKING_EMOJI = _loaded_emojis["thinking"]
+    except Exception:
+        pass
 
 STREAM_DEBOUNCE_INTERVAL = 1.2
 MAX_MESSAGE_CHUNK_SIZE = 1900

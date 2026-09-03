@@ -44,3 +44,13 @@ PriestyAI is built with and inspired by the following incredible open-source pro
 ### UI & Icon Assets
 *   **GitHub Octicons:** [MIT License](https://github.com/primer/octicons/blob/main/LICENSE)
 *   **Visual Studio Code Codicons:** [Creative Commons Attribution 4.0 International Public License](https://github.com/microsoft/vscode-codicons/blob/main/LICENSE)
+*   **Seti UI / File Icons:** [MIT License](https://github.com/jesseweed/seti-ui/blob/master/LICENSE.md) — Used for file extension categorization.
+
+
+---
+
+### Trademark Notice
+
+All product names, logos, brands, and trademarks displayed or referenced in this repository (including, but not limited to, Discord, GitHub, Python, Docker, Rust, Go, JavaScript, TypeScript, and Microsoft) are the property of their respective owners. 
+
+Their inclusion in this repository and associated applications is solely for nominative identification, interoperability, and file-type representation purposes and does not imply any affiliation, sponsorship, or endorsement.

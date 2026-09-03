@@ -1611,7 +1611,7 @@
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = protocol + '//' + window.location.host + '/ws/terminal/' + ARTIFACT_ID;
         
-        try:
+        try{
           termSocket = new WebSocket(wsUrl);
           termSocket.onopen = function() {
             if (autoExecuteCmd) {

@@ -94,7 +94,7 @@ async def cleanup_sibling_messages(channel: discord.abc.Messageable, sibling_ids
             msg = await channel.fetch_message(clean_id)
             if msg:
                 await msg.delete()
-        except (discord.NotFound, discord.HTTPException):
+        except (discord.NotFound, discord.HTTPException, discord.Forbidden):
             pass
         except Exception as e:
             logger.debug(f"Failed to delete sibling message {mid}: {e}")
@@ -243,6 +243,8 @@ def build_v2_message_layout(
     show_reply_button: bool = False,
     active_version: int = 1,
     total_versions: int = 1,
+    sub_page: int = 0,
+    total_sub_pages: int = 1,
     message_id: str | int | None = None,
     is_live_stream: bool = False
 ) -> ChatMessageLayoutView:
@@ -256,7 +258,7 @@ def build_v2_message_layout(
         ordered_blocks = list(timeline_blocks)
 
         idx = 0
-        while idx < len(ordered_blocks) and len(elements) < 32:
+        while idx < len(ordered_blocks) and len(elements) < 30:
             block = ordered_blocks[idx]
             b_type = block.get("type", "text")
 
@@ -265,7 +267,7 @@ def build_v2_message_layout(
                 if text_content:
                     dfm_blocks = parse_dfm_structures_to_blocks(text_content)
                     for d_block in dfm_blocks:
-                        if len(elements) >= 32:
+                        if len(elements) >= 30:
                             break
                         if d_block["type"] == "text":
                             parsed = apply_message_parsers(d_block["content"], guild)
@@ -274,7 +276,7 @@ def build_v2_message_layout(
                                 sec_clean = sec.strip()
                                 if sec_clean:
                                     elements.append(TextDisplay(sec_clean))
-                                if s_idx < len(sections) - 1 and len(elements) < 32:
+                                if s_idx < len(sections) - 1 and len(elements) < 30:
                                     elements.append(Separator(visible=True))
                         elif d_block["type"] == "alert":
                             alert_color = d_block.get("color", 0x1f6feb)
@@ -328,18 +330,18 @@ def build_v2_message_layout(
     elif raw_text is not None:
         dfm_blocks = parse_dfm_structures_to_blocks(raw_text)
         for d_block in dfm_blocks:
-            if len(elements) >= 32:
+            if len(elements) >= 30:
                 break
             if d_block["type"] == "text":
                 parsed_full_text = apply_message_parsers(d_block["content"], guild)
                 sections = re.split(r'(?m)^\s*(?:---|\*\*\*|___)\s*$', parsed_full_text)
                 for s_idx, sec in enumerate(sections):
-                    if len(elements) >= 32:
+                    if len(elements) >= 30:
                         break
                     sec_clean = sec.strip()
                     if sec_clean:
                         elements.append(TextDisplay(sec_clean))
-                    if s_idx < len(sections) - 1 and len(elements) < 32:
+                    if s_idx < len(sections) - 1 and len(elements) < 30:
                         elements.append(Separator(visible=True))
             elif d_block["type"] == "alert":
                 alert_color = d_block.get("color", 0x1f6feb)
@@ -352,14 +354,14 @@ def build_v2_message_layout(
                 elements.append(alert_container)
 
         for art in (staged_artifacts or []):
-            if len(elements) < 32:
+            if len(elements) < 30:
                 art_items = build_artifact_components_for_message(art, message_id=target_mid, is_live_stream=is_live_stream)
                 elements.extend(art_items)
 
     if not elements:
         elements.append(TextDisplay("*Thinking...*"))
 
-    if has_image and image_filename and len(elements) < 35 and not is_live_stream:
+    if has_image and image_filename and len(elements) < 33 and not is_live_stream:
         if not any(isinstance(e, MediaGallery) for e in elements):
             gallery = MediaGallery(discord.MediaGalleryItem(f"attachment://{image_filename}"))
             elements.append(gallery)
@@ -368,7 +370,7 @@ def build_v2_message_layout(
         staged_buttons = []
 
         for comp in staged_components:
-            if len(elements) >= 35:
+            if len(elements) >= 33:
                 break
 
             c_type = str(comp.get("type", "button")).lower().strip().replace(" ", "_")
@@ -526,7 +528,7 @@ def build_v2_message_layout(
         if staged_buttons:
             elements.append(ActionRow(*staged_buttons))
 
-    if staged_followups and not is_live_stream and len(elements) < 38:
+    if staged_followups and not is_live_stream and len(elements) < 36:
         elements.append(Separator(visible=True))
         fup_buttons = []
         for idx, fup in enumerate(staged_followups[:3]):
@@ -547,11 +549,11 @@ def build_v2_message_layout(
             elements.append(ActionRow(*fup_buttons))
 
     if message_id:
-        if (has_thoughts or total_versions >= 2 or (show_reply_button and not is_live_stream)) and elements:
+        if (has_thoughts or total_versions >= 2 or total_sub_pages >= 2 or (show_reply_button and not is_live_stream)) and elements:
             elements.append(Separator(visible=True))
 
         footer_row_items = []
-        if has_thoughts and len(elements) < 39:
+        if has_thoughts and len(elements) < 38:
             time_str = f"{thought_duration}s" if thought_duration > 0 else "<1s"
             t_btn = Button(
                 label=f"🧠 Thought for {time_str}",
@@ -560,7 +562,7 @@ def build_v2_message_layout(
             )
             footer_row_items.append(t_btn)
 
-        if show_reply_button and not is_live_stream and len(elements) < 39:
+        if show_reply_button and not is_live_stream and len(elements) < 38:
             r_btn = Button(
                 label="Reply",
                 emoji="💬",
@@ -572,7 +574,13 @@ def build_v2_message_layout(
         if footer_row_items:
             elements.append(ActionRow(*footer_row_items))
 
-        if total_versions >= 2 and len(elements) < 39:
+        if total_sub_pages >= 2 and len(elements) < 38:
+            sp_prev = Button(label="▲ Prev Page", style=discord.ButtonStyle.secondary, disabled=(sub_page <= 0 or is_live_stream), custom_id=f"sub_prev:{message_id}:{active_version}:{sub_page}")
+            sp_ind = Button(label=f"Page {sub_page + 1} / {total_sub_pages}", style=discord.ButtonStyle.secondary, disabled=True, custom_id=f"sub_ind:{message_id}")
+            sp_next = Button(label="▼ Next Page", style=discord.ButtonStyle.secondary, disabled=(sub_page >= total_sub_pages - 1 or is_live_stream), custom_id=f"sub_next:{message_id}:{active_version}:{sub_page}")
+            elements.append(ActionRow(sp_prev, sp_ind, sp_next))
+
+        if total_versions >= 2 and len(elements) < 38:
             prev_btn = Button(label="◀", style=discord.ButtonStyle.secondary, disabled=(active_version <= 1 or is_live_stream), custom_id=f"gen_prev_{message_id}")
             ind_btn = Button(label=f"{active_version} / {total_versions}", style=discord.ButtonStyle.secondary, disabled=True, custom_id=f"gen_ind_{message_id}")
             next_btn = Button(label="▶", style=discord.ButtonStyle.secondary, disabled=(active_version >= total_versions or is_live_stream), custom_id=f"gen_next_{message_id}")
@@ -621,6 +629,7 @@ class DiscordStreamDispatcher:
         self.raw_attachment_buffers: list[dict[str, Any]] = []
         self.last_edit_time = 0.0
         self.flush_lock = asyncio.Lock()
+        self.current_sub_page = 0
 
     def bind_response_message(self, msg: discord.Message):
         self.primary_message = msg
@@ -800,31 +809,33 @@ class DiscordStreamDispatcher:
             if gen and gen.get("active_version") != target_active_v:
                 return
 
+        is_single_message_context = bool(self.interaction or self.is_ephemeral)
+
         async with self.flush_lock:
             try:
                 message_slices = chunk_timeline(self.timeline, max_chars=MAX_V2_MESSAGE_TEXT_BUDGET)
+                total_slices = max(1, len(message_slices))
 
-                for i, slice_blocks in enumerate(message_slices):
-                    is_last_slice = (i == len(message_slices) - 1)
-                    chunk_comps = staged_components if (is_last_slice and is_final) else None
-                    chunk_fups = active_followups if (is_last_slice and is_final) else None
-                    chunk_mod_map = modals_map if (is_last_slice and is_final) else None
-                    chunk_dispatcher = interaction_dispatcher if (is_last_slice and is_final) else None
+                if is_single_message_context:
+                    active_slice_idx = max(0, min(self.current_sub_page, total_slices - 1))
+                    slice_blocks = message_slices[active_slice_idx]
 
                     layout_view = build_v2_message_layout(
                         guild=self.guild,
                         timeline_blocks=slice_blocks,
-                        staged_components=chunk_comps,
+                        staged_components=staged_components if is_final else None,
                         staged_artifacts=staged_artifacts,
-                        staged_followups=chunk_fups,
-                        modals_map=chunk_mod_map,
-                        interaction_dispatcher=chunk_dispatcher,
-                        thought_duration=thought_duration if is_last_slice else 0,
-                        has_thoughts=has_thoughts if is_last_slice else False,
-                        show_reply_button=render_reply if is_last_slice else False,
+                        staged_followups=active_followups if is_final else None,
+                        modals_map=modals_map if is_final else None,
+                        interaction_dispatcher=interaction_dispatcher if is_final else None,
+                        thought_duration=thought_duration,
+                        has_thoughts=has_thoughts,
+                        show_reply_button=render_reply if is_final else False,
                         active_version=target_active_v,
                         total_versions=target_total_v,
-                        message_id=target_msg_id if is_last_slice else None,
+                        sub_page=active_slice_idx,
+                        total_sub_pages=total_slices,
+                        message_id=target_msg_id,
                         is_live_stream=not is_final
                     )
 
@@ -832,78 +843,101 @@ class DiscordStreamDispatcher:
                     attachments_list = slice_files if slice_files else discord.utils.MISSING
 
                     if self.interaction:
-                        if i == 0:
-                            if attachments_list is not discord.utils.MISSING:
-                                await self.interaction.edit_original_response(view=layout_view, attachments=attachments_list)
-                            else:
-                                await self.interaction.edit_original_response(view=layout_view)
+                        target_direct_msg = self.primary_message or (self.sent_messages[0] if self.sent_messages else None)
+                        edited_direct = False
+                        if target_direct_msg:
+                            try:
+                                if attachments_list is not discord.utils.MISSING:
+                                    await target_direct_msg.edit(view=layout_view, attachments=attachments_list)
+                                else:
+                                    await target_direct_msg.edit(view=layout_view)
+                                edited_direct = True
+                            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                                edited_direct = False
 
-                            if not self.primary_message:
-                                try:
-                                    self.primary_message = await self.interaction.original_response()
-                                    if not self.sent_messages:
-                                        self.sent_messages.append(self.primary_message)
-                                    else:
-                                        self.sent_messages[0] = self.primary_message
-                                except Exception:
-                                    pass
-                        else:
-                            if i < len(self.sent_messages):
-                                existing_followup = self.sent_messages[i]
-                                try:
-                                    if attachments_list is not discord.utils.MISSING:
-                                        await self.interaction.followup.edit_message(existing_followup.id, view=layout_view, attachments=attachments_list)
-                                    else:
-                                        await self.interaction.followup.edit_message(existing_followup.id, view=layout_view)
-                                except Exception as e:
-                                    logger.debug(f"Failed to edit followup message #{existing_followup.id}: {e}")
-                            else:
-                                try:
-                                    if slice_files:
-                                        new_followup = await self.interaction.followup.send(
-                                            view=layout_view,
-                                            files=slice_files,
-                                            ephemeral=self.is_ephemeral,
-                                            wait=True
-                                        )
-                                    else:
-                                        new_followup = await self.interaction.followup.send(
-                                            view=layout_view,
-                                            ephemeral=self.is_ephemeral,
-                                            wait=True
-                                        )
-                                    if new_followup:
-                                        self.sent_messages.append(new_followup)
-                                except Exception as e:
-                                    logger.warning(f"Failed to send interaction followup message: {e}")
-                    else:
+                        if not edited_direct:
+                            try:
+                                if attachments_list is not discord.utils.MISSING:
+                                    await self.interaction.edit_original_response(view=layout_view, attachments=attachments_list)
+                                else:
+                                    await self.interaction.edit_original_response(view=layout_view)
+                            except (discord.NotFound, discord.HTTPException):
+                                pass
+
+                        if not self.primary_message:
+                            try:
+                                self.primary_message = await self.interaction.original_response()
+                                if not self.sent_messages:
+                                    self.sent_messages.append(self.primary_message)
+                                else:
+                                    self.sent_messages[0] = self.primary_message
+                            except Exception:
+                                pass
+
+                else:
+                    for i, slice_blocks in enumerate(message_slices):
+                        is_last_slice = (i == len(message_slices) - 1)
+                        chunk_comps = staged_components if (is_last_slice and is_final) else None
+                        chunk_fups = active_followups if (is_last_slice and is_final) else None
+                        chunk_mod_map = modals_map if (is_last_slice and is_final) else None
+                        chunk_dispatcher = interaction_dispatcher if (is_last_slice and is_final) else None
+
+                        layout_view = build_v2_message_layout(
+                            guild=self.guild,
+                            timeline_blocks=slice_blocks,
+                            staged_components=chunk_comps,
+                            staged_artifacts=staged_artifacts,
+                            staged_followups=chunk_fups,
+                            modals_map=chunk_mod_map,
+                            interaction_dispatcher=chunk_dispatcher,
+                            thought_duration=thought_duration if is_last_slice else 0,
+                            has_thoughts=has_thoughts if is_last_slice else False,
+                            show_reply_button=render_reply if is_last_slice else False,
+                            active_version=target_active_v,
+                            total_versions=target_total_v,
+                            message_id=target_msg_id if is_last_slice else None,
+                            is_live_stream=not is_final
+                        )
+
+                        slice_files = self.get_slice_attachments(slice_blocks) if is_final else []
+                        attachments_list = slice_files if slice_files else discord.utils.MISSING
+
                         if i < len(self.sent_messages):
                             msg = self.sent_messages[i]
-                            if attachments_list is not discord.utils.MISSING:
-                                await msg.edit(view=layout_view, attachments=attachments_list)
-                            else:
-                                await msg.edit(view=layout_view)
+                            try:
+                                if attachments_list is not discord.utils.MISSING:
+                                    await msg.edit(view=layout_view, attachments=attachments_list)
+                                else:
+                                    await msg.edit(view=layout_view)
+                            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                                pass
                         else:
                             target_chan = self.target_channel or (self.origin_message.channel if self.origin_message else (self.primary_message.channel if self.primary_message else None))
                             if target_chan:
-                                if self.origin_message and not self.sent_messages:
-                                    if attachments_list is not discord.utils.MISSING:
-                                        new_msg = await self.origin_message.reply(view=layout_view, files=slice_files, mention_author=False)
+                                try:
+                                    if self.origin_message and not self.sent_messages:
+                                        if attachments_list is not discord.utils.MISSING:
+                                            new_msg = await self.origin_message.reply(view=layout_view, files=slice_files, mention_author=False)
+                                        else:
+                                            new_msg = await self.origin_message.reply(view=layout_view, mention_author=False)
                                     else:
-                                        new_msg = await self.origin_message.reply(view=layout_view, mention_author=False)
-                                else:
-                                    if attachments_list is not discord.utils.MISSING:
-                                        new_msg = await target_chan.send(view=layout_view, files=slice_files)
-                                    else:
-                                        new_msg = await target_chan.send(view=layout_view)
+                                        if attachments_list is not discord.utils.MISSING:
+                                            new_msg = await target_chan.send(view=layout_view, files=slice_files)
+                                        else:
+                                            new_msg = await target_chan.send(view=layout_view)
 
-                                self.sent_messages.append(new_msg)
-                                if not self.primary_message:
-                                    self.primary_message = new_msg
+                                    self.sent_messages.append(new_msg)
+                                    if not self.primary_message:
+                                        self.primary_message = new_msg
+                                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                                    pass
 
                 self.last_edit_time = asyncio.get_event_loop().time()
-            except discord.DiscordServerError:
+            except (discord.DiscordServerError, discord.Forbidden, discord.NotFound):
                 pass
+            except discord.HTTPException as http_ex:
+                if http_ex.code != 10008:
+                    logger.warning(f"Components V2 stream flush HTTP error: {http_ex}")
             except Exception as e:
                 logger.warning(f"Components V2 stream flush warning: {e}")
 

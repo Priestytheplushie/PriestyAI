@@ -203,7 +203,7 @@ async def update_placeholder_loop(
             if msg:
                 try:
                     await msg.edit(view=placeholder_view)
-                except (discord.HTTPException, discord.NotFound):
+                except (discord.HTTPException, discord.NotFound, discord.Forbidden):
                     break
             await placeholder_view.push_live_update()
         except Exception:

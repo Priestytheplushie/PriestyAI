@@ -316,7 +316,11 @@ class PriestyBot(discord.Client):
                     author_id=message.author.id,
                     content=message.clean_content
                 )
-                await ChatHandler.handle_message(self, message, force_respond=True)
+                auto_reply = bool(branch.get("auto_reply", 1))
+                bot_id = self.user.id
+                is_mentioned = (f"<@{bot_id}>" in message.content) or (f"<@!{bot_id}>" in message.content) or any(m.id == bot_id for m in message.mentions)
+                if auto_reply or is_mentioned:
+                    await ChatHandler.handle_message(self, message, force_respond=True)
                 return
 
         is_ai_channel = False
@@ -808,6 +812,69 @@ class PriestyBot(discord.Client):
                     await interaction.response.send_message(content="❌ Failed to prune message.", ephemeral=True)
             return
 
+        if custom_id.startswith("sub_prev:") or custom_id.startswith("sub_next:"):
+            is_prev_sub = custom_id.startswith("sub_prev:")
+            clean_str = custom_id.replace("sub_prev:", "") if is_prev_sub else custom_id.replace("sub_next:", "")
+            parts = clean_str.split(":")
+
+            if len(parts) >= 3:
+                msg_id = parts[0]
+                v_num = int(parts[1]) if parts[1].isdigit() else 1
+                cur_sp = int(parts[2]) if parts[2].isdigit() else 0
+                target_sp = (cur_sp - 1) if is_prev_sub else (cur_sp + 1)
+
+                gen_record = branch_manager.get_generation(msg_id)
+                if gen_record and interaction.message:
+                    root_id = str(gen_record["message_id"])
+                    versions = gen_record.get("versions", [])
+                    if 1 <= v_num <= len(versions):
+                        v_data = versions[v_num - 1]
+                        v_content = v_data.get("content", "")
+                        raw_timeline = v_data.get("timeline_blocks") or ([{"type": "text", "content": v_content}] if v_content else [])
+                        slices = chunk_timeline(raw_timeline, max_chars=3500)
+                        num_slices = max(1, len(slices))
+
+                        if 0 <= target_sp < num_slices:
+                            slice_blocks = slices[target_sp]
+                            dur = max(1, v_data.get("duration_seconds", 1))
+                            has_t = v_data.get("has_thoughts", True)
+                            staged_comps = v_data.get("staged_components", [])
+                            staged_arts = v_data.get("staged_artifacts", [])
+                            staged_fups = v_data.get("staged_followups", [])
+                            staged_mods = v_data.get("staged_modals", [])
+                            mod_map = {m["modal_id"]: m for m in staged_mods}
+
+                            show_reply = should_show_reply_button(
+                                bot=self,
+                                guild=interaction.guild,
+                                channel=interaction.channel,
+                                interaction=interaction
+                            )
+
+                            is_last_sp = (target_sp == num_slices - 1)
+                            updated_view = build_v2_message_layout(
+                                timeline_blocks=slice_blocks,
+                                guild=interaction.guild,
+                                staged_components=staged_comps if is_last_sp else None,
+                                staged_artifacts=staged_arts,
+                                staged_followups=staged_fups if is_last_sp else None,
+                                modals_map=mod_map if is_last_sp else None,
+                                thought_duration=dur,
+                                has_thoughts=has_t,
+                                show_reply_button=show_reply,
+                                active_version=v_num,
+                                total_versions=len(versions),
+                                sub_page=target_sp,
+                                total_sub_pages=num_slices,
+                                message_id=root_id,
+                                is_live_stream=False
+                            )
+                            await interaction.response.edit_message(view=updated_view)
+                            return
+
+            await interaction.response.send_message(content="❌ Page selector expired.", ephemeral=True)
+            return
+
         if custom_id.startswith("gen_prev_") or custom_id.startswith("gen_next_"):
             is_prev = custom_id.startswith("gen_prev_")
             msg_id = custom_id.replace("gen_prev_", "") if is_prev else custom_id.replace("gen_next_", "")
@@ -874,94 +941,35 @@ class PriestyBot(discord.Client):
 
                 target_slices = chunk_timeline(raw_timeline)
                 num_slices = max(1, len(target_slices))
-                new_version_msg_ids = []
-
                 first_slice = target_slices[0]
-                is_first_last = (num_slices == 1)
 
                 v2_view_primary = build_v2_message_layout(
                     timeline_blocks=first_slice,
                     guild=interaction.guild,
-                    staged_components=staged_comps if is_first_last else None,
+                    staged_components=staged_comps if (num_slices == 1) else None,
                     staged_artifacts=staged_arts,
-                    staged_followups=staged_fups if is_first_last else None,
-                    modals_map=mod_map if is_first_last else None,
+                    staged_followups=staged_fups if (num_slices == 1) else None,
+                    modals_map=mod_map if (num_slices == 1) else None,
                     image_filename=img_name,
                     has_image=bool(img_name),
-                    thought_duration=dur if is_first_last else 0,
-                    has_thoughts=has_t if is_first_last else False,
-                    show_reply_button=show_reply if is_first_last else False,
+                    thought_duration=dur,
+                    has_thoughts=has_t,
+                    show_reply_button=show_reply,
                     active_version=target_v,
                     total_versions=total_v,
-                    message_id=root_id if is_first_last else None,
+                    sub_page=0,
+                    total_sub_pages=num_slices,
+                    message_id=root_id,
                     is_live_stream=False
                 )
 
                 try:
-                    if str(interaction.message.id) == root_id:
-                        if files:
-                            await interaction.response.edit_message(view=v2_view_primary, attachments=files)
-                        else:
-                            await interaction.response.edit_message(view=v2_view_primary)
+                    if files:
+                        await interaction.response.edit_message(view=v2_view_primary, attachments=files)
                     else:
-                        root_msg = await interaction.channel.fetch_message(int(root_id))
-                        if files:
-                            await root_msg.edit(view=v2_view_primary, attachments=files)
-                        else:
-                            await root_msg.edit(view=v2_view_primary)
-                        if not interaction.response.is_done():
-                            await interaction.response.defer()
+                        await interaction.response.edit_message(view=v2_view_primary)
                 except Exception as ex:
-                    logger.warning(f"Root message update error during version swap: {ex}")
-
-                new_version_msg_ids.append(root_id)
-
-                for s_idx in range(1, num_slices):
-                    slice_data = target_slices[s_idx]
-                    is_slice_last = (s_idx == num_slices - 1)
-
-                    slice_view = build_v2_message_layout(
-                        timeline_blocks=slice_data,
-                        guild=interaction.guild,
-                        staged_components=staged_comps if is_slice_last else None,
-                        staged_artifacts=staged_arts,
-                        staged_followups=staged_fups if is_slice_last else None,
-                        modals_map=mod_map if is_slice_last else None,
-                        thought_duration=dur if is_slice_last else 0,
-                        has_thoughts=has_t if is_slice_last else False,
-                        show_reply_button=show_reply if is_slice_last else False,
-                        active_version=target_v,
-                        total_versions=total_v,
-                        message_id=root_id if is_slice_last else None,
-                        is_live_stream=False
-                    )
-
-                    existing_sibling_msg = None
-                    if s_idx < len(old_message_ids):
-                        existing_sibling_id = old_message_ids[s_idx]
-                        if existing_sibling_id != root_id:
-                            try:
-                                existing_sibling_msg = await interaction.channel.fetch_message(int(existing_sibling_id))
-                                await existing_sibling_msg.edit(view=slice_view)
-                                new_version_msg_ids.append(str(existing_sibling_msg.id))
-                            except Exception:
-                                existing_sibling_msg = None
-
-                    if not existing_sibling_msg:
-                        new_msg = await interaction.channel.send(view=slice_view)
-                        new_version_msg_ids.append(str(new_msg.id))
-
-                if len(old_message_ids) > num_slices:
-                    orphan_ids = [m for m in old_message_ids[num_slices:] if m != root_id]
-                    if orphan_ids:
-                        asyncio.create_task(cleanup_sibling_messages(interaction.channel, orphan_ids))
-
-                target_version_data["message_ids"] = new_version_msg_ids
-                branch_manager.update_version_data(root_id, target_v, target_version_data)
-                
-                if 1 <= current_v <= len(versions):
-                    curr_v_data["message_ids"] = new_version_msg_ids
-                    branch_manager.update_version_data(root_id, current_v, curr_v_data)
+                    logger.debug(f"Version swap edit error: {ex}")
 
             return
 

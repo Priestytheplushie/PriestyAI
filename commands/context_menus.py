@@ -86,7 +86,7 @@ async def safe_typing(channel: Any):
 
 def is_foreign_context(interaction: discord.Interaction) -> bool:
     if not interaction.guild_id:
-        return True
+        return False
     bot_guild = interaction.client.get_guild(interaction.guild_id)
     return bot_guild is None or getattr(bot_guild, "me", None) is None
 
@@ -160,6 +160,47 @@ def build_retry_placeholder_layout(
     view.add_item(discord.ui.ActionRow(prev_btn, ind_btn, next_btn))
     return view
 
+async def update_interaction_placeholder_loop(
+    interaction: discord.Interaction,
+    placeholder_view: PlaceholderLayoutView,
+    statuses: list[str],
+    get_active_subtext_func: Any,
+    start_time: float,
+    stop_event: asyncio.Event,
+    interval: float = 1.0,
+    target_message: discord.Message | None = None
+):
+    idx = 0
+    last_status_change = time.time()
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.sleep(interval)
+            if stop_event.is_set():
+                break
+
+            now = time.time()
+            if (now - last_status_change) >= 3.0 and statuses:
+                idx = (idx + 1) % len(statuses)
+                last_status_change = now
+
+            current_status = statuses[idx % len(statuses)] if statuses else "Thinking"
+            elapsed = max(0, int(now - start_time))
+            subtext = get_active_subtext_func()
+            full_text = format_placeholder_content(current_status, subtext)
+
+            placeholder_view.update_state(full_text, elapsed)
+            try:
+                if target_message:
+                    await target_message.edit(view=placeholder_view)
+                else:
+                    await interaction.edit_original_response(view=placeholder_view)
+            except (discord.HTTPException, discord.NotFound, discord.Forbidden):
+                break
+            await placeholder_view.push_live_update()
+        except Exception:
+            break
+
 async def _execute_summarize(interaction: discord.Interaction, message: discord.Message):
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True)
@@ -225,7 +266,10 @@ async def _execute_summarize(interaction: discord.Interaction, message: discord.
             show_reply_button=False
         )
         if placeholder_msg:
-            await placeholder_msg.edit(view=final_view)
+            try:
+                await placeholder_msg.edit(view=final_view)
+            except Exception:
+                await interaction.edit_original_response(view=final_view)
         else:
             await interaction.followup.send(view=final_view, ephemeral=True)
 
@@ -274,12 +318,8 @@ async def _execute_run_as_prompt(interaction: discord.Interaction, message: disc
             await interaction.followup.send(content=refusal_text, ephemeral=True)
         return
 
-    try:
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=False)
-            await interaction.delete_original_response()
-    except Exception:
-        pass
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=False)
 
     multimodal_prompt: list[Any] = []
     if attachment_parts:
@@ -302,86 +342,173 @@ async def _execute_run_as_prompt(interaction: discord.Interaction, message: disc
         interaction=interaction
     )
 
+    thinking_start_time = time.time()
+    answer_now_event = asyncio.Event()
+    stop_placeholder_loop = asyncio.Event()
+
+    active_witty_statuses = ["Thinking", "Consulting neural cores", "Formulating response"]
+    active_tool_subtext: str | None = None
+    first_content_received = False
+    is_quiz_turn = False
+    active_model_used = "gemma-4-31b-it"
+
+    def get_active_subtext():
+        return active_tool_subtext
+
+    async def on_answer_now_clicked(inter: discord.Interaction):
+        try:
+            if not inter.response.is_done():
+                await inter.response.defer(ephemeral=True)
+        except Exception:
+            pass
+        answer_now_event.set()
+        stop_placeholder_loop.set()
+        if placeholder_task and not placeholder_task.done():
+            placeholder_task.cancel()
+
+    placeholder_view = PlaceholderLayoutView(
+        loading_text=format_placeholder_content(active_witty_statuses[0], active_tool_subtext),
+        duration_seconds=0,
+        is_enabled=False,
+        on_answer_now_callback=on_answer_now_clicked,
+        thought_data={"thoughts": "", "tool_calls": [], "model": active_model_used, "is_quiz": is_quiz_turn},
+        model_name=active_model_used,
+        is_quiz=is_quiz_turn
+    )
+
+    await interaction.edit_original_response(view=placeholder_view)
+    placeholder_msg = None
+    try:
+        placeholder_msg = await interaction.original_response()
+    except Exception:
+        pass
+
     stream_dispatcher = DiscordStreamDispatcher(
-        origin_message=message,
+        interaction=interaction,
+        is_ephemeral=False,
         guild=interaction.guild,
-        show_reply_button=show_reply
+        show_reply_button=show_reply,
+        existing_response_msg=placeholder_msg
     )
     artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
 
     accumulated_thoughts = []
     tool_call_history = []
     active_tool_start_times = {}
-    active_model_used = "gemma-4-31b-it"
 
-    start_time = time.time()
+    placeholder_task = asyncio.create_task(
+        update_interaction_placeholder_loop(
+            interaction=interaction,
+            placeholder_view=placeholder_view,
+            statuses=active_witty_statuses,
+            get_active_subtext_func=get_active_subtext,
+            start_time=thinking_start_time,
+            stop_event=stop_placeholder_loop,
+            target_message=placeholder_msg
+        )
+    )
 
     try:
-        async with safe_typing(message.channel):
-            async for event_type, payload in ChatEngine.stream_chat(
-                prompt=multimodal_prompt,
-                context_xml="<context></context>",
-                bot_user_id=interaction.client.user.id,
-                tool_context=tool_context
-            ):
-                if event_type == "ACTIVE_MODEL":
-                    active_model_used = str(payload)
+        async for event_type, payload in ChatEngine.stream_chat(
+            prompt=multimodal_prompt,
+            context_xml="<context></context>",
+            bot_user_id=interaction.client.user.id,
+            tool_context=tool_context,
+            answer_now_event=answer_now_event
+        ):
+            if event_type == "ROUTED":
+                if payload.witty_statuses:
+                    active_witty_statuses[:] = payload.witty_statuses
+                    curr_txt = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
+                    placeholder_view.update_state(curr_txt, max(0, int(time.time() - thinking_start_time)))
+                    try:
+                        if placeholder_msg:
+                            await placeholder_msg.edit(view=placeholder_view)
+                        else:
+                            await interaction.edit_original_response(view=placeholder_view)
+                    except Exception:
+                        pass
 
-                elif event_type == "RECALLED_MEMORIES":
-                    count = payload.get("count", 0)
-                    tool_call_history.insert(0, {
-                        "name": "recall_memories",
-                        "args": {"count": count},
-                        "result": payload,
-                        "duration_ms": 0,
-                        "order": -1.0
-                    })
+                if getattr(payload, "is_quiz", False):
+                    is_quiz_turn = True
+                    placeholder_view.is_quiz = True
+                    placeholder_view.thought_data["is_quiz"] = True
 
-                elif event_type == "THOUGHT":
-                    accumulated_thoughts.append(payload)
+            elif event_type == "ACTIVE_MODEL":
+                active_model_used = str(payload)
+                placeholder_view.model_name = active_model_used
 
-                elif event_type == "TOOL_START":
-                    tool_name = payload.get("name", "Tool")
-                    args = payload.get("args", {})
-                    active_tool_start_times[tool_name] = time.perf_counter()
-                    if tool_name in ["create_artifact", "update_artifact"]:
-                        stream_dispatcher.add_artifact_placeholder(tool_name, args)
+            elif event_type == "RECALLED_MEMORIES":
+                count = payload.get("count", 0)
+                tool_call_history.insert(0, {
+                    "name": "recall_memories",
+                    "args": {"count": count},
+                    "result": payload,
+                    "duration_ms": 0,
+                    "order": -1.0
+                })
+                placeholder_view.thought_data["tool_calls"] = tool_call_history
 
-                elif event_type == "TOOL_END":
-                    tool_name = payload.get("name", "Tool")
-                    st = active_tool_start_times.pop(tool_name, time.perf_counter())
-                    dur_ms = int((time.perf_counter() - st) * 1000)
-                    tool_call_history.append({
-                        "name": tool_name,
-                        "args": payload.get("args", {}),
-                        "result": payload.get("result", {}),
-                        "duration_ms": dur_ms
-                    })
+            elif event_type == "THOUGHT":
+                accumulated_thoughts.append(payload)
+                placeholder_view.enable_thinking()
+                placeholder_view.thought_data["thoughts"] = "".join(accumulated_thoughts)
 
-                    if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
-                        last_art = tool_context.staged_artifacts[-1]
-                        stream_dispatcher.update_artifact_ready(last_art)
-                        art_bytes = last_art.get("data_bytes", b"")
-                        art_fname = last_art.get("filename", "artifact.zip")
-                        if art_bytes:
-                            stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
+            elif event_type == "TOOL_START":
+                tool_name = payload.get("name", "Tool")
+                args = payload.get("args", {})
+                active_tool_start_times[tool_name] = time.perf_counter()
+                active_tool_subtext = get_tool_subtext(tool_name, args)
+                placeholder_view.enable_thinking()
+                if tool_name in ["create_artifact", "update_artifact"]:
+                    stream_dispatcher.add_artifact_placeholder(tool_name, args)
 
-                    elif tool_name in ["search_image", "search_gif", "generate_image", "edit_image", "execute_code"] and tool_context.staged_image_bytes:
-                        img_fname = tool_context.staged_image_filename
-                        img_bytes = tool_context.staged_image_bytes
-                        stream_dispatcher.add_media_block(img_fname, img_bytes)
-                        tool_context.staged_image_bytes = None
+            elif event_type == "TOOL_END":
+                tool_name = payload.get("name", "Tool")
+                st = active_tool_start_times.pop(tool_name, time.perf_counter())
+                dur_ms = int((time.perf_counter() - st) * 1000)
+                tool_call_history.append({
+                    "name": tool_name,
+                    "args": payload.get("args", {}),
+                    "result": payload.get("result", {}),
+                    "duration_ms": dur_ms
+                })
+                active_tool_subtext = None
+                placeholder_view.thought_data["tool_calls"] = tool_call_history
 
-                    elif tool_name in ["github_repo", "fetch_github"] and hasattr(tool_context, "staged_github_files"):
-                        for g_file in tool_context.staged_github_files:
-                            stream_dispatcher.add_raw_attachment(g_file["filename"], g_file["bytes"])
+                if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
+                    last_art = tool_context.staged_artifacts[-1]
+                    stream_dispatcher.update_artifact_ready(last_art)
+                    art_bytes = last_art.get("data_bytes", b"")
+                    art_fname = last_art.get("filename", "artifact.zip")
+                    if art_bytes:
+                        stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
 
-                elif event_type == "CONTENT":
-                    await artifact_parser.feed(payload)
+                elif tool_name in ["search_image", "search_gif", "generate_image", "edit_image", "execute_code"] and tool_context.staged_image_bytes:
+                    img_fname = tool_context.staged_image_filename
+                    img_bytes = tool_context.staged_image_bytes
+                    stream_dispatcher.add_media_block(img_fname, img_bytes)
+                    tool_context.staged_image_bytes = None
+
+                elif tool_name in ["github_repo", "fetch_github"] and hasattr(tool_context, "staged_github_files"):
+                    for g_file in tool_context.staged_github_files:
+                        stream_dispatcher.add_raw_attachment(g_file["filename"], g_file["bytes"])
+
+            elif event_type == "CONTENT":
+                if not first_content_received:
+                    first_content_received = True
+                    stop_placeholder_loop.set()
+                    if placeholder_task and not placeholder_task.done():
+                        placeholder_task.cancel()
+
+                await artifact_parser.feed(payload)
 
         await artifact_parser.finish()
+        stop_placeholder_loop.set()
+        if placeholder_task and not placeholder_task.done():
+            placeholder_task.cancel()
 
-        final_duration = max(1, int(time.time() - start_time))
+        final_duration = max(1, int(time.time() - thinking_start_time))
         active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
         has_reasoning = bool(accumulated_thoughts or active_tools)
 
@@ -406,6 +533,9 @@ async def _execute_run_as_prompt(interaction: discord.Interaction, message: disc
         )
 
     except Exception as e:
+        stop_placeholder_loop.set()
+        if placeholder_task and not placeholder_task.done():
+            placeholder_task.cancel()
         logger.exception(f"Run as Prompt error: {e}")
 
 async def _execute_branch(interaction: discord.Interaction, message: discord.Message):
@@ -518,67 +648,80 @@ async def _execute_view_prompt(interaction: discord.Interaction, message: discor
         await interaction.followup.send(content=card_text, ephemeral=True)
 
 async def _execute_retry(interaction: discord.Interaction, message: discord.Message):
+    if message.author.id != interaction.client.user.id:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(content="❌ You can only retry PriestyAI's responses.", ephemeral=True)
+        else:
+            await interaction.followup.send(content="❌ You can only retry PriestyAI's responses.", ephemeral=True)
+        return
+
+    is_foreign = is_foreign_context(interaction)
+
     if not interaction.response.is_done():
         try:
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.defer(ephemeral=is_foreign)
         except Exception:
             pass
 
     gen_record = branch_manager.get_generation(message.id)
     if not gen_record:
         ref_msg = None
-        if message.reference and message.reference.message_id and message.channel:
-            try:
-                ref_msg = await message.channel.fetch_message(message.reference.message_id)
-            except Exception:
-                ref_msg = None
+        if not is_foreign:
+            if message.reference and message.reference.message_id and message.channel:
+                try:
+                    ref_msg = await message.channel.fetch_message(message.reference.message_id)
+                except Exception:
+                    ref_msg = None
 
-        if not ref_msg and message.channel:
-            try:
-                async for prev_m in message.channel.history(limit=6, before=message.created_at):
-                    if not prev_m.author.bot:
-                        ref_msg = prev_m
-                        break
-            except Exception:
-                ref_msg = None
+            if not ref_msg and message.channel:
+                try:
+                    async for prev_m in message.channel.history(limit=6, before=message.created_at):
+                        if not prev_m.author.bot:
+                            ref_msg = prev_m
+                            break
+                except Exception:
+                    ref_msg = None
 
+        clean_p = ""
         if ref_msg:
             clean_p = re.sub(rf'<@!?{interaction.client.user.id}>', '', ref_msg.content).strip()
             if not clean_p:
                 clean_p = "Analyze attached content" if ref_msg.attachments else "Hello!"
 
-            extracted_bot_text = extract_text_from_v2_message(message)
+        extracted_bot_text = extract_text_from_v2_message(message)
+        if not clean_p:
+            clean_p = f"Regenerate response: {extracted_bot_text[:100]}"
 
-            initial_v_data = {
-                "version_idx": 1,
-                "content": apply_message_parsers(extracted_bot_text, message.guild),
-                "timeline_blocks": [{"type": "text", "content": extracted_bot_text}],
-                "duration_seconds": 1,
-                "has_thoughts": True,
-                "thoughts": "",
-                "formatted_thoughts": None,
-                "model": "gemma-4-31b-it",
-                "tool_calls": [],
-                "attachments": [],
-                "staged_components": [],
-                "staged_artifacts": [],
-                "staged_modals": [],
-                "message_ids": [str(message.id)],
-                "created_at": message.created_at.isoformat(),
-                "status": "ready"
-            }
+        initial_v_data = {
+            "version_idx": 1,
+            "content": apply_message_parsers(extracted_bot_text, message.guild),
+            "timeline_blocks": [{"type": "text", "content": extracted_bot_text}],
+            "duration_seconds": 1,
+            "has_thoughts": True,
+            "thoughts": "",
+            "formatted_thoughts": None,
+            "model": "gemma-4-31b-it",
+            "tool_calls": [],
+            "attachments": [],
+            "staged_components": [],
+            "staged_artifacts": [],
+            "staged_modals": [],
+            "message_ids": [str(message.id)],
+            "created_at": message.created_at.isoformat(),
+            "status": "ready"
+        }
 
-            branch_manager.save_generation(
-                message_id=message.id,
-                channel_id=message.channel.id,
-                guild_id=message.guild.id if message.guild else None,
-                author_id=ref_msg.author.id,
-                prompt_text=clean_p,
-                attachments=[],
-                context_xml="<context></context>",
-                initial_version_data=initial_v_data
-            )
-            gen_record = branch_manager.get_generation(message.id)
+        branch_manager.save_generation(
+            message_id=message.id,
+            channel_id=getattr(message.channel, "id", 0),
+            guild_id=message.guild.id if message.guild else None,
+            author_id=ref_msg.author.id if ref_msg else interaction.user.id,
+            prompt_text=clean_p,
+            attachments=[],
+            context_xml="<context></context>",
+            initial_version_data=initial_v_data
+        )
+        gen_record = branch_manager.get_generation(message.id)
 
     if not gen_record:
         await interaction.followup.send(content="No prompt history or reference found for this message.", ephemeral=True)
@@ -586,15 +729,20 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
 
     root_msg_id = gen_record["message_id"]
     root_msg = message
-    if str(message.id) != str(root_msg_id) and message.channel:
+    can_edit_directly = not is_foreign
+
+    if can_edit_directly and str(message.id) != str(root_msg_id) and message.channel:
         try:
             root_msg = await message.channel.fetch_message(int(root_msg_id))
+        except (discord.Forbidden, discord.HTTPException):
+            can_edit_directly = False
+            root_msg = message
         except Exception:
             root_msg = message
 
     existing_versions = gen_record.get("versions", [])
     current_active_idx = gen_record.get("active_version", len(existing_versions))
-    if 1 <= current_active_idx <= len(existing_versions):
+    if can_edit_directly and 1 <= current_active_idx <= len(existing_versions):
         curr_v_data = existing_versions[current_active_idx - 1]
         sibling_ids = [m for m in curr_v_data.get("message_ids", []) if str(m) != str(root_msg_id)]
         if sibling_ids and message.channel:
@@ -645,26 +793,11 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
         interaction=interaction
     )
 
-    stream_dispatcher = DiscordStreamDispatcher(
-        existing_response_msg=root_msg,
-        guild=interaction.guild,
-        show_reply_button=show_reply,
-        active_version=new_version_idx,
-        total_versions=new_version_idx
-    )
-    artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
-
     start_t = time.time()
     stop_placeholder_loop = asyncio.Event()
     answer_now_event = asyncio.Event()
     first_content_received = False
     active_tool_subtext = None
-
-    def get_current_msg():
-        return root_msg
-
-    def get_active_subtext():
-        return active_tool_subtext
 
     placeholder_view = PlaceholderLayoutView(
         loading_text=format_placeholder_content(retry_statuses[0], active_tool_subtext),
@@ -674,10 +807,32 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
         model_name=active_model_used
     )
 
-    try:
-        await root_msg.edit(view=placeholder_view)
-    except Exception as ex:
-        logger.warning(f"Failed to set initial retry placeholder view: {ex}")
+    placeholder_msg = None
+    if can_edit_directly:
+        try:
+            await root_msg.edit(view=placeholder_view)
+        except (discord.Forbidden, discord.HTTPException):
+            can_edit_directly = False
+
+    if not can_edit_directly:
+        placeholder_msg = await interaction.followup.send(view=placeholder_view, ephemeral=is_foreign)
+
+    stream_dispatcher = DiscordStreamDispatcher(
+        existing_response_msg=root_msg if can_edit_directly else placeholder_msg,
+        interaction=interaction if not can_edit_directly else None,
+        guild=interaction.guild,
+        show_reply_button=show_reply,
+        active_version=new_version_idx,
+        total_versions=new_version_idx,
+        is_ephemeral=is_foreign
+    )
+    artifact_parser = ArtifactStreamParser(stream_dispatcher, tool_context, channel_id=getattr(interaction.channel, "id", "global"))
+
+    def get_current_msg():
+        return root_msg if can_edit_directly else placeholder_msg
+
+    def get_active_subtext():
+        return active_tool_subtext
 
     placeholder_task = asyncio.create_task(
         update_placeholder_loop(
@@ -791,7 +946,8 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
             sanitized_timeline.append(b_copy)
 
         raw_collected_thoughts = "".join(accumulated_thoughts)
-        sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(root_msg_id)]
+        target_saved_id = root_msg_id if can_edit_directly else (str(placeholder_msg.id) if placeholder_msg else str(root_msg_id))
+        sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [target_saved_id]
 
         new_v_data = {
             "version_idx": new_version_idx,
@@ -826,7 +982,7 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
             show_reply_button=show_reply,
             active_version=new_version_idx,
             total_versions=new_version_idx,
-            message_id=root_msg_id
+            message_id=root_msg_id if can_edit_directly else (placeholder_msg.id if placeholder_msg else root_msg_id)
         )
 
     except Exception as e:
@@ -921,7 +1077,11 @@ def setup_context_menus(tree: app_commands.CommandTree):
                 is_live_stream=False
             )
             
-            await message.edit(view=v2_view)
+            try:
+                await message.edit(view=v2_view)
+            except discord.Forbidden:
+                await sub_inter.response.send_message(view=v2_view, ephemeral=True)
+                return
             await sub_inter.response.send_message(content="Response edited in-place successfully.", ephemeral=True)
 
         modal = DynamicModalV2(
@@ -1069,31 +1229,32 @@ def setup_context_menus(tree: app_commands.CommandTree):
                 "label": "Run as Prompt",
                 "value": "run_as_prompt",
                 "description": "Execute this message content as a prompt"
-            },
-            {
+            }
+        ]
+
+        if is_bot_message:
+            select_options.append({
                 "label": "View Prompt",
                 "value": "view_prompt",
                 "description": "Inspect prompt telemetry and model duration"
-            },
-            {
+            })
+            select_options.append({
                 "label": "Retry",
                 "value": "retry",
                 "description": "Regenerate this response with a new version"
-            }
-        ]
+            })
+            if not is_foreign:
+                select_options.append({
+                    "label": "Delete Bot Message",
+                    "value": "delete_message",
+                    "description": "Delete this response sent by PriestyAI"
+                })
 
         if is_guild_text:
             select_options.append({
                 "label": "Branch",
                 "value": "branch",
                 "description": "Fork discussion into an isolated thread"
-            })
-
-        if is_bot_message:
-            select_options.append({
-                "label": "Delete Bot Message",
-                "value": "delete_message",
-                "description": "Delete this response sent by PriestyAI"
             })
 
         if is_foreign:

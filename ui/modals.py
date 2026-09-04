@@ -107,7 +107,6 @@ class DynamicModalV2(ui.Modal):
                 "type": comp_type_num,
                 "custom_id": field_id,
                 "placeholder": placeholder[:100],
-                "required": required,
                 "min_values": int(field.get("min_values", 1 if required else 0)),
                 "max_values": int(field.get("max_values", 1))
             }
@@ -210,6 +209,19 @@ class DynamicModalV2(ui.Modal):
                     label_payload["description"] = field.get("description")[:100]
 
                 components_payload.append(label_payload)
+
+        if not components_payload:
+            components_payload.append({
+                "type": 18,
+                "label": "Message",
+                "component": {
+                    "type": 4,
+                    "custom_id": "fallback_message",
+                    "style": 1,
+                    "required": False,
+                    "placeholder": "No form fields were provided."
+                }
+            })
 
         return {
             "title": self.title,

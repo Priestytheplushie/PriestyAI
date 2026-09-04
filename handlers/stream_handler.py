@@ -474,9 +474,13 @@ def build_v2_message_layout(
                             m_id = opt_map.get(chosen_val)
                             if m_id and m_id in _modals:
                                 m_spec = _modals[m_id]
+                                fields = m_spec.get("fields") or []
+                                if not fields:
+                                    await inter.response.send_message("This form is empty and cannot be opened.", ephemeral=True)
+                                    return
                                 async def on_s_sub(s_inter: discord.Interaction, d: dict[str, Any]):
                                     await interaction_dispatcher(s_inter, "modal_submit", {"modal_id": m_id, "selected_option": chosen_val, "values": d})
-                                m_obj = DynamicModalV2(title=m_spec.get("title", "Form"), custom_id=m_id, fields_schema=m_spec.get("fields", []), on_submit_callback=on_s_sub)
+                                m_obj = DynamicModalV2(title=m_spec.get("title", "Form"), custom_id=m_id, fields_schema=fields, on_submit_callback=on_s_sub)
                                 await inter.response.send_modal(m_obj)
                             else:
                                 await interaction_dispatcher(inter, "select_option", {"custom_id": c_id, "component_type": "string_select", "selected": select_obj.values})

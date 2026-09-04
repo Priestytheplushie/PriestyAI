@@ -8,6 +8,7 @@ import logging
 import mimetypes
 from datetime import datetime, timezone
 from typing import Any, Callable
+from contextlib import asynccontextmanager
 
 import aiohttp
 import discord
@@ -43,6 +44,183 @@ from ui.onboarding_views import WelcomeOnboardingCardView, BannedUserNoticeView
 logger = logging.getLogger("PriestyAI.ChatHandler")
 
 MAX_INLINE_FILE_SIZE = 20 * 1024 * 1024
+
+def can_send_typing(inter: discord.Interaction) -> bool:
+    if not inter.guild:
+        return False
+
+    bot_member = inter.guild.me if hasattr(inter.guild, "me") else None
+    if not bot_member and inter.client:
+        bot_guild = inter.client.get_guild(inter.guild_id)
+        if not bot_guild or getattr(bot_guild, "me", None) is None:
+            return False
+        bot_member = bot_guild.me
+
+    if not bot_member:
+        return False
+
+    if not hasattr(inter.channel, "typing"):
+        return False
+
+    if hasattr(inter.channel, "permissions_for") and bot_member:
+        perms = inter.channel.permissions_for(bot_member)
+        if not getattr(perms, "send_messages", True):
+            return False
+
+    return True
+
+@asynccontextmanager
+async def safe_guild_typing(inter: discord.Interaction):
+    if can_send_typing(inter):
+        try:
+            async with inter.channel.typing():
+                yield
+                return
+        except (discord.Forbidden, discord.HTTPException, Exception) as ex:
+            logger.debug(f"Typing indicator suppressed in guild {inter.guild_id}: {ex}")
+    yield
+
+def resolve_single_entity(item: Any, inter: discord.Interaction, field_spec: dict[str, Any] | None = None) -> Any:
+    if not isinstance(item, (str, int)):
+        return item
+
+    val_str = str(item).strip()
+    if not val_str:
+        return item
+
+    resolved = getattr(inter, "data", {}).get("resolved", {})
+    roles = resolved.get("roles", {})
+    channels = resolved.get("channels", {})
+    users = resolved.get("users", {})
+    members = resolved.get("members", {})
+    attachments = resolved.get("attachments", {})
+
+    if val_str in roles:
+        r_info = roles[val_str]
+        return {
+            "id": val_str,
+            "name": r_info.get("name", "Unknown Role"),
+            "type": "role"
+        }
+
+    if val_str in channels:
+        c_info = channels[val_str]
+        return {
+            "id": val_str,
+            "name": c_info.get("name", "Unknown Channel"),
+            "type": "channel"
+        }
+
+    if val_str in users or val_str in members:
+        u_info = users.get(val_str, {})
+        m_info = members.get(val_str, {})
+        display_name = m_info.get("nick") or u_info.get("global_name") or u_info.get("username") or "Unknown User"
+        res = {
+            "id": val_str,
+            "name": display_name,
+            "type": "user"
+        }
+        user_handle = u_info.get("username", "")
+        if user_handle and user_handle != display_name:
+            res["username"] = user_handle
+        return res
+
+    if val_str in attachments:
+        a_info = attachments[val_str]
+        return {
+            "id": val_str,
+            "filename": a_info.get("filename", "file"),
+            "url": a_info.get("url"),
+            "content_type": a_info.get("content_type", "application/octet-stream"),
+            "type": "attachment"
+        }
+
+    if val_str.isdigit() and 17 <= len(val_str) <= 21:
+        num_id = int(val_str)
+        if inter.guild:
+            role_obj = inter.guild.get_role(num_id)
+            if role_obj:
+                return {"id": val_str, "name": role_obj.name, "type": "role"}
+
+            chan_obj = inter.guild.get_channel(num_id) or inter.guild.get_thread(num_id)
+            if chan_obj:
+                return {"id": val_str, "name": getattr(chan_obj, "name", "channel"), "type": "channel"}
+
+            member_obj = inter.guild.get_member(num_id)
+            if member_obj:
+                return {
+                    "id": val_str,
+                    "name": member_obj.display_name,
+                    "username": member_obj.name,
+                    "type": "user"
+                }
+
+        if inter.client:
+            user_obj = inter.client.get_user(num_id)
+            if user_obj:
+                return {
+                    "id": val_str,
+                    "name": getattr(user_obj, "display_name", user_obj.name),
+                    "username": user_obj.name,
+                    "type": "user"
+                }
+
+            chan_obj = inter.client.get_channel(num_id)
+            if chan_obj:
+                return {"id": val_str, "name": getattr(chan_obj, "name", "channel"), "type": "channel"}
+
+    if field_spec and isinstance(field_spec, dict):
+        raw_options = field_spec.get("options", [])
+        if isinstance(raw_options, str):
+            try:
+                raw_options = json.loads(raw_options)
+            except Exception:
+                raw_options = []
+        if isinstance(raw_options, list):
+            for opt in raw_options:
+                if isinstance(opt, dict) and str(opt.get("value")) == val_str:
+                    label = opt.get("label", "").strip()
+                    if label and label != val_str:
+                        return {"value": val_str, "label": label}
+
+    return item
+
+def resolve_interaction_data(
+    inter: discord.Interaction,
+    data: dict[str, Any],
+    modals_map: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return data
+
+    resolved_data = dict(data)
+    modal_id = data.get("modal_id")
+    fields_map = {}
+    if modals_map and modal_id and modal_id in modals_map:
+        m_spec = modals_map[modal_id]
+        raw_fields = m_spec.get("fields", [])
+        for f in raw_fields:
+            if isinstance(f, dict):
+                fid = f.get("custom_id") or f.get("id") or f.get("label", "").lower().replace(" ", "_")
+                if fid:
+                    fields_map[fid] = f
+
+    if "values" in resolved_data and isinstance(resolved_data["values"], dict):
+        resolved_values = {}
+        for cid, val in resolved_data["values"].items():
+            f_spec = fields_map.get(cid)
+            if isinstance(val, list):
+                res_list = [resolve_single_entity(x, inter, f_spec) for x in val]
+                resolved_values[cid] = res_list[0] if len(res_list) == 1 else res_list
+            else:
+                resolved_values[cid] = resolve_single_entity(val, inter, f_spec)
+        resolved_data["values"] = resolved_values
+
+    if "selected" in resolved_data and isinstance(resolved_data["selected"], list):
+        res_selected = [resolve_single_entity(x, inter) for x in resolved_data["selected"]]
+        resolved_data["selected"] = res_selected[0] if len(res_selected) == 1 else res_selected
+
+    return resolved_data
 
 async def extract_message_attachments_raw(message: discord.Message) -> tuple[list[types.Part], list[bytes]]:
     parts: list[types.Part] = []
@@ -300,6 +478,124 @@ class ChatHandler:
 
         envelope.append('</context>')
         return "\n".join(envelope)
+
+    @classmethod
+    async def handle_interaction_event(
+        cls,
+        bot: discord.Client,
+        inter: discord.Interaction,
+        ev_type: str,
+        data: Any,
+        modals_map: dict[str, dict[str, Any]] | None = None
+    ):
+        if is_user_banned(inter.user.id):
+            ban_view = BannedUserNoticeView(author=inter.user)
+            if not inter.response.is_done():
+                await inter.response.send_message(view=ban_view, ephemeral=True)
+            else:
+                await inter.followup.send(view=ban_view, ephemeral=True)
+            return
+
+        if not config_manager.has_user_agreed(inter.user.id):
+            if not inter.response.is_done():
+                await inter.response.send_message("Please accept the terms before interacting.", ephemeral=True)
+            else:
+                await inter.followup.send("Please accept the terms before interacting.", ephemeral=True)
+            return
+
+        resolved_data = resolve_interaction_data(inter, data, modals_map=modals_map)
+
+        text_to_check = []
+        if isinstance(resolved_data, dict):
+            vals = resolved_data.get("values", {})
+            if isinstance(vals, dict):
+                for v in vals.values():
+                    if isinstance(v, str):
+                        text_to_check.append(v)
+                    elif isinstance(v, dict) and "value" in v and isinstance(v["value"], str):
+                        text_to_check.append(v["value"])
+        combined_text = " ".join(text_to_check).strip()
+
+        if combined_text:
+            is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(combined_text)
+            if is_flagged:
+                log_moderation_violation(inter.user.id, inter.guild_id, flagged_cats, score)
+                if is_zero_tolerance:
+                    ban_user(inter.user.id, reason=f"Zero-tolerance violation in modal submission: {', '.join(flagged_cats)}")
+                    ban_view = BannedUserNoticeView(author=inter.user)
+                    if not inter.response.is_done():
+                        await inter.response.send_message(view=ban_view, ephemeral=True)
+                    else:
+                        await inter.followup.send(view=ban_view, ephemeral=True)
+                    return
+                refusal = await generate_friendly_refusal(flagged_cats)
+                if not inter.response.is_done():
+                    await inter.response.send_message(content=refusal, ephemeral=True)
+                else:
+                    await inter.followup.send(content=refusal, ephemeral=True)
+                return
+
+        if not inter.response.is_done():
+            await inter.response.defer(ephemeral=False)
+
+        data_str = json.dumps(resolved_data, indent=2, ensure_ascii=False)
+        interaction_prompt = (
+            f'<interaction_event type="{ev_type}" user="{inter.user.name}">\n'
+            f'{data_str}\n'
+            f'</interaction_event>\n'
+            f'Note: The user submitted the form above. The field selections contain both IDs and human-readable names. Process and respond to their submission naturally.'
+        )
+
+        show_reply = should_show_reply_button(
+            bot=bot,
+            guild=inter.guild,
+            channel=inter.channel,
+            interaction=inter
+        )
+        sub_dispatcher = DiscordStreamDispatcher(
+            origin_message=inter.message,
+            interaction=inter,
+            guild=inter.guild,
+            show_reply_button=show_reply
+        )
+        sub_tool_ctx = ToolExecutionContext(
+            channel=inter.channel,
+            guild=inter.guild,
+            author=inter.user,
+            bot=bot
+        )
+        sub_tool_ctx.message = inter.message
+        artifact_parser = ArtifactStreamParser(sub_dispatcher, sub_tool_ctx, channel_id=getattr(inter.channel, "id", "global"))
+
+        async with safe_guild_typing(inter):
+            async for sub_type, sub_payload in ChatEngine.stream_chat(
+                prompt=interaction_prompt,
+                context_xml=await cls.build_context_xml(inter.channel, inter.user.id, inter.guild, inter.user),
+                bot_user_id=bot.user.id,
+                tool_context=sub_tool_ctx
+            ):
+                if sub_type == "CONTENT":
+                    await artifact_parser.feed(sub_payload)
+                elif sub_type == "ERROR":
+                    await sub_dispatcher.append_text(f"\n\n⚠️ {sub_payload}")
+
+            await artifact_parser.finish()
+
+        next_modals_map = {m["modal_id"]: m for m in sub_tool_ctx.staged_modals}
+
+        async def next_dispatcher(next_inter: discord.Interaction, next_ev: str, next_data: Any):
+            await cls.handle_interaction_event(bot, next_inter, next_ev, next_data, modals_map=next_modals_map)
+
+        await sub_dispatcher.finalize(
+            staged_artifacts=sub_tool_ctx.staged_artifacts,
+            staged_components=sub_tool_ctx.staged_components,
+            staged_followups=sub_dispatcher.staged_followups,
+            modals_map=next_modals_map,
+            interaction_dispatcher=next_dispatcher,
+            show_reply_button=show_reply,
+            active_version=1,
+            total_versions=1
+        )
 
     @classmethod
     async def handle_followup_turn(cls, bot: discord.Client, interaction: discord.Interaction, prompt_text: str):
@@ -600,6 +896,9 @@ class ChatHandler:
 
             modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
 
+            async def handle_interaction_event(inter: discord.Interaction, ev_type: str, data: Any):
+                await cls.handle_interaction_event(bot, inter, ev_type, data, modals_map=modals_map)
+
             stored_attachments: list[dict[str, Any]] = []
             for raw_att in stream_dispatcher.raw_attachment_buffers:
                 b64 = base64.b64encode(raw_att["bytes"]).decode("utf-8")
@@ -622,6 +921,7 @@ class ChatHandler:
                 staged_components=tool_context.staged_components,
                 staged_followups=stream_dispatcher.staged_followups,
                 modals_map=modals_map,
+                interaction_dispatcher=handle_interaction_event,
                 thought_duration=final_duration,
                 has_thoughts=has_reasoning,
                 show_reply_button=show_reply,
@@ -1013,28 +1313,7 @@ class ChatHandler:
             modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
 
             async def handle_interaction_event(inter: discord.Interaction, ev_type: str, data: Any):
-                if not inter.response.is_done():
-                    await inter.response.defer(ephemeral=False)
-
-                data_str = json.dumps(data) if isinstance(data, (dict, list)) else str(data)
-                interaction_prompt = f'<interaction_event type="{ev_type}" user="{inter.user.name}">\n  {data_str}\n</interaction_event>'
-                sub_dispatcher = DiscordStreamDispatcher(
-                    origin_message=inter.message,
-                    guild=inter.guild,
-                    show_reply_button=show_reply
-                )
-                sub_tool_ctx = ToolExecutionContext(channel=inter.channel, guild=inter.guild, author=inter.user, bot=bot)
-
-                async for sub_type, sub_payload in ChatEngine.stream_chat(
-                    prompt=interaction_prompt,
-                    context_xml=await cls.build_context_xml(inter.channel, inter.user.id, inter.guild, inter.user),
-                    bot_user_id=bot.user.id,
-                    tool_context=sub_tool_ctx
-                ):
-                    if sub_type == "CONTENT":
-                        await sub_dispatcher.append_text(sub_payload)
-
-                await sub_dispatcher.finalize()
+                await cls.handle_interaction_event(bot, inter, ev_type, data, modals_map=modals_map)
 
             stored_attachments: list[dict[str, Any]] = []
 

@@ -50,6 +50,7 @@ from handlers.stream_handler import (
     cleanup_sibling_messages,
     should_show_reply_button
 )
+from ui.modals import DynamicModalV2
 from ui.thought_container import ThoughtContainerView
 from ui.context_views import (
     BranchTranscriptView,
@@ -363,6 +364,40 @@ class PriestyBot(discord.Client):
                         return att.url
                 return target_msg.attachments[0].url
             return None
+
+        if custom_id.startswith("comp_button_") or custom_id.startswith("btn_"):
+            target_msg = interaction.message
+            if target_msg:
+                gen = branch_manager.get_generation(target_msg.id)
+                if gen:
+                    versions = gen.get("versions", [])
+                    active_v = gen.get("active_version", 1)
+                    if 1 <= active_v <= len(versions):
+                        v_data = versions[active_v - 1]
+                        staged_comps = v_data.get("staged_components", [])
+                        staged_mods = {m["modal_id"]: m for m in v_data.get("staged_modals", [])}
+
+                        target_comp = next((c for c in staged_comps if c.get("custom_id") == custom_id), None)
+                        if target_comp and target_comp.get("modal_id") in staged_mods:
+                            m_spec = staged_mods[target_comp["modal_id"]]
+
+                            async def on_fallback_modal_submit(sub_inter: discord.Interaction, d: dict[str, Any]):
+                                await ChatHandler.handle_interaction_event(
+                                    self,
+                                    sub_inter,
+                                    "modal_submit",
+                                    {"modal_id": target_comp["modal_id"], "values": d},
+                                    modals_map=staged_mods
+                                )
+
+                            modal_obj = DynamicModalV2(
+                                title=m_spec.get("title", "Form"),
+                                custom_id=target_comp["modal_id"],
+                                fields_schema=m_spec.get("fields", []),
+                                on_submit_callback=on_fallback_modal_submit
+                            )
+                            await interaction.response.send_modal(modal_obj)
+                            return
 
         if custom_id.startswith("clear_staged_ctx_"):
             chan_id = custom_id.replace("clear_staged_ctx_", "")
@@ -800,7 +835,7 @@ class PriestyBot(discord.Client):
                 elif not isinstance(raw_collabs, list):
                     raw_collabs = []
 
-                new_collabs = [str(c) for c in raw_collabs if str(c).strip()]
+                new_collabs = [str(c.get("id", c) if isinstance(c, dict) else c) for c in raw_collabs if str(c).strip()]
                 if str(branch.get("creator_id")) not in new_collabs:
                     new_collabs.append(str(branch.get("creator_id")))
 
@@ -870,7 +905,7 @@ class PriestyBot(discord.Client):
                     if isinstance(raw_author, list) and raw_author:
                         raw_author = raw_author[0]
 
-                    new_author_id = str(raw_author) if raw_author else "0"
+                    new_author_id = str(raw_author.get("id", raw_author) if isinstance(raw_author, dict) else raw_author) if raw_author else "0"
                     new_author_name = target_msg_data.get("author", "User")
                     if sub_inter.guild and new_author_id and new_author_id != "0":
                         try:

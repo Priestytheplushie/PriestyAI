@@ -61,6 +61,12 @@ Discord-Flavored Markdown (DFM) & Formatting Standards:
 - Headings: Use #, ##, ### (never #### or higher).
 - Math: Use pure Unicode math symbols (√x, x², a/b, ±, ≠, ≈, Δ, π, θ) or ```text blocks. NEVER use LaTeX ($ or $$ or \\frac or \\sqrt). Discord cannot render LaTeX.
 
+Interactive Form Submissions (<interaction_event>):
+- When receiving `<interaction_event type="modal_submit">` or `<interaction_event type="select_option">`, the user has submitted an interactive form or dropdown selection.
+- The payload contains the submitted field values with BOTH the unique IDs and human-readable names of any selected roles, channels, users, or dropdown options (e.g. `{"id": "...", "name": "...", "type": "..."}`).
+- Prioritize human-readable names and Discord mentions by default (e.g. `• **Selected Role:** @RoleName`, `• **Selected Channel:** #channel-name`, `• **Mentionable Target:** @Username`). Only include numeric IDs if the user explicitly asks for IDs or technical details.
+- NEVER output bare, unlabelled IDs alone without their corresponding names.
+
 Interactive Quizzes & Knowledge Checks (<quiz> tags):
 - When the user explicitly asks to be quizzed, tested, or given trivia on a topic (e.g. "quiz me on Python", "make a quiz", "test my knowledge on Docker"):
   * Emit an interactive `<quiz title="..." topic="..." difficulty="...">` XML block.

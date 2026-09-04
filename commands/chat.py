@@ -653,97 +653,104 @@ async def execute_chat_turn(
     )
 
     try:
-        async for event_type, payload in ChatEngine.stream_chat(
-            prompt=multimodal_prompt,
-            context_xml=context_xml,
-            bot_user_id=interaction.client.user.id,
-            tool_context=tool_context,
-            answer_now_event=answer_now_event
-        ):
-            if event_type == "ROUTED":
-                if payload.witty_statuses:
-                    active_witty_statuses[:] = payload.witty_statuses
-                    curr_txt = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
-                    placeholder_view.update_state(curr_txt, max(0, int(time.time() - thinking_start_time)))
-                    try:
-                        if placeholder_msg:
-                            await placeholder_msg.edit(view=placeholder_view)
-                    except Exception:
-                        pass
+        async def stream_events():
+            async for event_type, payload in ChatEngine.stream_chat(
+                prompt=multimodal_prompt,
+                context_xml=context_xml,
+                bot_user_id=interaction.client.user.id,
+                tool_context=tool_context,
+                answer_now_event=answer_now_event
+            ):
+                if event_type == "ROUTED":
+                    if payload.witty_statuses:
+                        active_witty_statuses[:] = payload.witty_statuses
+                        curr_txt = format_placeholder_content(active_witty_statuses[0], active_tool_subtext)
+                        placeholder_view.update_state(curr_txt, max(0, int(time.time() - thinking_start_time)))
+                        try:
+                            if placeholder_msg:
+                                await placeholder_msg.edit(view=placeholder_view)
+                        except Exception:
+                            pass
 
-                if getattr(payload, "is_quiz", False):
-                    is_quiz_turn = True
-                    placeholder_view.is_quiz = True
-                    placeholder_view.thought_data["is_quiz"] = True
+                    if getattr(payload, "is_quiz", False):
+                        is_quiz_turn = True
+                        placeholder_view.is_quiz = True
+                        placeholder_view.thought_data["is_quiz"] = True
 
-            elif event_type == "ACTIVE_MODEL":
-                active_model_used = str(payload)
-                placeholder_view.model_name = active_model_used
+                elif event_type == "ACTIVE_MODEL":
+                    active_model_used = str(payload)
+                    placeholder_view.model_name = active_model_used
 
-            elif event_type == "RECALLED_MEMORIES":
-                count = payload.get("count", 0)
-                tool_call_history.insert(0, {
-                    "name": "recall_memories",
-                    "args": {"count": count},
-                    "result": payload,
-                    "duration_ms": 0,
-                    "order": -1.0
-                })
-                placeholder_view.thought_data["tool_calls"] = tool_call_history
+                elif event_type == "RECALLED_MEMORIES":
+                    count = payload.get("count", 0)
+                    tool_call_history.insert(0, {
+                        "name": "recall_memories",
+                        "args": {"count": count},
+                        "result": payload,
+                        "duration_ms": 0,
+                        "order": -1.0
+                    })
+                    placeholder_view.thought_data["tool_calls"] = tool_call_history
 
-            elif event_type == "THOUGHT":
-                accumulated_thoughts.append(payload)
-                placeholder_view.enable_thinking()
-                placeholder_view.thought_data["thoughts"] = "".join(accumulated_thoughts)
+                elif event_type == "THOUGHT":
+                    accumulated_thoughts.append(payload)
+                    placeholder_view.enable_thinking()
+                    placeholder_view.thought_data["thoughts"] = "".join(accumulated_thoughts)
 
-            elif event_type == "TOOL_START":
-                tool_name = payload.get("name", "")
-                args = payload.get("args", {})
-                active_tool_start_times[tool_name] = time.perf_counter()
-                active_tool_subtext = get_tool_subtext(tool_name, args)
-                placeholder_view.enable_thinking()
-                if tool_name in ["create_artifact", "update_artifact"]:
-                    stream_dispatcher.add_artifact_placeholder(tool_name, args)
+                elif event_type == "TOOL_START":
+                    tool_name = payload.get("name", "")
+                    args = payload.get("args", {})
+                    active_tool_start_times[tool_name] = time.perf_counter()
+                    active_tool_subtext = get_tool_subtext(tool_name, args)
+                    placeholder_view.enable_thinking()
+                    if tool_name in ["create_artifact", "update_artifact"]:
+                        stream_dispatcher.add_artifact_placeholder(tool_name, args)
 
-            elif event_type == "TOOL_END":
-                tool_name = payload.get("name", "")
-                st = active_tool_start_times.pop(tool_name, time.perf_counter())
-                dur_ms = int((time.perf_counter() - st) * 1000)
-                tool_call_history.append({
-                    "name": tool_name,
-                    "args": payload.get("args", {}),
-                    "result": payload.get("result", {}),
-                    "duration_ms": dur_ms
-                })
-                active_tool_subtext = None
-                placeholder_view.thought_data["tool_calls"] = tool_call_history
+                elif event_type == "TOOL_END":
+                    tool_name = payload.get("name", "")
+                    st = active_tool_start_times.pop(tool_name, time.perf_counter())
+                    dur_ms = int((time.perf_counter() - st) * 1000)
+                    tool_call_history.append({
+                        "name": tool_name,
+                        "args": payload.get("args", {}),
+                        "result": payload.get("result", {}),
+                        "duration_ms": dur_ms
+                    })
+                    active_tool_subtext = None
+                    placeholder_view.thought_data["tool_calls"] = tool_call_history
 
-                if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
-                    last_art = tool_context.staged_artifacts[-1]
-                    stream_dispatcher.update_artifact_ready(last_art)
-                    art_bytes = last_art.get("data_bytes", b"")
-                    art_fname = last_art.get("filename", "artifact.zip")
-                    if art_bytes:
-                        stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
+                    if tool_name in ["create_artifact", "update_artifact"] and tool_context.staged_artifacts:
+                        last_art = tool_context.staged_artifacts[-1]
+                        stream_dispatcher.update_artifact_ready(last_art)
+                        art_bytes = last_art.get("data_bytes", b"")
+                        art_fname = last_art.get("filename", "artifact.zip")
+                        if art_bytes:
+                            stream_dispatcher.add_raw_attachment(art_fname, art_bytes)
 
-                elif tool_name in ["search_image", "search_gif", "generate_image", "edit_image", "execute_code"] and tool_context.staged_image_bytes:
-                    img_fname = tool_context.staged_image_filename
-                    img_bytes = tool_context.staged_image_bytes
-                    stream_dispatcher.add_media_block(img_fname, img_bytes)
-                    tool_context.staged_image_bytes = None
+                    elif tool_name in ["search_image", "search_gif", "generate_image", "edit_image", "execute_code"] and tool_context.staged_image_bytes:
+                        img_fname = tool_context.staged_image_filename
+                        img_bytes = tool_context.staged_image_bytes
+                        stream_dispatcher.add_media_block(img_fname, img_bytes)
+                        tool_context.staged_image_bytes = None
 
-                elif tool_name in ["github_repo", "fetch_github"] and hasattr(tool_context, "staged_github_files"):
-                    for g_file in tool_context.staged_github_files:
-                        stream_dispatcher.add_raw_attachment(g_file["filename"], g_file["bytes"])
+                    elif tool_name in ["github_repo", "fetch_github"] and hasattr(tool_context, "staged_github_files"):
+                        for g_file in tool_context.staged_github_files:
+                            stream_dispatcher.add_raw_attachment(g_file["filename"], g_file["bytes"])
 
-            elif event_type == "CONTENT":
-                if not first_content_received:
-                    first_content_received = True
-                    stop_placeholder_loop.set()
-                    if placeholder_task and not placeholder_task.done():
-                        placeholder_task.cancel()
+                elif event_type == "CONTENT":
+                    if not first_content_received:
+                        first_content_received = True
+                        stop_placeholder_loop.set()
+                        if placeholder_task and not placeholder_task.done():
+                            placeholder_task.cancel()
 
-                await artifact_parser.feed(payload)
+                    await artifact_parser.feed(payload)
+
+        if channel is not None:
+            async with channel.typing():
+                await stream_events()
+        else:
+            await stream_events()
 
         await artifact_parser.finish()
         stop_placeholder_loop.set()
@@ -771,10 +778,18 @@ async def execute_chat_turn(
         root_msg = stream_dispatcher.primary_message or placeholder_msg
         target_id = root_msg.id if root_msg else "temp"
 
+        modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
+
+        async def handle_interaction_event(inter: discord.Interaction, ev_type: str, data: Any):
+            from handlers.chat_handler import ChatHandler
+            await ChatHandler.handle_interaction_event(interaction.client, inter, ev_type, data, modals_map=modals_map)
+
         await stream_dispatcher.finalize(
             staged_artifacts=tool_context.staged_artifacts,
             staged_components=tool_context.staged_components,
             staged_followups=stream_dispatcher.staged_followups,
+            modals_map=modals_map,
+            interaction_dispatcher=handle_interaction_event,
             thought_duration=final_dur,
             has_thoughts=has_reasoning,
             show_reply_button=show_reply,
@@ -1125,10 +1140,18 @@ def setup_chat_commands(tree: app_commands.CommandTree):
             root_msg = stream_dispatcher.primary_message or placeholder_msg
             target_id = root_msg.id if root_msg else "temp"
 
+            modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
+
+            async def handle_interaction_event(inter: discord.Interaction, ev_type: str, data: Any):
+                from handlers.chat_handler import ChatHandler
+                await ChatHandler.handle_interaction_event(interaction.client, inter, ev_type, data, modals_map=modals_map)
+
             await stream_dispatcher.finalize(
                 staged_artifacts=tool_context.staged_artifacts,
                 staged_components=tool_context.staged_components,
                 staged_followups=stream_dispatcher.staged_followups,
+                modals_map=modals_map,
+                interaction_dispatcher=handle_interaction_event,
                 thought_duration=final_dur,
                 has_thoughts=has_reasoning,
                 show_reply_button=show_reply,

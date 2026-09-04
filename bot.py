@@ -338,6 +338,9 @@ class PriestyBot(discord.Client):
     async def on_interaction(self, interaction: discord.Interaction):
         self.record_activity()
         
+        if interaction.response.is_done():
+            return
+
         custom_id = None
         if hasattr(interaction, "data") and interaction.data:
             if isinstance(interaction.data, dict):
@@ -366,6 +369,8 @@ class PriestyBot(discord.Client):
             return None
 
         if custom_id.startswith("comp_button_") or custom_id.startswith("btn_"):
+            if interaction.response.is_done():
+                return
             target_msg = interaction.message
             if target_msg:
                 gen = branch_manager.get_generation(target_msg.id)
@@ -379,6 +384,8 @@ class PriestyBot(discord.Client):
 
                         target_comp = next((c for c in staged_comps if c.get("custom_id") == custom_id), None)
                         if target_comp and target_comp.get("modal_id") in staged_mods:
+                            if interaction.response.is_done():
+                                return
                             m_spec = staged_mods[target_comp["modal_id"]]
 
                             async def on_fallback_modal_submit(sub_inter: discord.Interaction, d: dict[str, Any]):
@@ -396,7 +403,13 @@ class PriestyBot(discord.Client):
                                 fields_schema=m_spec.get("fields", []),
                                 on_submit_callback=on_fallback_modal_submit
                             )
-                            await interaction.response.send_modal(modal_obj)
+                            try:
+                                if not interaction.response.is_done():
+                                    await interaction.response.send_modal(modal_obj)
+                            except discord.HTTPException as ex:
+                                if ex.code == 40060:
+                                    return
+                                raise
                             return
 
         if custom_id.startswith("clear_staged_ctx_"):

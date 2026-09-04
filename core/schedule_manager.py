@@ -11,7 +11,7 @@ import dateparser
 import discord
 from google.genai import types
 
-from core.client_manager import client_manager
+from core.client_manager import client_manager, parse_retry_delay
 from core.config_manager import config_manager
 from core.branch_manager import branch_manager
 from tools.registry import tool_registry, ToolExecutionContext
@@ -126,6 +126,7 @@ def parse_schedule_time_expression(raw_expr: str) -> tuple[int, str, int, str]:
 class ScheduleManager:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
+        self._in_progress_tasks: set[str] = set()
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -157,13 +158,20 @@ class ScheduleManager:
                     dm_delivery TEXT DEFAULT 'channel_only',
                     is_active INTEGER DEFAULT 1,
                     last_run_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    retry_count INTEGER DEFAULT 0
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_sched_due ON scheduled_tasks(next_run_timestamp, is_active)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_sched_guild ON scheduled_tasks(guild_id, scope)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_sched_user ON scheduled_tasks(user_id, scope)")
             conn.commit()
+
+            try:
+                cursor.execute("ALTER TABLE scheduled_tasks ADD COLUMN retry_count INTEGER DEFAULT 0")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
 
     def create_task(
         self,
@@ -187,8 +195,8 @@ class ScheduleManager:
                 INSERT INTO scheduled_tasks (
                     task_id, user_id, user_name, guild_id, channel_id, scope,
                     prompt_text, time_expression, summary_schedule, next_run_timestamp,
-                    interval_type, interval_seconds, dm_delivery, is_active
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    interval_type, interval_seconds, dm_delivery, is_active, retry_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
             """, (
                 str(task_id),
                 str(user_id),
@@ -247,7 +255,7 @@ class ScheduleManager:
                 UPDATE scheduled_tasks
                 SET prompt_text = ?, time_expression = ?, summary_schedule = ?,
                     next_run_timestamp = ?, interval_type = ?, interval_seconds = ?,
-                    channel_id = ?, dm_delivery = ?, is_active = ?
+                    channel_id = ?, dm_delivery = ?, is_active = ?, retry_count = ?
                 WHERE task_id = ?
             """, (
                 task.get("prompt_text"),
@@ -259,6 +267,7 @@ class ScheduleManager:
                 str(task.get("channel_id")) if task.get("channel_id") else None,
                 task.get("dm_delivery", "channel_only"),
                 int(bool(task.get("is_active", 1))),
+                int(task.get("retry_count", 0)),
                 str(task_id)
             ))
             conn.commit()
@@ -287,10 +296,23 @@ class ScheduleManager:
             return
 
         for task in due_tasks:
-            asyncio.create_task(self._execute_due_task(bot, task))
+            task_id = str(task["task_id"])
+            if task_id in self._in_progress_tasks:
+                continue
+            self._in_progress_tasks.add(task_id)
+            asyncio.create_task(self._safe_execute_due_task(bot, task))
+
+    async def _safe_execute_due_task(self, bot: discord.Client, task: dict[str, Any]):
+        task_id = str(task["task_id"])
+        try:
+            await self._execute_due_task(bot, task)
+        except Exception as e:
+            logger.error(f"[ScheduleWatchdog] Unexpected fatal error executing task #{task_id}: {e}", exc_info=True)
+        finally:
+            self._in_progress_tasks.discard(task_id)
 
     async def _execute_due_task(self, bot: discord.Client, task: dict[str, Any]):
-        task_id = task["task_id"]
+        task_id = str(task["task_id"])
         scope = task.get("scope", "personal")
         prompt = task["prompt_text"]
         user_id = int(task["user_id"])
@@ -298,37 +320,12 @@ class ScheduleManager:
         summary_sched = task.get("summary_schedule", "Scheduled")
         interval_type = task.get("interval_type", "once")
         interval_sec = int(task.get("interval_seconds", 0))
+        current_retry_count = int(task.get("retry_count", 0) or 0)
 
-        logger.info(f"[ScheduleWatchdog] Executing {scope} task #{task_id} ('{prompt[:40]}...')")
+        logger.info(f"[ScheduleWatchdog] Executing {scope} task #{task_id} (retries={current_retry_count}) ('{prompt[:40]}...')")
 
         now = datetime.now(timezone.utc)
         now_ts = int(now.timestamp())
-
-        if interval_type == "once":
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE scheduled_tasks SET is_active = 0, last_run_at = CURRENT_TIMESTAMP WHERE task_id = ?",
-                    (task_id,)
-                )
-                conn.commit()
-        else:
-            if interval_type == "daily":
-                next_ts = now_ts + 86400
-            elif interval_type == "weekly":
-                next_ts = now_ts + 604800
-            elif interval_type == "interval" and interval_sec > 0:
-                next_ts = now_ts + interval_sec
-            else:
-                next_ts = now_ts + 86400
-
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE scheduled_tasks SET next_run_timestamp = ?, last_run_at = CURRENT_TIMESTAMP WHERE task_id = ?",
-                    (next_ts, task_id)
-                )
-                conn.commit()
 
         target_channel: discord.abc.Messageable | None = None
         target_guild: discord.Guild | None = None
@@ -352,6 +349,14 @@ class ScheduleManager:
             user_obj = bot.get_user(user_id) or await bot.fetch_user(user_id)
         except Exception:
             user_obj = None
+
+        if not target_channel and not user_obj:
+            logger.error(f"[ScheduleWatchdog] Neither channel nor user found for task #{task_id}. Deactivating.")
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE scheduled_tasks SET is_active = 0 WHERE task_id = ?", (task_id,))
+                conn.commit()
+            return
 
         effective_channel_id = getattr(target_channel, "id", None)
         resolved_cfg = config_manager.resolve_effective_config(
@@ -384,112 +389,244 @@ class ScheduleManager:
         if preferred_name_note:
             formatted_sys_instruction += preferred_name_note
 
-        client, key_idx, active_model = client_manager.get_client_for_model("gemini-3.5-flash", fallback=True)
-        if not client:
-            logger.error("[ScheduleWatchdog] AI client unavailable to generate scheduled output.")
-            return
-
-        stream_dispatcher = DiscordStreamDispatcher(
-            guild=target_guild,
-            target_channel=target_channel or (user_obj if user_obj else None),
-            show_reply_button=False
-        )
-        artifact_parser = ArtifactStreamParser(
-            stream_dispatcher,
-            tool_context,
-            channel_id=getattr(target_channel, "id", "global")
-        )
-
-        conversation_contents: list[types.Content] = [
-            types.Content(role="user", parts=[types.Part(text=prompt)])
+        SCHEDULE_CANDIDATE_MODELS = [
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.1-flash-lite"
         ]
 
-        try:
-            for turn in range(5):
-                config = types.GenerateContentConfig(
-                    system_instruction=formatted_sys_instruction,
-                    tools=tool_declarations,
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                    temperature=0.7
-                )
+        start_m_idx = current_retry_count % len(SCHEDULE_CANDIDATE_MODELS)
+        candidate_models = SCHEDULE_CANDIDATE_MODELS[start_m_idx:] + SCHEDULE_CANDIDATE_MODELS[:start_m_idx]
 
-                res = await client.aio.models.generate_content(
-                    model=active_model,
-                    contents=conversation_contents,
-                    config=config
-                )
+        MAX_INFLIGHT_ATTEMPTS = 5
+        attempted_keys: set[int] = set()
+        generation_successful = False
+        last_error: Exception | None = None
+        successful_dispatcher: DiscordStreamDispatcher | None = None
 
-                model_parts = []
-                fcalls = []
+        for inflight_attempt in range(MAX_INFLIGHT_ATTEMPTS):
+            target_model = candidate_models[inflight_attempt % len(candidate_models)]
+            client, key_idx, active_model = client_manager.get_client_for_model(
+                target_model,
+                exclude_keys=attempted_keys,
+                fallback=True
+            )
+            if not client or key_idx is None:
+                for cand in candidate_models:
+                    c, k, m = client_manager.get_client_for_model(cand, fallback=False)
+                    if c and k is not None:
+                        client, key_idx, active_model = c, k, m
+                        break
 
-                if res.candidates and res.candidates[0].content:
-                    for part in res.candidates[0].content.parts:
-                        model_parts.append(part)
-                        if part.text:
-                            await artifact_parser.feed(part.text)
-                        elif part.function_call:
-                            fcalls.append(part.function_call)
+            if not client or key_idx is None:
+                logger.warning(f"[ScheduleWatchdog] No available AI client/model for task #{task_id} on attempt {inflight_attempt + 1}.")
+                break
 
-                if model_parts:
-                    conversation_contents.append(types.Content(role="model", parts=model_parts))
+            attempted_keys.add(key_idx)
+            logger.info(f"[ScheduleWatchdog] Task #{task_id} running attempt {inflight_attempt + 1}/{MAX_INFLIGHT_ATTEMPTS} with model '{active_model}' on Key #{key_idx}")
 
-                if not fcalls:
-                    break
+            tool_context.staged_artifacts.clear()
+            tool_context.staged_components.clear()
+            if hasattr(tool_context, "staged_modals"):
+                tool_context.staged_modals.clear()
+            if hasattr(tool_context, "staged_image_bytes"):
+                tool_context.staged_image_bytes = None
 
-                fres_parts = []
-                for fc in fcalls:
-                    f_name = fc.name
-                    f_args = dict(fc.args) if fc.args else {}
-                    tool_res = await tool_registry.execute(f_name, f_args, tool_context)
-                    fres_parts.append(
-                        types.Part(
-                            function_response=types.FunctionResponse(
-                                name=f_name,
-                                response=tool_res
-                            )
-                        )
+            stream_dispatcher = DiscordStreamDispatcher(
+                guild=target_guild,
+                target_channel=target_channel or (user_obj if user_obj else None),
+                show_reply_button=False
+            )
+            artifact_parser = ArtifactStreamParser(
+                stream_dispatcher,
+                tool_context,
+                channel_id=getattr(target_channel, "id", "global")
+            )
+
+            conversation_contents: list[types.Content] = [
+                types.Content(role="user", parts=[types.Part(text=prompt)])
+            ]
+
+            try:
+                for turn in range(5):
+                    config = types.GenerateContentConfig(
+                        system_instruction=formatted_sys_instruction,
+                        tools=tool_declarations,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                        temperature=0.7
                     )
 
-                conversation_contents.append(types.Content(role="user", parts=fres_parts))
+                    res = await client.aio.models.generate_content(
+                        model=active_model,
+                        contents=conversation_contents,
+                        config=config
+                    )
 
-            await artifact_parser.finish()
+                    model_parts = []
+                    fcalls = []
 
-        except Exception as gen_err:
-            logger.error(f"[ScheduleWatchdog] AI generation failed for task #{task_id}: {gen_err}")
-            await stream_dispatcher.append_text(f"\n\n⚠️ Automated task execution error: `{gen_err}`")
+                    if res.candidates and res.candidates[0].content:
+                        for part in res.candidates[0].content.parts:
+                            model_parts.append(part)
+                            if part.text:
+                                await artifact_parser.feed(part.text)
+                            elif part.function_call:
+                                fcalls.append(part.function_call)
 
-        footer_text = f"\n\n-# {OCTICONS_MAP['oct_calendar']} Scheduled Task ({summary_sched}) • Requested by <@{user_id}>"
-        await stream_dispatcher.append_text(footer_text)
+                    if model_parts:
+                        conversation_contents.append(types.Content(role="model", parts=model_parts))
+
+                    if not fcalls:
+                        break
+
+                    fres_parts = []
+                    for fc in fcalls:
+                        f_name = fc.name
+                        f_args = dict(fc.args) if fc.args else {}
+                        tool_res = await tool_registry.execute(f_name, f_args, tool_context)
+                        fres_parts.append(
+                            types.Part(
+                                function_response=types.FunctionResponse(
+                                    name=f_name,
+                                    response=tool_res
+                                )
+                            )
+                        )
+
+                    conversation_contents.append(types.Content(role="user", parts=fres_parts))
+
+                await artifact_parser.finish()
+                generation_successful = True
+                successful_dispatcher = stream_dispatcher
+                break
+
+            except Exception as e:
+                last_error = e
+                client_manager.report_error(key_idx, active_model, e)
+                logger.warning(
+                    f"[ScheduleWatchdog] AI generation error on key #{key_idx} ({active_model}) for task #{task_id}: {e}. Retrying..."
+                )
+                for msg in stream_dispatcher.sent_messages:
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                stream_dispatcher.sent_messages.clear()
+                await asyncio.sleep(2.0)
 
         delivered = False
-        if target_channel and scope == "server" and dm_delivery != "dm_only":
-            try:
-                await stream_dispatcher.finalize(
-                    staged_artifacts=tool_context.staged_artifacts,
-                    staged_components=tool_context.staged_components
-                )
-                delivered = True
-            except Exception as e:
-                logger.warning(f"[ScheduleWatchdog] Failed to dispatch to channel #{target_channel.id}: {e}")
+        if generation_successful and successful_dispatcher:
+            footer_text = f"\n\n-# {OCTICONS_MAP['oct_calendar']} Scheduled Task ({summary_sched}) • Requested by <@{user_id}>"
+            await successful_dispatcher.append_text(footer_text)
 
-        if user_obj and (scope == "personal" or dm_delivery in ("dm_only", "channel_and_dm") or not delivered):
-            try:
-                if scope == "personal" or dm_delivery == "dm_only":
-                    await stream_dispatcher.finalize(
+            if target_channel and scope == "server" and dm_delivery != "dm_only":
+                try:
+                    await successful_dispatcher.finalize(
                         staged_artifacts=tool_context.staged_artifacts,
                         staged_components=tool_context.staged_components
                     )
-                else:
-                    raw_text = stream_dispatcher.get_accumulated_text()
-                    await user_obj.send(content=raw_text[:2000])
-                delivered = True
-            except Exception as e:
-                logger.warning(f"[ScheduleWatchdog] Failed to send DM to user {user_id}: {e}")
+                    delivered = True
+                except Exception as e:
+                    logger.warning(f"[ScheduleWatchdog] Failed to dispatch to channel #{target_channel.id}: {e}")
 
-        if interval_type == "once":
-            self.delete_task(task_id)
-            logger.info(f"[ScheduleWatchdog] One-time task #{task_id} self-destructed after execution.")
-        elif delivered:
-            logger.info(f"[ScheduleWatchdog] Recurring task #{task_id} successfully delivered.")
+            if user_obj and (scope == "personal" or dm_delivery in ("dm_only", "channel_and_dm") or not delivered):
+                try:
+                    if scope == "personal" or dm_delivery == "dm_only":
+                        await successful_dispatcher.finalize(
+                            staged_artifacts=tool_context.staged_artifacts,
+                            staged_components=tool_context.staged_components
+                        )
+                    else:
+                        raw_text = successful_dispatcher.get_accumulated_text()
+                        await user_obj.send(content=raw_text[:2000])
+                    delivered = True
+                except Exception as e:
+                    logger.warning(f"[ScheduleWatchdog] Failed to send DM to user {user_id}: {e}")
+
+        if generation_successful and delivered:
+            if interval_type == "once":
+                self.delete_task(task_id)
+                logger.info(f"[ScheduleWatchdog] One-time task #{task_id} successfully delivered and self-destructed.")
+            else:
+                if interval_type == "daily":
+                    next_ts = now_ts + 86400
+                elif interval_type == "weekly":
+                    next_ts = now_ts + 604800
+                elif interval_type == "interval" and interval_sec > 0:
+                    next_ts = now_ts + interval_sec
+                else:
+                    next_ts = now_ts + 86400
+
+                with self._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE scheduled_tasks SET next_run_timestamp = ?, last_run_at = CURRENT_TIMESTAMP, retry_count = 0 WHERE task_id = ?",
+                        (next_ts, task_id)
+                    )
+                    conn.commit()
+                logger.info(f"[ScheduleWatchdog] Recurring task #{task_id} successfully delivered. Next run at {next_ts}.")
+        else:
+            new_retry_count = current_retry_count + 1
+            MAX_RETRIES = 12
+
+            err_desc = str(last_error) if last_error else "AI generation unavailable or message delivery failed"
+            err_lower = err_desc.lower()
+
+            if "429" in err_lower or "resource_exhausted" in err_lower:
+                delay = int(parse_retry_delay(err_desc))
+                if delay < 30:
+                    delay = 30
+            elif "503" in err_lower or "unavailable" in err_lower or "overloaded" in err_lower:
+                delay = min(180, 30 * min(new_retry_count, 4))
+            else:
+                delay = min(300, 30 * (2 ** min(new_retry_count - 1, 3)))
+
+            delay = max(30, delay)
+            next_retry_ts = now_ts + delay
+
+            if new_retry_count > MAX_RETRIES:
+                logger.error(
+                    f"[ScheduleWatchdog] Task #{task_id} exceeded max retries ({MAX_RETRIES}). "
+                    f"Last error: {err_desc}. Aborting further retries for this cycle."
+                )
+                if interval_type == "once":
+                    with self._get_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE scheduled_tasks SET is_active = 0, retry_count = ? WHERE task_id = ?",
+                            (new_retry_count, task_id)
+                        )
+                        conn.commit()
+                else:
+                    if interval_type == "daily":
+                        adv_ts = now_ts + 86400
+                    elif interval_type == "weekly":
+                        adv_ts = now_ts + 604800
+                    elif interval_type == "interval" and interval_sec > 0:
+                        adv_ts = now_ts + interval_sec
+                    else:
+                        adv_ts = now_ts + 86400
+
+                    with self._get_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE scheduled_tasks SET next_run_timestamp = ?, retry_count = 0 WHERE task_id = ?",
+                            (adv_ts, task_id)
+                        )
+                        conn.commit()
+            else:
+                logger.warning(
+                    f"[ScheduleWatchdog] Task #{task_id} failed ({err_desc}). "
+                    f"Rescheduled retry #{new_retry_count} in {delay}s (next_run={next_retry_ts})."
+                )
+                with self._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE scheduled_tasks SET next_run_timestamp = ?, retry_count = ? WHERE task_id = ?",
+                        (next_retry_ts, new_retry_count, task_id)
+                    )
+                    conn.commit()
 
 schedule_manager = ScheduleManager()

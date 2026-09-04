@@ -84,24 +84,27 @@ class KeyModelManager:
 
     def _get_cascade_list(self, model_name: str) -> list[str]:
         if model_name in FLAGSHIP_MODELS:
-            idx = FLAGSHIP_MODELS.index(model_name)
-            return FLAGSHIP_MODELS[idx:] + [WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL] + LITE_MODELS
+            return [m for m in FLAGSHIP_MODELS if m != model_name] + LITE_MODELS + [WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL]
         elif model_name == WORKHORSE_DENSE_MODEL:
             return [WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL] + ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
         elif model_name == WORKHORSE_MOE_MODEL:
             return [WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL] + ["gemini-3.5-flash-lite", "gemini-3.5-flash"]
         elif model_name in LITE_MODELS:
-            idx = LITE_MODELS.index(model_name)
-            return LITE_MODELS[idx:] + [WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL, "gemini-3.5-flash"]
-        return [WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL, "gemini-3.5-flash-lite"]
+            return [m for m in LITE_MODELS if m != model_name] + FLAGSHIP_MODELS + [WORKHORSE_MOE_MODEL, WORKHORSE_DENSE_MODEL]
+        return ["gemini-3.5-flash", "gemini-3.5-flash-lite", WORKHORSE_DENSE_MODEL, WORKHORSE_MOE_MODEL]
 
     def report_error(self, key_idx: int, model_name: str, error: Exception):
         now = time.time()
         err_msg = str(error)
         err_lower = err_msg.lower()
 
-        if "503" in err_lower or "unavailable" in err_lower or "overloaded" in err_lower or "500" in err_lower or "502" in err_lower or "504" in err_lower:
-            logger.warning(f"[503/Overloaded on Key #{key_idx}] '{model_name}'. Key cooldown: 12s. Rotating to next key...")
+        if "503" in err_lower or "unavailable" in err_lower or "overloaded" in err_lower:
+            logger.warning(f"[503/Model Overloaded] '{model_name}' on Key #{key_idx}. Model-wide cooldown: 25s to force cascade to alternative models...")
+            for k in range(self.key_count):
+                self.cooldowns[(k, model_name)] = max(self.cooldowns.get((k, model_name), 0), now + 25)
+
+        elif "500" in err_lower or "502" in err_lower or "504" in err_lower:
+            logger.warning(f"[50x Error on Key #{key_idx}] '{model_name}'. Key cooldown: 12s. Rotating to next key...")
             self.cooldowns[(key_idx, model_name)] = now + 12
 
         elif "429" in err_lower or "resource_exhausted" in err_lower:

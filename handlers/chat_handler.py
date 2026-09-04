@@ -45,39 +45,23 @@ logger = logging.getLogger("PriestyAI.ChatHandler")
 
 MAX_INLINE_FILE_SIZE = 20 * 1024 * 1024
 
-def can_send_typing(inter: discord.Interaction) -> bool:
-    if not inter.guild:
-        return False
-
-    bot_member = inter.guild.me if hasattr(inter.guild, "me") else None
-    if not bot_member and inter.client:
-        bot_guild = inter.client.get_guild(inter.guild_id)
-        if not bot_guild or getattr(bot_guild, "me", None) is None:
-            return False
-        bot_member = bot_guild.me
-
-    if not bot_member:
-        return False
-
-    if not hasattr(inter.channel, "typing"):
-        return False
-
-    if hasattr(inter.channel, "permissions_for") and bot_member:
-        perms = inter.channel.permissions_for(bot_member)
-        if not getattr(perms, "send_messages", True):
-            return False
-
-    return True
-
 @asynccontextmanager
-async def safe_guild_typing(inter: discord.Interaction):
-    if can_send_typing(inter):
+async def safe_typing(target: discord.Interaction | discord.abc.Messageable | discord.Message | None):
+    channel = None
+    if isinstance(target, discord.Interaction):
+        channel = target.channel
+    elif isinstance(target, discord.Message):
+        channel = target.channel
+    elif target is not None and hasattr(target, "typing"):
+        channel = target
+
+    if channel and hasattr(channel, "typing"):
         try:
-            async with inter.channel.typing():
+            async with channel.typing():
                 yield
                 return
         except (discord.Forbidden, discord.HTTPException, Exception) as ex:
-            logger.debug(f"Typing indicator suppressed in guild {inter.guild_id}: {ex}")
+            logger.debug(f"Typing indicator suppressed: {ex}")
     yield
 
 def resolve_single_entity(item: Any, inter: discord.Interaction, field_spec: dict[str, Any] | None = None) -> Any:
@@ -567,7 +551,7 @@ class ChatHandler:
         sub_tool_ctx.message = inter.message
         artifact_parser = ArtifactStreamParser(sub_dispatcher, sub_tool_ctx, channel_id=getattr(inter.channel, "id", "global"))
 
-        async with safe_guild_typing(inter):
+        async with safe_typing(inter):
             async for sub_type, sub_payload in ChatEngine.stream_chat(
                 prompt=interaction_prompt,
                 context_xml=await cls.build_context_xml(inter.channel, inter.user.id, inter.guild, inter.user),
@@ -599,6 +583,12 @@ class ChatHandler:
 
     @classmethod
     async def handle_followup_turn(cls, bot: discord.Client, interaction: discord.Interaction, prompt_text: str):
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+
         user = interaction.user
         channel = interaction.channel
         guild = interaction.guild
@@ -681,7 +671,7 @@ class ChatHandler:
                 return
 
             friendly_refusal = await generate_friendly_refusal(flagged_cats)
-            await channel.send(content=friendly_refusal, reference=origin_msg, mention_author=False)
+            await interaction.followup.send(content=friendly_refusal)
             return
 
         cfg = config_manager.resolve_effective_config(guild.id if guild else None, channel.id, user.id)
@@ -710,6 +700,7 @@ class ChatHandler:
         response_msg: discord.Message | None = None
         stream_dispatcher = DiscordStreamDispatcher(
             origin_message=origin_msg,
+            interaction=interaction,
             guild=guild,
             show_reply_button=show_reply
         )
@@ -770,7 +761,7 @@ class ChatHandler:
             )
 
             try:
-                response_msg = await channel.send(view=placeholder_view, reference=origin_msg, mention_author=False)
+                response_msg = await interaction.followup.send(view=placeholder_view)
                 stream_dispatcher.bind_response_message(response_msg)
                 placeholder_task = asyncio.create_task(
                     update_placeholder_loop(
@@ -781,7 +772,7 @@ class ChatHandler:
                 logger.warning(f"Failed to spawn placeholder: {ex}")
 
         try:
-            async with channel.typing():
+            async with safe_typing(interaction):
                 async for event_type, payload in ChatEngine.stream_chat(
                     prompt=prompt_text,
                     context_xml=context_xml,
@@ -1189,7 +1180,7 @@ class ChatHandler:
                 logger.warning(f"Failed to spawn placeholder LayoutView: {ex}")
 
         try:
-            async with message.channel.typing():
+            async with safe_typing(message.channel):
                 async for event_type, payload in ChatEngine.stream_chat(
                     prompt=multimodal_prompt,
                     context_xml=context_xml,

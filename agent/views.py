@@ -65,7 +65,7 @@ def build_agent_create_modal(default_user_id: int | str, on_submit: Callable) ->
             "description": "Members authorized to guide the agent and approve plans",
             "placeholder": "Select collaborators...",
             "required": False,
-            "min_values": 0,
+            "min_values": 1,
             "max_values": 10,
             "default_values": [{"id": str(default_user_id), "type": "user"}]
         },

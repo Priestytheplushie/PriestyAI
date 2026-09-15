@@ -610,6 +610,7 @@ async def execute_chat_turn(
                 await inter.response.defer(ephemeral=True)
         except Exception:
             pass
+        accumulated_thoughts.clear()
         answer_now_event.set()
         stop_placeholder_loop.set()
         if placeholder_task and not placeholder_task.done():
@@ -631,6 +632,7 @@ async def execute_chat_turn(
         interaction=interaction,
         is_ephemeral=is_ephemeral,
         guild=guild,
+        target_channel=channel,
         show_reply_button=show_reply,
         existing_response_msg=placeholder_msg
     )
@@ -757,9 +759,10 @@ async def execute_chat_turn(
         if placeholder_task and not placeholder_task.done():
             placeholder_task.cancel()
 
-        final_dur = max(1, int(time.time() - thinking_start_time))
+        is_answered_now = answer_now_event.is_set()
+        final_dur = 0 if is_answered_now else max(1, int(time.time() - thinking_start_time))
         active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
-        has_reasoning = bool(accumulated_thoughts or active_tools)
+        has_reasoning = False if is_answered_now else bool(accumulated_thoughts or active_tools)
 
         stored_attachments = []
         for raw_att in stream_dispatcher.raw_attachment_buffers:
@@ -802,7 +805,7 @@ async def execute_chat_turn(
 
         if root_msg:
             parsed_initial_content = apply_message_parsers(final_text, guild)
-            raw_collected_thoughts = "".join(accumulated_thoughts)
+            raw_collected_thoughts = "" if is_answered_now else "".join(accumulated_thoughts)
             sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(root_msg.id)]
 
             sanitized_timeline: list[dict[str, Any]] = []
@@ -826,7 +829,7 @@ async def execute_chat_turn(
                 "formatted_thoughts": None,
                 "model": active_model_used,
                 "is_quiz": has_quiz_in_blocks,
-                "tool_calls": tool_call_history,
+                "tool_calls": [] if is_answered_now else tool_call_history,
                 "attachments": stored_attachments,
                 "staged_components": tool_context.staged_components,
                 "staged_artifacts": sanitized_artifacts,
@@ -987,6 +990,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                     await inter.response.defer(ephemeral=True)
             except Exception:
                 pass
+            accumulated_thoughts.clear()
             answer_now_event.set()
             stop_placeholder_loop.set()
             if placeholder_task and not placeholder_task.done():
@@ -1008,6 +1012,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
             interaction=interaction,
             is_ephemeral=is_ephemeral,
             guild=interaction.guild,
+            target_channel=interaction.channel,
             show_reply_button=show_reply,
             existing_response_msg=placeholder_msg
         )
@@ -1119,9 +1124,10 @@ def setup_chat_commands(tree: app_commands.CommandTree):
             if placeholder_task and not placeholder_task.done():
                 placeholder_task.cancel()
 
-            final_dur = max(1, int(time.time() - thinking_start_time))
+            is_answered_now = answer_now_event.is_set()
+            final_dur = 0 if is_answered_now else max(1, int(time.time() - thinking_start_time))
             active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
-            has_reasoning = bool(accumulated_thoughts or active_tools)
+            has_reasoning = False if is_answered_now else bool(accumulated_thoughts or active_tools)
 
             stored_attachments = []
             for raw_att in stream_dispatcher.raw_attachment_buffers:
@@ -1163,7 +1169,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
             if root_msg:
                 final_text = stream_dispatcher.get_accumulated_text()
                 parsed_initial_content = apply_message_parsers(final_text, interaction.guild)
-                raw_collected_thoughts = "".join(accumulated_thoughts)
+                raw_collected_thoughts = "" if is_answered_now else "".join(accumulated_thoughts)
                 sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(root_msg.id)]
 
                 sanitized_timeline: list[dict[str, Any]] = []
@@ -1187,7 +1193,7 @@ def setup_chat_commands(tree: app_commands.CommandTree):
                     "formatted_thoughts": None,
                     "model": active_model_used,
                     "is_quiz": has_quiz_in_blocks,
-                    "tool_calls": tool_call_history,
+                    "tool_calls": [] if is_answered_now else tool_call_history,
                     "attachments": stored_attachments,
                     "staged_components": tool_context.staged_components,
                     "staged_artifacts": sanitized_artifacts,

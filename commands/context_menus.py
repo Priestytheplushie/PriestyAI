@@ -365,6 +365,7 @@ async def _execute_run_as_prompt(interaction: discord.Interaction, message: disc
                 await inter.response.defer(ephemeral=True)
         except Exception:
             pass
+        accumulated_thoughts.clear()
         answer_now_event.set()
         stop_placeholder_loop.set()
         if placeholder_task and not placeholder_task.done():
@@ -391,6 +392,7 @@ async def _execute_run_as_prompt(interaction: discord.Interaction, message: disc
         interaction=interaction,
         is_ephemeral=False,
         guild=interaction.guild,
+        target_channel=interaction.channel,
         show_reply_button=show_reply,
         existing_response_msg=placeholder_msg
     )
@@ -512,9 +514,10 @@ async def _execute_run_as_prompt(interaction: discord.Interaction, message: disc
         if placeholder_task and not placeholder_task.done():
             placeholder_task.cancel()
 
-        final_duration = max(1, int(time.time() - thinking_start_time))
+        is_answered_now = answer_now_event.is_set()
+        final_duration = 0 if is_answered_now else max(1, int(time.time() - thinking_start_time))
         active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
-        has_reasoning = bool(accumulated_thoughts or active_tools)
+        has_reasoning = False if is_answered_now else bool(accumulated_thoughts or active_tools)
 
         modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
 
@@ -879,10 +882,23 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
     first_content_received = False
     active_tool_subtext = None
 
+    async def on_answer_now_clicked(inter: discord.Interaction):
+        try:
+            if not inter.response.is_done():
+                await inter.response.defer(ephemeral=True)
+        except Exception:
+            pass
+        accumulated_thoughts.clear()
+        answer_now_event.set()
+        stop_placeholder_loop.set()
+        if placeholder_task and not placeholder_task.done():
+            placeholder_task.cancel()
+
     placeholder_view = PlaceholderLayoutView(
         loading_text=format_placeholder_content(retry_statuses[0], active_tool_subtext),
         duration_seconds=1,
         is_enabled=True,
+        on_answer_now_callback=on_answer_now_clicked,
         thought_data={"thoughts": "", "tool_calls": [], "model": active_model_used},
         model_name=active_model_used
     )
@@ -901,6 +917,7 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
         existing_response_msg=root_msg if can_edit_directly else placeholder_msg,
         interaction=interaction if not can_edit_directly else None,
         guild=interaction.guild,
+        target_channel=message.channel,
         show_reply_button=show_reply,
         active_version=new_version_idx,
         total_versions=new_version_idx,
@@ -996,9 +1013,10 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
         if placeholder_task and not placeholder_task.done():
             placeholder_task.cancel()
 
-        dur_sec = max(1, int(time.time() - start_t))
+        is_answered_now = answer_now_event.is_set()
+        dur_sec = 0 if is_answered_now else max(1, int(time.time() - start_t))
         active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
-        has_thoughts = bool(accumulated_thoughts or active_tools)
+        has_thoughts = False if is_answered_now else bool(accumulated_thoughts or active_tools)
         final_content = stream_dispatcher.get_accumulated_text()
         parsed_final_content = apply_message_parsers(final_content, interaction.guild)
 
@@ -1025,7 +1043,7 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
                 b_copy["artifact"] = art_copy
             sanitized_timeline.append(b_copy)
 
-        raw_collected_thoughts = "".join(accumulated_thoughts)
+        raw_collected_thoughts = "" if is_answered_now else "".join(accumulated_thoughts)
         target_saved_id = root_msg_id if can_edit_directly else (str(placeholder_msg.id) if placeholder_msg else str(root_msg_id))
         sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [target_saved_id]
 
@@ -1038,7 +1056,7 @@ async def _execute_retry(interaction: discord.Interaction, message: discord.Mess
             "thoughts": raw_collected_thoughts,
             "formatted_thoughts": None,
             "model": active_model_used,
-            "tool_calls": tool_call_history,
+            "tool_calls": [] if is_answered_now else tool_call_history,
             "attachments": stored_attachments,
             "staged_components": tool_context.staged_components,
             "staged_artifacts": sanitized_artifacts,

@@ -813,7 +813,7 @@ class DiscordStreamDispatcher:
             if gen and gen.get("active_version") != target_active_v:
                 return
 
-        is_single_message_context = bool(self.interaction or self.is_ephemeral)
+        is_single_message_context = bool(self.is_ephemeral or (self.interaction and not self.guild))
 
         async with self.flush_lock:
             try:

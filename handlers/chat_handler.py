@@ -242,7 +242,7 @@ async def extract_message_attachments_raw(message: discord.Message) -> tuple[lis
 
             try:
                 async with session.get(attachment.url) as resp:
-                    if resp.status == 200:
+                    if resp.status_code == 200:
                         raw_data = await resp.read()
                         part = types.Part.from_bytes(data=raw_data, mime_type=mime_type)
                         parts.append(part)
@@ -700,7 +700,8 @@ class ChatHandler:
         response_msg: discord.Message | None = None
         stream_dispatcher = DiscordStreamDispatcher(
             origin_message=origin_msg,
-            interaction=interaction,
+            interaction=interaction if not guild else None,
+            target_channel=channel,
             guild=guild,
             show_reply_button=show_reply
         )
@@ -730,6 +731,7 @@ class ChatHandler:
 
         async def on_answer_now_clicked(inter: discord.Interaction):
             nonlocal response_msg, first_content_received
+            accumulated_thought_buffer.clear()
             answer_now_event.set()
             stop_placeholder_loop.set()
             if placeholder_task and not placeholder_task.done():
@@ -821,11 +823,11 @@ class ChatHandler:
                     elif event_type == "THOUGHT":
                         if not answer_now_event.is_set():
                             await ensure_placeholder_spawned()
-                        accumulated_thought_buffer.append(payload)
-                        if placeholder_view and not answer_now_event.is_set():
-                            placeholder_view.enable_thinking()
-                            placeholder_view.thought_data["thoughts"] = "".join(accumulated_thought_buffer)
-                            await placeholder_view.push_live_update()
+                            accumulated_thought_buffer.append(payload)
+                            if placeholder_view:
+                                placeholder_view.enable_thinking()
+                                placeholder_view.thought_data["thoughts"] = "".join(accumulated_thought_buffer)
+                                await placeholder_view.push_live_update()
 
                     elif event_type == "TOOL_START":
                         if not first_content_received and not answer_now_event.is_set():
@@ -881,9 +883,10 @@ class ChatHandler:
             if placeholder_task and not placeholder_task.done():
                 placeholder_task.cancel()
 
-            final_duration = max(1, int(time.time() - thinking_start_time))
+            is_answered_now = answer_now_event.is_set()
+            final_duration = 0 if is_answered_now else max(1, int(time.time() - thinking_start_time))
             active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
-            has_reasoning = bool(accumulated_thought_buffer or active_tools)
+            has_reasoning = False if is_answered_now else bool(accumulated_thought_buffer or active_tools)
 
             modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
 
@@ -935,7 +938,7 @@ class ChatHandler:
                         b_copy["artifact"] = art_copy
                     sanitized_timeline.append(b_copy)
 
-                raw_collected_thoughts = "".join(accumulated_thought_buffer)
+                raw_collected_thoughts = "" if is_answered_now else "".join(accumulated_thought_buffer)
                 sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(sent_msg.id)]
 
                 has_quiz_in_blocks = any(b.get("type") == "quiz" for b in sanitized_timeline) or is_quiz_turn
@@ -950,7 +953,7 @@ class ChatHandler:
                     "formatted_thoughts": None,
                     "model": active_model_used,
                     "is_quiz": has_quiz_in_blocks,
-                    "tool_calls": tool_call_history,
+                    "tool_calls": [] if is_answered_now else tool_call_history,
                     "attachments": stored_attachments,
                     "staged_components": tool_context.staged_components,
                     "staged_artifacts": sanitized_artifacts,
@@ -1128,13 +1131,8 @@ class ChatHandler:
         async def on_answer_now_clicked(inter: discord.Interaction):
             nonlocal response_msg, first_content_received
             logger.info(f"[Answer Now Triggered] User {inter.user} requested instant response.")
-            
-            try:
-                if not inter.response.is_done():
-                    await inter.response.defer(ephemeral=True)
-            except Exception:
-                pass
 
+            accumulated_thought_buffer.clear()
             answer_now_event.set()
             stop_placeholder_loop.set()
             if placeholder_task and not placeholder_task.done():
@@ -1229,11 +1227,11 @@ class ChatHandler:
                     elif event_type == "THOUGHT":
                         if not answer_now_event.is_set():
                             await ensure_placeholder_spawned()
-                        accumulated_thought_buffer.append(payload)
-                        if placeholder_view and not answer_now_event.is_set():
-                            placeholder_view.enable_thinking()
-                            placeholder_view.thought_data["thoughts"] = "".join(accumulated_thought_buffer)
-                            await placeholder_view.push_live_update()
+                            accumulated_thought_buffer.append(payload)
+                            if placeholder_view:
+                                placeholder_view.enable_thinking()
+                                placeholder_view.thought_data["thoughts"] = "".join(accumulated_thought_buffer)
+                                await placeholder_view.push_live_update()
 
                     elif event_type == "TOOL_START":
                         if not first_content_received and not answer_now_event.is_set():
@@ -1297,9 +1295,10 @@ class ChatHandler:
             if placeholder_task and not placeholder_task.done():
                 placeholder_task.cancel()
 
-            final_duration = max(1, int(time.time() - thinking_start_time))
+            is_answered_now = answer_now_event.is_set()
+            final_duration = 0 if is_answered_now else max(1, int(time.time() - thinking_start_time))
             active_tools = [t for t in tool_call_history if t.get("name") not in ["recall_memories", "search_memories"]]
-            has_reasoning = bool(accumulated_thought_buffer or active_tools)
+            has_reasoning = False if is_answered_now else bool(accumulated_thought_buffer or active_tools)
 
             modals_map = {m["modal_id"]: m for m in tool_context.staged_modals}
 
@@ -1352,7 +1351,7 @@ class ChatHandler:
                         b_copy["artifact"] = art_copy
                     sanitized_timeline.append(b_copy)
 
-                raw_collected_thoughts = "".join(accumulated_thought_buffer)
+                raw_collected_thoughts = "" if is_answered_now else "".join(accumulated_thought_buffer)
                 sent_msg_ids = [str(m.id) for m in stream_dispatcher.sent_messages if m] or [str(sent_msg.id)]
 
                 has_quiz_in_blocks = any(b.get("type") == "quiz" for b in sanitized_timeline) or is_quiz_turn
@@ -1367,7 +1366,7 @@ class ChatHandler:
                     "formatted_thoughts": None,
                     "model": active_model_used,
                     "is_quiz": has_quiz_in_blocks,
-                    "tool_calls": tool_call_history,
+                    "tool_calls": [] if is_answered_now else tool_call_history,
                     "attachments": stored_attachments,
                     "staged_components": tool_context.staged_components,
                     "staged_artifacts": sanitized_artifacts,

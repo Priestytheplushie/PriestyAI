@@ -29,14 +29,15 @@ class RouteDecision(BaseModel):
     )
     is_quiz: bool = Field(
         default=False,
-        description="True ONLY if the user prompt explicitly requests a quiz, exam, trivia, knowledge check, or active recall test. Otherwise False."
+        description="True ONLY if the user prompt explicitly requests an interactive quiz, exam, trivia, knowledge check, or active recall test. Otherwise False."
     )
 
 ROUTER_SYSTEM_INSTRUCTION = """You are the intelligent traffic router and complexity classifier for PriestyAI.
 Analyze the user's message, attached media, and context to select the most optimal model and thinking level.
 
 QUIZ DETECTION:
-- Set is_quiz = true if the user asks for a quiz, test, exam, trivia, knowledge check, or active recall test (e.g. "make a quiz", "test my knowledge", "quiz me on...", "create 10 trivia questions").
+- Set is_quiz = true ONLY if the user explicitly asks for an interactive multiple-choice quiz, trivia, knowledge test, or active recall check (e.g. "make a quiz", "test my knowledge", "quiz me on...", "create 10 trivia questions").
+- STRICT RULE: Do NOT set is_quiz = true for code tests, running scripts, unit tests, code debugging, math evaluations, or prompts with code snippets (e.g. "run this test", "test this code", "run this math test", "unit test").
 - Otherwise set is_quiz = false.
 
 ROUTING HIERARCHY & COMPLEXITY PRINCIPLES:
@@ -80,10 +81,17 @@ class Router:
             "make this 3d", "anime-fy", "pixel art", "show me a picture", "find an image"
         ])
 
-        is_quiz_keyword = any(kw in prompt_lower for kw in [
-            "quiz", "make a quiz", "create a quiz", "test my knowledge",
-            "quiz me", "trivia", "give me a test", "exam on", "test on"
+        is_code_test = any(kw in prompt_lower for kw in [
+            "run this", "test this code", "unit test", "code test", "```", "def ", "function", "import "
         ])
+
+        is_quiz_keyword = (
+            any(kw in prompt_lower for kw in [
+                "quiz", "make a quiz", "create a quiz", "test my knowledge",
+                "quiz me", "trivia", "give me a quiz"
+            ])
+            and not is_code_test
+        )
 
         for router_model in [ROUTER_PRIMARY, ROUTER_FALLBACK]:
             client, key_idx, active_model = client_manager.get_client_for_model(router_model)
@@ -111,7 +119,9 @@ class Router:
                     decision_data = json.loads(response.text)
                     decision = RouteDecision(**decision_data)
                     
-                    if is_quiz_keyword:
+                    if is_code_test:
+                        decision.is_quiz = False
+                    elif is_quiz_keyword:
                         decision.is_quiz = True
 
                     if is_visual_tool_intent and decision.target_model in ["gemini-3.7-flash", "gemini-3.6-flash"]:
@@ -147,5 +157,5 @@ class Router:
                 "Formulating optimal answer"
             ],
             reasoning_summary="Router fallback triggered.",
-            is_quiz=is_quiz_keyword
+            is_quiz=False if is_code_test else is_quiz_keyword
         )

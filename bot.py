@@ -222,7 +222,7 @@ class PriestyBot(discord.Client):
         logger.info("=" * 60)
 
         try:
-            self.application = await self.application_info()
+            app_info = await self.application_info()
             owner = getattr(self.application, "owner", None)
             if isinstance(owner, discord.Team):
                 logger.info(f"[ApplicationInfo] Team: '{owner.name}' | Members: {len(owner.members)} | Owner ID: {owner.owner_user_id}")

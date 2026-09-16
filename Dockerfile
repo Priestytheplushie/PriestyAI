@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ffmpeg \
     build-essential \
+    docker.io \
     && ARCH=$(uname -m) \
     && if [ "$ARCH" = "x86_64" ]; then CF_ARCH="amd64"; \
        elif [ "$ARCH" = "aarch64" ]; then CF_ARCH="arm64"; \

@@ -35,7 +35,8 @@ from handlers.stream_handler import (
     DiscordStreamDispatcher,
     apply_message_parsers,
     build_v2_message_layout,
-    should_show_reply_button
+    should_show_reply_button,
+    extract_text_from_v2_message
 )
 from tools.registry import ToolExecutionContext
 from ui.thought_container import PlaceholderLayoutView
@@ -448,7 +449,8 @@ class ChatHandler:
 
                 is_invoking = "true" if msg.author.id == current_user_id else "false"
                 display_name = getattr(msg.author, "display_name", msg.author.name)
-                safe_content = msg.clean_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                raw_text = extract_text_from_v2_message(msg) if not msg.clean_content.strip() else msg.clean_content
+                safe_content = raw_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 envelope.append(
                     f'    <message id="{msg.id}" user_id="{msg.author.id}" '
                     f'username="{msg.author.name}" display_name="{display_name}" '

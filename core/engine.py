@@ -192,14 +192,11 @@ class ChatEngine:
             return {"user_memories": [], "server_lore": []}
 
     @staticmethod
-    def _is_retryable_error(error_str: str) -> bool:
+    def _is_key_specific_retryable_error(error_str: str) -> bool:
         err_lower = error_str.lower()
-        retryable_keywords = [
-            "429", "503", "500", "502", "504",
-            "unavailable", "overloaded", "resource_exhausted",
-            "timeout", "timed out", "internal server error", "connection reset"
-        ]
-        return any(kw in err_lower for kw in retryable_keywords)
+        is_quota = ("429" in err_lower or "resource_exhausted" in err_lower or "quota" in err_lower)
+        is_cluster_failure = any(kw in err_lower for kw in ["500", "502", "503", "504", "timeout", "timed out", "internal server error", "unavailable", "overloaded"])
+        return is_quota and not is_cluster_failure
 
     @staticmethod
     async def stream_fast_answer(
@@ -296,7 +293,7 @@ class ChatEngine:
                     err_desc = str(e)
                     client_manager.report_error(key_idx, active_model, e)
                     logger.warning(f"Fast stream fail on '{active_model}' (Key #{key_idx}): {err_desc}")
-                    if ChatEngine._is_retryable_error(err_desc):
+                    if ChatEngine._is_key_specific_retryable_error(err_desc):
                         continue
                     break
 
@@ -509,7 +506,7 @@ class ChatEngine:
                         )
 
                         stream_iter = response_stream.__aiter__()
-                        first_chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=18.0)
+                        first_chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=12.0)
 
                         model_parts: list[types.Part] = []
                         tool_calls_to_execute = []
@@ -611,14 +608,14 @@ class ChatEngine:
                     return
 
                 except (asyncio.TimeoutError, Exception) as e:
-                    err_desc = "First token timeout (>18s)" if isinstance(e, asyncio.TimeoutError) else str(e)
+                    err_desc = "First token timeout (>12s)" if isinstance(e, asyncio.TimeoutError) else str(e)
                     client_manager.report_error(key_idx, active_model, Exception(err_desc))
 
-                    if ChatEngine._is_retryable_error(err_desc):
-                        logger.warning(f"[Transient Error on Key #{key_idx}] '{active_model}': {err_desc}. Trying next available key...")
+                    if ChatEngine._is_key_specific_retryable_error(err_desc):
+                        logger.warning(f"[Rate Limit / Quota on Key #{key_idx}] '{active_model}': {err_desc}. Trying next available key...")
                         continue
                     else:
-                        logger.warning(f"[Fatal / Unsupported Config] '{active_model}': {err_desc}. Cascading to next candidate...")
+                        logger.warning(f"[Cluster Error / Timeout on '{active_model}'] (Key #{key_idx}): {err_desc}. Cascading immediately to next candidate...")
                         break
 
             tool_context.staged_components.clear()

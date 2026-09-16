@@ -18,6 +18,7 @@ from discord.ui import (
 from tools.registry import tool_registry, ToolExecutionContext
 from core.poll_manager import poll_manager
 from core.branch_manager import branch_manager
+from handlers.stream_handler import extract_text_from_v2_message
 
 logger = logging.getLogger("PriestyAI.DiscordTools")
 
@@ -275,11 +276,12 @@ async def read_message_history(limit: int = 10, channel_id: str = "", context: T
         raw_msgs = [m async for m in target_channel.history(limit=min(limit, 30))]
         raw_msgs.reverse()
         for m in raw_msgs:
+            raw_text = extract_text_from_v2_message(m) if not m.clean_content.strip() else m.clean_content
             messages.append({
                 "id": str(m.id),
                 "author": m.author.name,
                 "author_id": str(m.author.id),
-                "content": m.clean_content,
+                "content": raw_text,
                 "timestamp": m.created_at.isoformat()
             })
         return {
@@ -303,11 +305,12 @@ async def search_channel_history(query: str = "", limit: int = 25, channel_id: s
     q_lower = query.lower().strip()
     try:
         async for m in target_channel.history(limit=min(limit, 50)):
-            if not q_lower or q_lower in m.clean_content.lower():
+            raw_text = extract_text_from_v2_message(m) if not m.clean_content.strip() else m.clean_content
+            if not q_lower or q_lower in raw_text.lower():
                 matched.append({
                     "id": str(m.id),
                     "author": m.author.name,
-                    "content": m.clean_content,
+                    "content": raw_text,
                     "timestamp": m.created_at.isoformat()
                 })
         return {

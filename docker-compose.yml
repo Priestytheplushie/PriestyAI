@@ -3,10 +3,11 @@ services:
     build: .
     container_name: priestyai_bot
     restart: unless-stopped
+    user: "0:0"
     env_file:
       - .env
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - //var/run/docker.sock:/var/run/docker.sock
       - ./priestyai.db:/app/priestyai.db
     depends_on:
       - searxng

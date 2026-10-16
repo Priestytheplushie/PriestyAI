@@ -45,6 +45,7 @@ from ui.onboarding_views import WelcomeOnboardingCardView, BannedUserNoticeView
 logger = logging.getLogger("PriestyAI.ChatHandler")
 
 MAX_INLINE_FILE_SIZE = 20 * 1024 * 1024
+MAX_HISTORY_ATTACHMENTS = 4
 
 @asynccontextmanager
 async def safe_typing(target: discord.Interaction | discord.abc.Messageable | discord.Message | None):
@@ -389,8 +390,16 @@ class ChatHandler:
         lines.append("</server_emojis>")
         return "\n".join(lines)
 
-    @staticmethod
-    async def build_context_xml(channel: discord.abc.Messageable, current_user_id: int, guild: discord.Guild | None = None, author: discord.Member | discord.User | None = None, limit: int = 8) -> str:
+    @classmethod
+    async def build_context_xml(
+        cls,
+        channel: discord.abc.Messageable,
+        current_user_id: int,
+        guild: discord.Guild | None = None,
+        author: discord.Member | discord.User | None = None,
+        limit: int = 8,
+        exclude_message_ids: set[int] | None = None
+    ) -> tuple[str, list[types.Part], bytes | None]:
         envelope = ['<context>']
 
         now_utc = datetime.now(timezone.utc)
@@ -409,7 +418,7 @@ class ChatHandler:
                 f'  </server_info>'
             )
 
-        emojis_xml = ChatHandler.extract_server_emojis(guild)
+        emojis_xml = cls.extract_server_emojis(guild)
         if emojis_xml:
             envelope.append(f"  {emojis_xml}")
 
@@ -438,32 +447,69 @@ class ChatHandler:
                     envelope.append(f'    <artifact identifier="{fn}" title="{title}" version="{v_num}" type="single_file">\n{safe_content}\n    </artifact>')
             envelope.append("  </active_artifacts>")
 
+        history_attachment_parts: list[types.Part] = []
+        latest_history_image_bytes: bytes | None = None
+        excluded = exclude_message_ids or set()
+
         try:
             raw_history = [msg async for msg in channel.history(limit=limit)]
             raw_history.reverse()
 
             envelope.append("  <chat_history>")
-            for msg in raw_history:
-                if msg.author.bot and (LOADING_EMOJI in msg.content):
-                    continue
 
-                is_invoking = "true" if msg.author.id == current_user_id else "false"
-                display_name = getattr(msg.author, "display_name", msg.author.name)
-                raw_text = extract_text_from_v2_message(msg) if not msg.clean_content.strip() else msg.clean_content
-                safe_content = raw_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                envelope.append(
-                    f'    <message id="{msg.id}" user_id="{msg.author.id}" '
-                    f'username="{msg.author.name}" display_name="{display_name}" '
-                    f'is_invoking_user="{is_invoking}" timestamp="{msg.created_at.isoformat()}">\n'
-                    f'      {safe_content}\n'
-                    f'    </message>'
-                )
+            async with aiohttp.ClientSession() as session:
+                for msg in raw_history:
+                    if msg.author.bot and (LOADING_EMOJI in msg.content):
+                        continue
+
+                    is_invoking = "true" if msg.author.id == current_user_id else "false"
+                    display_name = getattr(msg.author, "display_name", msg.author.name)
+                    raw_text = extract_text_from_v2_message(msg) if not msg.clean_content.strip() else msg.clean_content
+                    safe_content = raw_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+                    attachment_tags = []
+                    if msg.attachments:
+                        for att in msg.attachments:
+                            att_mime = att.content_type or mimetypes.guess_type(att.filename)[0] or "application/octet-stream"
+                            att_mime = att_mime.split(";")[0].strip()
+                            attachment_tags.append(
+                                f'      <attachment filename="{att.filename}" mime_type="{att_mime}" id="{att.id}" />'
+                            )
+
+                            if msg.id not in excluded and len(history_attachment_parts) < (MAX_HISTORY_ATTACHMENTS * 2):
+                                is_supported = (
+                                    att_mime.startswith("image/")
+                                    or att_mime == "application/pdf"
+                                    or att_mime.startswith("text/")
+                                    or att_mime.startswith("audio/")
+                                )
+                                if is_supported and att.size <= MAX_INLINE_FILE_SIZE:
+                                    try:
+                                        async with session.get(att.url) as resp:
+                                            if resp.status_code == 200:
+                                                data = await resp.read()
+                                                label_text = f"[Past message #{msg.id} attachment from {display_name} ({att.filename})]:"
+                                                history_attachment_parts.append(types.Part(text=label_text))
+                                                history_attachment_parts.append(types.Part.from_bytes(data=data, mime_type=att_mime))
+                                                if att_mime.startswith("image/"):
+                                                    latest_history_image_bytes = data
+                                    except Exception as ex:
+                                        logger.debug(f"Failed to fetch past attachment {att.filename}: {ex}")
+
+                    att_block = ("\n" + "\n".join(attachment_tags)) if attachment_tags else ""
+                    envelope.append(
+                        f'    <message id="{msg.id}" user_id="{msg.author.id}" '
+                        f'username="{msg.author.name}" display_name="{display_name}" '
+                        f'is_invoking_user="{is_invoking}" timestamp="{msg.created_at.isoformat()}">\n'
+                        f'      {safe_content}{att_block}\n'
+                        f'    </message>'
+                    )
             envelope.append("  </chat_history>")
         except Exception as e:
             logger.warning(f"Failed to fetch channel history: {e}")
 
         envelope.append('</context>')
-        return "\n".join(envelope)
+        return "\n".join(envelope), history_attachment_parts, latest_history_image_bytes
 
     @classmethod
     async def handle_interaction_event(
@@ -544,19 +590,33 @@ class ChatHandler:
             guild=inter.guild,
             show_reply_button=show_reply
         )
+        
+        context_xml, history_parts, latest_img_bytes = await cls.build_context_xml(
+            channel=inter.channel,
+            current_user_id=inter.user.id,
+            guild=inter.guild,
+            author=inter.user
+        )
+
         sub_tool_ctx = ToolExecutionContext(
             channel=inter.channel,
             guild=inter.guild,
             author=inter.user,
-            bot=bot
+            bot=bot,
+            input_image_bytes=latest_img_bytes
         )
         sub_tool_ctx.message = inter.message
         artifact_parser = ArtifactStreamParser(sub_dispatcher, sub_tool_ctx, channel_id=getattr(inter.channel, "id", "global"))
 
+        multimodal_inter_prompt: list[Any] = []
+        if history_parts:
+            multimodal_inter_prompt.extend(history_parts)
+        multimodal_inter_prompt.append(interaction_prompt)
+
         async with safe_typing(inter):
             async for sub_type, sub_payload in ChatEngine.stream_chat(
-                prompt=interaction_prompt,
-                context_xml=await cls.build_context_xml(inter.channel, inter.user.id, inter.guild, inter.user),
+                prompt=multimodal_inter_prompt,
+                context_xml=context_xml,
                 bot_user_id=bot.user.id,
                 tool_context=sub_tool_ctx
             ):
@@ -689,15 +749,28 @@ class ChatHandler:
 
         logger.info(f"[Follow-up Triggered] User {user} ({user.id}) dispatched prompt: '{prompt_text[:60]}'")
 
+        excluded_ids = {origin_msg.id} if origin_msg else set()
+        context_xml, history_parts, latest_img_bytes = await cls.build_context_xml(
+            channel=channel,
+            current_user_id=user.id,
+            guild=guild,
+            author=user,
+            exclude_message_ids=excluded_ids
+        )
+
         tool_context = ToolExecutionContext(
             channel=channel,
             guild=guild,
             author=user,
-            bot=bot
+            bot=bot,
+            input_image_bytes=latest_img_bytes
         )
         tool_context.message = origin_msg
 
-        context_xml = await cls.build_context_xml(channel=channel, current_user_id=user.id, guild=guild, author=user)
+        multimodal_prompt: list[Any] = []
+        if history_parts:
+            multimodal_prompt.extend(history_parts)
+        multimodal_prompt.append(prompt_text)
 
         response_msg: discord.Message | None = None
         stream_dispatcher = DiscordStreamDispatcher(
@@ -778,7 +851,7 @@ class ChatHandler:
         try:
             async with safe_typing(interaction):
                 async for event_type, payload in ChatEngine.stream_chat(
-                    prompt=prompt_text,
+                    prompt=multimodal_prompt,
                     context_xml=context_xml,
                     bot_user_id=bot.user.id,
                     tool_context=tool_context,
@@ -971,7 +1044,7 @@ class ChatHandler:
                     guild_id=guild.id if guild else None,
                     author_id=user.id,
                     prompt_text=prompt_text,
-                    attachments=[],
+                    attachments=stored_attachments,
                     context_xml=context_xml,
                     initial_version_data=initial_v_data
                 )
@@ -1048,8 +1121,22 @@ class ChatHandler:
         clean_prompt = clean_prompt.replace(f"@{bot.user.name}", "").strip()
 
         attachment_parts, raw_image_bytes = await extract_message_attachments_raw(message)
+        
+        excluded_ids = {message.id}
+        if message.reference and message.reference.message_id:
+            excluded_ids.add(message.reference.message_id)
+
+        context_xml, history_parts, latest_history_image_bytes = await cls.build_context_xml(
+            channel=message.channel,
+            current_user_id=message.author.id,
+            guild=message.guild,
+            author=message.author,
+            exclude_message_ids=excluded_ids
+        )
+
         if not clean_prompt:
-            clean_prompt = "Please analyze the attached content." if attachment_parts else "Hello!"
+            has_media = bool(attachment_parts or history_parts)
+            clean_prompt = "Please analyze the attached content." if has_media else "Hello!"
 
         is_flagged, is_zero_tolerance, flagged_cats, score = await check_moderation(clean_prompt, raw_image_bytes)
         if is_flagged:
@@ -1079,6 +1166,8 @@ class ChatHandler:
         logger.info(f"Incoming message from {message.author} ({message.author.id}): {clean_prompt[:60]}")
 
         multimodal_prompt: list[Any] = []
+        if history_parts:
+            multimodal_prompt.extend(history_parts)
         if attachment_parts:
             multimodal_prompt.extend(attachment_parts)
         multimodal_prompt.append(clean_prompt)
@@ -1088,11 +1177,9 @@ class ChatHandler:
             guild=message.guild,
             author=message.author,
             bot=bot,
-            input_image_bytes=raw_image_bytes[0] if raw_image_bytes else None
+            input_image_bytes=raw_image_bytes[0] if raw_image_bytes else latest_history_image_bytes
         )
         tool_context.message = message
-
-        context_xml = await cls.build_context_xml(channel=message.channel, current_user_id=message.author.id, guild=message.guild, author=message.author)
 
         show_reply = should_show_reply_button(
             bot=bot,
@@ -1308,7 +1395,6 @@ class ChatHandler:
                 await cls.handle_interaction_event(bot, inter, ev_type, data, modals_map=modals_map)
 
             stored_attachments: list[dict[str, Any]] = []
-
             for raw_att in stream_dispatcher.raw_attachment_buffers:
                 b64 = base64.b64encode(raw_att["bytes"]).decode("utf-8")
                 stored_attachments.append({"filename": raw_att["filename"], "data_b64": b64})
@@ -1384,7 +1470,7 @@ class ChatHandler:
                     guild_id=message.guild.id if message.guild else None,
                     author_id=message.author.id,
                     prompt_text=clean_prompt,
-                    attachments=[],
+                    attachments=stored_attachments,
                     context_xml=context_xml,
                     initial_version_data=initial_v_data
                 )

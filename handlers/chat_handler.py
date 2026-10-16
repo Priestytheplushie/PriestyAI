@@ -66,6 +66,37 @@ async def safe_typing(target: discord.Interaction | discord.abc.Messageable | di
             logger.debug(f"Typing indicator suppressed: {ex}")
     yield
 
+def resolve_attachment_mime_type(attachment: discord.Attachment) -> str:
+    mime_type = attachment.content_type
+    if not mime_type or mime_type == "application/octet-stream":
+        guessed, _ = mimetypes.guess_type(attachment.filename)
+        mime_type = guessed or "application/octet-stream"
+
+    mime_type = mime_type.split(";")[0].strip().lower()
+
+    if mime_type == "application/octet-stream" or not mime_type:
+        ext = attachment.filename.lower().split(".")[-1] if "." in attachment.filename else ""
+        mime_map = {
+            "webp": "image/webp",
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "gif": "image/gif",
+            "bmp": "image/bmp",
+            "svg": "image/svg+xml",
+            "pdf": "application/pdf",
+            "mp3": "audio/mpeg",
+            "wav": "audio/wav",
+            "ogg": "audio/ogg",
+            "txt": "text/plain",
+            "py": "text/plain",
+            "json": "application/json",
+            "csv": "text/csv"
+        }
+        mime_type = mime_map.get(ext, "application/octet-stream")
+
+    return mime_type
+
 def resolve_single_entity(item: Any, inter: discord.Interaction, field_spec: dict[str, Any] | None = None) -> Any:
     if not isinstance(item, (str, int)):
         return item
@@ -230,28 +261,23 @@ async def extract_message_attachments_raw(message: discord.Message) -> tuple[lis
     if not target_attachments:
         return parts, raw_image_bytes
 
-    async with aiohttp.ClientSession() as session:
-        for attachment in target_attachments:
-            if attachment.size > MAX_INLINE_FILE_SIZE:
-                continue
+    for attachment in target_attachments:
+        if attachment.size > MAX_INLINE_FILE_SIZE:
+            logger.warning(f"Attachment {attachment.filename} exceeds {MAX_INLINE_FILE_SIZE} bytes. Skipping.")
+            continue
 
-            mime_type = attachment.content_type
-            if not mime_type or mime_type == "application/octet-stream":
-                mime_type, _ = mimetypes.guess_type(attachment.filename)
-                mime_type = mime_type or "application/octet-stream"
+        mime_type = resolve_attachment_mime_type(attachment)
 
-            mime_type = mime_type.split(";")[0].strip()
-
-            try:
-                async with session.get(attachment.url) as resp:
-                    if resp.status_code == 200:
-                        raw_data = await resp.read()
-                        part = types.Part.from_bytes(data=raw_data, mime_type=mime_type)
-                        parts.append(part)
-                        if mime_type.startswith("image/"):
-                            raw_image_bytes.append(raw_data)
-            except Exception as e:
-                logger.warning(f"Failed to download attachment {attachment.filename}: {e}")
+        try:
+            raw_data = await attachment.read()
+            if raw_data:
+                part = types.Part.from_bytes(data=raw_data, mime_type=mime_type)
+                parts.append(part)
+                if mime_type.startswith("image/"):
+                    raw_image_bytes.append(raw_data)
+                logger.info(f"[Attachments] Loaded current attachment '{attachment.filename}' ({len(raw_data)} bytes, mime={mime_type})")
+        except Exception as e:
+            logger.warning(f"Failed to read attachment {attachment.filename} via discord.py: {e}")
 
     return parts, raw_image_bytes
 
@@ -457,53 +483,51 @@ class ChatHandler:
 
             envelope.append("  <chat_history>")
 
-            async with aiohttp.ClientSession() as session:
-                for msg in raw_history:
-                    if msg.author.bot and (LOADING_EMOJI in msg.content):
-                        continue
+            for msg in raw_history:
+                if msg.author.bot and (LOADING_EMOJI in msg.content):
+                    continue
 
-                    is_invoking = "true" if msg.author.id == current_user_id else "false"
-                    display_name = getattr(msg.author, "display_name", msg.author.name)
-                    raw_text = extract_text_from_v2_message(msg) if not msg.clean_content.strip() else msg.clean_content
-                    safe_content = raw_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                is_invoking = "true" if msg.author.id == current_user_id else "false"
+                display_name = getattr(msg.author, "display_name", msg.author.name)
+                raw_text = extract_text_from_v2_message(msg) if not msg.clean_content.strip() else msg.clean_content
+                safe_content = raw_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-                    attachment_tags = []
-                    if msg.attachments:
-                        for att in msg.attachments:
-                            att_mime = att.content_type or mimetypes.guess_type(att.filename)[0] or "application/octet-stream"
-                            att_mime = att_mime.split(";")[0].strip()
-                            attachment_tags.append(
-                                f'      <attachment filename="{att.filename}" mime_type="{att_mime}" id="{att.id}" />'
+                attachment_tags = []
+                if msg.attachments:
+                    for att in msg.attachments:
+                        att_mime = resolve_attachment_mime_type(att)
+                        attachment_tags.append(
+                            f'      <attachment filename="{att.filename}" mime_type="{att_mime}" id="{att.id}" />'
+                        )
+
+                        if msg.id not in excluded and len(history_attachment_parts) < (MAX_HISTORY_ATTACHMENTS * 2):
+                            is_supported = (
+                                att_mime.startswith("image/")
+                                or att_mime == "application/pdf"
+                                or att_mime.startswith("text/")
+                                or att_mime.startswith("audio/")
                             )
+                            if is_supported and att.size <= MAX_INLINE_FILE_SIZE:
+                                try:
+                                    data = await att.read()
+                                    if data:
+                                        label_text = f"[Past message #{msg.id} attachment from {display_name} ({att.filename})]:"
+                                        history_attachment_parts.append(types.Part(text=label_text))
+                                        history_attachment_parts.append(types.Part.from_bytes(data=data, mime_type=att_mime))
+                                        if att_mime.startswith("image/"):
+                                            latest_history_image_bytes = data
+                                        logger.info(f"[History Attachments] Read #{msg.id} attachment '{att.filename}' ({len(data)} bytes, mime={att_mime})")
+                                except Exception as ex:
+                                    logger.debug(f"Failed to fetch past attachment {att.filename}: {ex}")
 
-                            if msg.id not in excluded and len(history_attachment_parts) < (MAX_HISTORY_ATTACHMENTS * 2):
-                                is_supported = (
-                                    att_mime.startswith("image/")
-                                    or att_mime == "application/pdf"
-                                    or att_mime.startswith("text/")
-                                    or att_mime.startswith("audio/")
-                                )
-                                if is_supported and att.size <= MAX_INLINE_FILE_SIZE:
-                                    try:
-                                        async with session.get(att.url) as resp:
-                                            if resp.status_code == 200:
-                                                data = await resp.read()
-                                                label_text = f"[Past message #{msg.id} attachment from {display_name} ({att.filename})]:"
-                                                history_attachment_parts.append(types.Part(text=label_text))
-                                                history_attachment_parts.append(types.Part.from_bytes(data=data, mime_type=att_mime))
-                                                if att_mime.startswith("image/"):
-                                                    latest_history_image_bytes = data
-                                    except Exception as ex:
-                                        logger.debug(f"Failed to fetch past attachment {att.filename}: {ex}")
-
-                    att_block = ("\n" + "\n".join(attachment_tags)) if attachment_tags else ""
-                    envelope.append(
-                        f'    <message id="{msg.id}" user_id="{msg.author.id}" '
-                        f'username="{msg.author.name}" display_name="{display_name}" '
-                        f'is_invoking_user="{is_invoking}" timestamp="{msg.created_at.isoformat()}">\n'
-                        f'      {safe_content}{att_block}\n'
-                        f'    </message>'
-                    )
+                att_block = ("\n" + "\n".join(attachment_tags)) if attachment_tags else ""
+                envelope.append(
+                    f'    <message id="{msg.id}" user_id="{msg.author.id}" '
+                    f'username="{msg.author.name}" display_name="{display_name}" '
+                    f'is_invoking_user="{is_invoking}" timestamp="{msg.created_at.isoformat()}">\n'
+                    f'      {safe_content}{att_block}\n'
+                    f'    </message>'
+                )
             envelope.append("  </chat_history>")
         except Exception as e:
             logger.warning(f"Failed to fetch channel history: {e}")
